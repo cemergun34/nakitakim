@@ -7,6 +7,13 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
+# QWebEngineView macOS'ta QApplication'dan ÖNCE initialize edilmeli
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401 — import tetikler
+    import PyQt6.QtWebEngineCore  # noqa: F401
+except ImportError:
+    pass  # WebEngine yoksa normal çalışmaya devam et
+
 from db.database import initialize_db, db_exists
 from ui.screens.login_screen import LoginScreen
 from ui.screens.setup_dialog import SetupDialog
@@ -14,12 +21,21 @@ from ui.main_window import MainWindow
 
 
 def main():
+    # QWebEngineView için zorunlu — QApplication'dan önce çağrılmalı
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+
     app = QApplication(sys.argv)
     app.setApplicationName("IQ Finans")
     app.setOrganizationName("FPPRO")
 
-    # Varsayılan font
-    font = QFont("Segoe UI", 9)
+    # Varsayılan font — platforma göre sistem fontunu seç
+    import sys as _sys
+    if _sys.platform == "darwin":
+        font = QFont(".AppleSystemUIFont", 13)   # macOS: SF Pro / San Francisco
+    elif _sys.platform == "win32":
+        font = QFont("Segoe UI", 9)              # Windows
+    else:
+        font = QFont("Ubuntu", 10)               # Linux
     app.setFont(font)
 
     # Yüksek DPI desteği (PyQt6'da otomatik)

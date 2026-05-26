@@ -15,7 +15,66 @@ from PyQt6.QtGui import QFont, QColor, QBrush, QPainter, QLinearGradient
 
 from ui.theme import COLORS, CARD_RADIUS
 from utils.format import fmt_para
+import tempfile
+import os
+import http.server
+import socketserver
+import threading
+import webbrowser
+import re
 
+# ─── SORTABLE TABLE ITEM ──────────────────────────────────────────────────────
+
+class SortableTableWidgetItem(QTableWidgetItem):
+    """Numerik veya tarihsel değerleri doğru sıralamak için özel tablo hücresi."""
+    def __init__(self, text, sort_val):
+        super().__init__(text)
+        self.sort_val = sort_val
+
+    def __lt__(self, other):
+        if isinstance(other, SortableTableWidgetItem):
+            try:
+                return self.sort_val < other.sort_val
+            except TypeError:
+                return str(self.sort_val) < str(other.sort_val)
+        return super().__lt__(other)
+
+# ─── GLOBAL EFATURA PREVIEW HTTP SUNUCUSU ───────────────────────────────────
+
+class DetayGlobalServer:
+    """E-Fatura XML + XSLT dosyalarını CORS engelleri olmadan sunan hafif yerel HTTP sunucusu."""
+    _server_thread = None
+    _server_port = None
+    _temp_dir = None
+    
+    @classmethod
+    def get_server_url(cls, filename: str) -> tuple[str, str]:
+        if cls._server_thread is None:
+            cls._temp_dir = tempfile.mkdtemp(prefix="efatura_global_")
+            
+            import socket
+            s = socket.socket()
+            s.bind(('', 0))
+            cls._server_port = s.getsockname()[1]
+            s.close()
+            
+            class Handler(http.server.SimpleHTTPRequestHandler):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, directory=cls._temp_dir, **kwargs)
+                def log_message(self, format, *args):
+                    pass
+                    
+            def run_server():
+                try:
+                    with socketserver.TCPServer(("", cls._server_port), Handler) as httpd:
+                        httpd.serve_forever()
+                except Exception:
+                    pass
+                    
+            cls._server_thread = threading.Thread(target=run_server, daemon=True)
+            cls._server_thread.start()
+            
+        return f"http://localhost:{cls._server_port}/{filename}", cls._temp_dir
 
 # ─── KPI DETAY KARTI ──────────────────────────────────────────────────────────
 
@@ -168,8 +227,11 @@ class IslemTablosu(QTableWidget):
         cols = self.KOLON_SETLERI.get(tablo_tipi, self.KOLON_SETLERI["hareketler"])
         self.setColumnCount(len(cols))
         self.setHorizontalHeaderLabels([c[0] for c in cols])
+        self.setSortingEnabled(True)
+        self.cellClicked.connect(self._on_cell_clicked)
 
     def load_rows(self, rows: list[dict]):
+        self.setSortingEnabled(False)
         cols = self.KOLON_SETLERI.get(self._tablo_tipi, self.KOLON_SETLERI["hareketler"])
         self.setRowCount(len(rows))
         PARA_COLS = {"tutar", "gelir", "gider", "toplam"}
@@ -183,15 +245,263 @@ class IslemTablosu(QTableWidget):
                         text = str(val) if val is not None else "-"
                 else:
                     text = str(val) if val is not None else "-"
-                item = QTableWidgetItem(text)
+
+                # Sıralama değeri oluştur
+                if key in PARA_COLS:
+                    try:
+                        sort_val = float(val) if val is not None else 0.0
+                    except Exception:
+                        sort_val = 0.0
+                elif key == "tarih" and val:
+                    import datetime as dt
+                    try:
+                        sort_val = dt.datetime.strptime(str(val).strip(), "%Y-%m-%d")
+                    except Exception:
+                        try:
+                            sort_val = dt.datetime.strptime(str(val).strip(), "%d.%m.%Y")
+                        except Exception:
+                            sort_val = str(val)
+                else:
+                    sort_val = str(val).lower() if val is not None else ""
+
+                item = SortableTableWidgetItem(text, sort_val)
+
                 if key in PARA_COLS:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     if key in ("gelir", "tutar") and val and float(val) > 0:
                         item.setForeground(QBrush(QColor("#059669")))
                     elif key == "gider" and val and float(val) > 0:
                         item.setForeground(QBrush(QColor("#DC2626")))
+                
+                # Fatura No link özelliği
+                if key in ("faturano", "faturaNo") and val and val != "-":
+                    item.setForeground(QBrush(QColor("#2563EB")))
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
+                    item.setToolTip("E-Fatura Ön İzlemesini Görmek İçin Tıklayın")
+                    item.setData(Qt.ItemDataRole.UserRole, row)
+
                 self.setItem(r_idx, c_idx, item)
         self.resizeRowsToContents()
+        self.setSortingEnabled(True)
+
+    def _on_cell_clicked(self, row_idx, col_idx):
+        cols = self.KOLON_SETLERI.get(self._tablo_tipi, [])
+        if col_idx < len(cols):
+            _, key = cols[col_idx]
+            if key in ("faturano", "faturaNo"):
+                item = self.item(row_idx, col_idx)
+                if item:
+                    row_data = item.data(Qt.ItemDataRole.UserRole)
+                    if row_data:
+                        self._show_fatura_preview(row_data)
+
+    def _show_fatura_preview(self, row_data):
+        """
+        XSLT transform ile orijinal e-fatura görünümünü
+        QWebEngineView (Chromium motoru) içinde gösterir.
+        """
+        import os, base64, tempfile
+        import xml.etree.ElementTree as ET
+        from PyQt6.QtWidgets import (
+            QMessageBox, QDialog, QVBoxLayout, QHBoxLayout,
+            QLabel, QPushButton
+        )
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+
+        xml_path  = row_data.get("xml_dosya")
+        fatura_no = row_data.get("faturano") or row_data.get("faturaNo") or "?"
+
+        # ── 1. Dosya kontrolü ────────────────────────────────────────────────
+        if not xml_path or not os.path.exists(str(xml_path)):
+            QMessageBox.information(
+                self,
+                "Fatura Dosyası Yok",
+                f"Bu fatura ({fatura_no}) sisteme XML olarak yüklenmemiş.\n"
+                "Yalnızca XML ile aktarılan faturalar önizlenebilir."
+            )
+            return
+
+        # ── 2. XML oku ───────────────────────────────────────────────────────
+        try:
+            with open(xml_path, "rb") as fh:
+                xml_bytes = fh.read()
+        except Exception as exc:
+            QMessageBox.critical(self, "Hata", f"XML okunamadı:\n{exc}")
+            return
+
+        # ── 3. XSLT bul + dönüştür ──────────────────────────────────────────
+        html_bytes = None
+        xslt_filename = "style.xslt"
+        try:
+            from lxml import etree as let
+            _NS = {
+                "cac": "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2",
+                "cbc": "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2",
+            }
+            xml_root = let.fromstring(xml_bytes)
+            hits = xml_root.xpath(
+                ".//cac:AdditionalDocumentReference"
+                "[cbc:DocumentType=\'XSLT\']"
+                "/cac:Attachment/cbc:EmbeddedDocumentBinaryObject",
+                namespaces=_NS,
+            )
+            if hits and hits[0].text:
+                xslt_raw  = base64.b64decode(hits[0].text.strip())
+                xslt_root = let.fromstring(xslt_raw)
+                transform = let.XSLT(xslt_root)
+                result    = transform(xml_root)
+                html_bytes = bytes(result)
+                # XSLT dosya adını da al (href olarak kullanacağız)
+                fname = hits[0].attrib.get("filename", "style.xslt")
+                xslt_filename = fname if fname else "style.xslt"
+        except Exception as exc:
+            print(f"[EFatura] XSLT dönüşüm hatası: {exc}")
+
+        # ── 4. Fallback: XSLT yoksa kendi HTML şablonumuzu yaz ──────────────
+        if not html_bytes:
+            NS = {
+                "cac": "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2",
+                "cbc": "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2",
+            }
+            root = ET.fromstring(xml_bytes)
+
+            def tx(el, tag, ns="cbc"):
+                e = el.find(f"{ns}:{tag}", NS) if el is not None else None
+                return (e.text or "").strip() if e is not None else ""
+
+            fno   = tx(root, "ID") or fatura_no
+            tarih = tx(root, "IssueDate")
+
+            sup  = root.find("cac:AccountingSupplierParty/cac:Party", NS)
+            pn   = sup.find("cac:PartyName", NS) if sup else None
+            sup_unvan = tx(pn, "Name") if pn else ""
+            sup_vkn = ""
+            if sup:
+                for pid in sup.findall("cac:PartyIdentification", NS):
+                    ie = pid.find("cbc:ID", NS)
+                    if ie is not None and ie.attrib.get("schemeID") == "VKN":
+                        sup_vkn = (ie.text or "").strip()
+
+            cus  = root.find("cac:AccountingCustomerParty/cac:Party", NS)
+            pnc  = cus.find("cac:PartyName", NS) if cus else None
+            cus_unvan = tx(pnc, "Name") if pnc else ""
+            cus_vkn = ""
+            if cus:
+                for pid in cus.findall("cac:PartyIdentification", NS):
+                    ie = pid.find("cbc:ID", NS)
+                    if ie is not None and ie.attrib.get("schemeID") == "VKN":
+                        cus_vkn = (ie.text or "").strip()
+
+            lmt     = root.find("cac:LegalMonetaryTotal", NS)
+            payable = tx(lmt, "PayableAmount")
+
+            def fn(v):
+                try:    return f"{float(v):,.2f} TL"
+                except: return v or "-"
+
+            rows_html = ""
+            for i, line in enumerate(root.findall("cac:InvoiceLine", NS)):
+                item  = line.find("cac:Item", NS)
+                urun  = tx(item, "Name") if item else "-"
+                qty   = tx(line, "InvoicedQuantity")
+                price = line.find("cac:Price", NS)
+                bp    = tx(price, "PriceAmount") if price else ""
+                le    = tx(line, "LineExtensionAmount")
+                bg    = "#ffffff" if i % 2 == 0 else "#f8faff"
+                rows_html += (
+                    f"<tr style=\'background:{bg}\'>"
+                    f"<td style=\'padding:8px\'>{urun}</td>"
+                    f"<td style=\'padding:8px;text-align:center\'>{qty}</td>"
+                    f"<td style=\'padding:8px;text-align:right\'>{fn(bp)}</td>"
+                    f"<td style=\'padding:8px;text-align:right;font-weight:bold\'>{fn(le)}</td>"
+                    f"</tr>"
+                )
+
+            html_str = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><style>
+body{{font-family:Arial,sans-serif;font-size:13px;color:#1f2937;background:#f0f4ff;margin:0;padding:20px}}
+.wrap{{max-width:900px;margin:0 auto}}
+.card{{background:white;border-radius:8px;padding:20px;margin-bottom:14px;border:1px solid #e5e7eb}}
+h1{{font-size:17px;color:#1e3a8a;margin:0 0 6px}} h2{{font-size:13px;color:#374151;margin:10px 0 6px;border-bottom:1px solid #e5e7eb;padding-bottom:4px}}
+.label{{font-size:10px;color:#6b7280;text-transform:uppercase;font-weight:700}}
+.val{{font-size:13px;margin-top:2px}}
+.two{{display:flex;gap:20px}}.two>div{{flex:1}}
+table{{width:100%;border-collapse:collapse}}
+th{{background:#1e3a8a;color:white;padding:8px;text-align:left;font-size:11px}}
+.total{{font-size:15px;font-weight:700;color:#059669;text-align:right;padding:10px 0}}
+</style></head><body><div class="wrap">
+<div class="card"><h1>Fatura No: {fno}</h1>
+<div class="two">
+  <div><div class="label">Tarih</div><div class="val">{tarih}</div></div>
+  <div><div class="label">Tedarikçi</div><div class="val"><b>{sup_unvan}</b> (VKN: {sup_vkn})</div></div>
+  <div><div class="label">Alıcı</div><div class="val"><b>{cus_unvan}</b> (VKN: {cus_vkn})</div></div>
+</div></div>
+<div class="card"><h2>Kalemler</h2>
+<table><tr><th>Açıklama</th><th>Miktar</th><th style="text-align:right">Birim Fiyat</th><th style="text-align:right">Toplam</th></tr>
+{rows_html}</table>
+<div class="total">Ödenecek: {fn(payable)}</div>
+</div></div></body></html>"""
+            html_bytes = html_str.encode("utf-8")
+
+        # ── 5. Geçici dizine yaz (yerel dosya sistemi üzerinden aç) ─────────
+        tmp_dir  = tempfile.mkdtemp(prefix="efatura_preview_")
+        html_file = os.path.join(tmp_dir, "fatura.html")
+        with open(html_file, "wb") as fh:
+            fh.write(html_bytes)
+
+        # ── 6. QWebEngineView ile QDialog içinde göster ──────────────────────
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"E-Fatura Ön İzleme  —  {fatura_no}")
+        dialog.setMinimumSize(1000, 820)
+        dialog.resize(1100, 900)
+        dialog.setStyleSheet("background:#1e3a8a;")
+
+        dlg_layout = QVBoxLayout(dialog)
+        dlg_layout.setContentsMargins(0, 0, 0, 0)
+        dlg_layout.setSpacing(0)
+
+        # Header
+        hdr = QLabel()
+        hdr.setFixedHeight(48)
+        hdr.setText(f"  📄  E-Fatura Ön İzleme  —  {fatura_no}")
+        hdr.setStyleSheet(
+            "QLabel { background:#2563EB; color:white; font-size:13px; font-weight:700; padding-left:12px; }"
+        )
+
+        close_btn = QPushButton("✕  Kapat")
+        close_btn.setFixedSize(100, 34)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(
+            "QPushButton{background:rgba(255,255,255,.22);color:white;"
+            "border:none;border-radius:7px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{background:rgba(255,255,255,.4);}"
+        )
+        close_btn.clicked.connect(dialog.reject)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 12, 0)
+        top.setSpacing(0)
+        top.addWidget(hdr, 1)
+        top.addWidget(close_btn)
+
+        hdr_widget = __import__("PyQt6.QtWidgets", fromlist=["QWidget"]).QWidget()
+        hdr_widget.setFixedHeight(48)
+        hdr_widget.setStyleSheet("background:#2563EB;")
+        hdr_widget.setLayout(top)
+        dlg_layout.addWidget(hdr_widget)
+
+        # WebEngine
+        web = QWebEngineView()
+        web.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        web.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+        web.load(QUrl.fromLocalFile(html_file))
+        dlg_layout.addWidget(web, 1)
+
+        dialog.exec()
 
 
 # ─── ANA DETAY DİYALOĞU ──────────────────────────────────────────────────────
@@ -208,6 +518,7 @@ class DetayDialog(QDialog):
                  tablo_tipi: str = "hareketler",
                  gelir_field="toplam_gelir", gider_field="toplam_gider",
                  tutar_field=None,
+                 direct_detay: bool = False,   # True → özet atla, direkt liste aç
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle(baslik)
@@ -216,6 +527,7 @@ class DetayDialog(QDialog):
         self._detay_fn = detay_fn
         self._tablo_tipi = tablo_tipi
         self._baslik = baslik
+        self._direct_detay = direct_detay
 
         # Kutucukların tam kapladığı pencere boyutunu dinamik hesapla
         cols_per_row = 4
@@ -416,16 +728,20 @@ class DetayDialog(QDialog):
         date_filter_row.addWidget(self.combo_ay)
         
         # Yıl ComboBox
+        import datetime
+        current_year = datetime.datetime.now().year
+
         self.combo_yil = QComboBox()
         self.combo_yil.setFixedHeight(28)
         self.combo_yil.setFixedWidth(120)
         self.combo_yil.setStyleSheet(self._combo_style())
         self.combo_yil.addItem("Tüm Yıllar", None)
-        
-        import datetime
-        current_year = datetime.datetime.now().year
         for y in range(current_year + 1, current_year - 5, -1):
             self.combo_yil.addItem(str(y), int(y))
+        # Mevcut yılı varsayılan seç
+        idx = self.combo_yil.findData(current_year)
+        if idx >= 0:
+            self.combo_yil.setCurrentIndex(idx)
         self.combo_yil.currentIndexChanged.connect(self._apply_filters)
         date_filter_row.addWidget(self.combo_yil)
         
@@ -466,6 +782,21 @@ class DetayDialog(QDialog):
 
         self._stack.addWidget(detay_page)
 
+        # Direct mod: özet atla, direkt liste yükle
+        if self._direct_detay:
+            self._back_btn.hide()
+            try:
+                rows = self._detay_fn(None)
+            except Exception:
+                rows = []
+            self._detay_sube_lbl.setText(f"📄 {baslik}  — {len(rows)} kayıt")
+            self._detay_gelir_lbl.setText("")
+            self._detay_gider_lbl.setText("")
+            self._detay_net_lbl.setText("")
+            self._tablo.load_rows(rows)
+            self._stack.setCurrentIndex(1)
+            self.resize(1200, 720)
+
     def _combo_style(self) -> str:
         return f"""
             QComboBox {{
@@ -489,26 +820,27 @@ class DetayDialog(QDialog):
         """
 
     def _parse_date(self, date_str: str):
-        date_str = date_str.strip()
-        if not date_str or date_str == "-":
+        """
+        Tarih stringinden (ay, yil) tuple döndürür.
+        Desteklenen formatlar:
+          YYYY-MM-DD   2026-03-15
+          DD.MM.YYYY   15.03.2026
+          DD/MM/YYYY   15/03/2026
+          YYYY.MM.DD   2026.03.15
+          ISO+time     2026-03-15T10:00:00
+        """
+        import datetime as dt
+        if not date_str or date_str.strip() == "-":
             return None, None
-        try:
-            # Format 1: DD.MM.YYYY
-            if "." in date_str:
-                parts = date_str.split(".")
-                if len(parts) == 3:
-                    return int(parts[1]), int(parts[2])
-            # Format 2: YYYY-MM-DD
-            if "-" in date_str:
-                parts = date_str.split("-")
-                if len(parts) >= 3:
-                    if len(parts[0]) == 4:
-                        return int(parts[1]), int(parts[0])
-                    else:
-                        return int(parts[1]), int(parts[2])
-        except Exception:
-            pass
+        s = date_str.strip()[:10]   # sadece ilk 10 karakter (tarih kısmı)
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y.%m.%d"):
+            try:
+                d = dt.datetime.strptime(s, fmt)
+                return d.month, d.year
+            except ValueError:
+                continue
         return None, None
+
 
     def _on_kart_clicked(self, row: dict):
         sube_adi = row.get("sube_adi", "")

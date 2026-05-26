@@ -55,11 +55,11 @@ COLORS = {
     "row_alt":       "#FAFAFA",
 }
 
-# ─── FON ──────────────────────────────────────────────────────────────────────
 FONTS = {
-    "primary":   "Segoe UI",
-    "fallback":  "Arial, sans-serif",
-    "mono":      "Consolas, monospace",
+    # macOS → .AppleSystemUIFont, Windows → Segoe UI, Linux → Ubuntu
+    "primary":   ".AppleSystemUIFont",
+    "fallback":  "Helvetica Neue, Arial, sans-serif",
+    "mono":      "SF Mono, Menlo, Consolas, monospace",
     "size_xs":   "10px",
     "size_sm":   "12px",
     "size_md":   "14px",

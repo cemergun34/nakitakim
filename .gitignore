@@ -9,8 +9,11 @@ __pycache__/
 Thumbs.db
 
 # Databases and data files
-data/*.db
-data/*.sqlite
+data/
+db/*.db
+db/*.sqlite
+*.db
+*.sqlite
 
 # Excel / local reports
 *.xlsx

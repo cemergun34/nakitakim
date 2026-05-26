@@ -206,13 +206,13 @@ class GradientPanel(QWidget):
 
         # Metin
         painter.setPen(QColor(255, 255, 255))
-        font = QFont("Segoe UI", 28, QFont.Weight.Bold)
+        font = QFont(".AppleSystemUIFont", 28, QFont.Weight.Bold)
         painter.setFont(font)
         painter.drawText(rect.adjusted(40, 0, -40, 0),
                          Qt.AlignmentFlag.AlignCenter,
                          "IQ Finans\nNakit Akış Yönetimi")
 
-        sub_font = QFont("Segoe UI", 13)
+        sub_font = QFont(".AppleSystemUIFont", 13)
         painter.setFont(sub_font)
         painter.setPen(QColor(255, 255, 255, 180))
         painter.drawText(rect.adjusted(40, 80, -40, 0),

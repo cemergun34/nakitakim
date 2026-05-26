@@ -6,7 +6,8 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
     QGridLayout, QFrame, QPushButton, QComboBox, QSizePolicy,
-    QDateEdit, QSpacerItem
+    QDateEdit, QSpacerItem, QDialog, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
 from PyQt6.QtGui import QFont
@@ -248,6 +249,10 @@ class DashboardScreen(QWidget):
         self._loader.error.connect(self._on_error)
         self._loader.start()
 
+    def refresh(self):
+        """Sol menüden sayfaya geçince veriler yeniden yüklenir."""
+        self._load_data()
+
     def _on_data_ready(self, data: dict):
         c = self._cards
         
@@ -288,9 +293,13 @@ class DashboardScreen(QWidget):
 
         # Kurum Ödemeleri
         kurum = data.get("kurum_odemeleri", {})
+        kurum_moy = kurum.get("moy", 0)
+        kurum_alt = "Vergi ödeme detayları"
+        if kurum_moy > 0:
+            kurum_alt += f"  •  Moy: {fmt_para(kurum_moy)}"
         c["kurum_odemeleri"].set_value(
             fmt_para(kurum.get("toplam", 0)),
-            "Vergi ödeme detayları"
+            kurum_alt
         )
 
         # Maaş Kira SMM
@@ -315,9 +324,12 @@ class DashboardScreen(QWidget):
 
         # Kredi Kartları
         kk = data.get("kredi_karti", {})
+        borc  = kk.get("borc", 0)
+        odeme = kk.get("odeme", 0)
+        net   = kk.get("net",   0)
         c["kredi_karti"].set_value(
-            fmt_para(kk.get("borc", 0)),
-            f"Borç: {fmt_para(kk.get('borc', 0))}  Ödeme: {fmt_para(kk.get('odeme', 0))}"
+            fmt_para(borc),
+            f"Harcama: {fmt_para(borc)}  Ödeme: {fmt_para(abs(odeme))}  Net: {fmt_para(net)}"
         )
 
         # Genel Hesap
@@ -379,48 +391,36 @@ class DashboardScreen(QWidget):
             )
 
         elif key == "kesilen_fatura":
-            ozet = detay_service.get_fatura_sube_ozet(uid, yil, "gelir")
-            def detay_fn(sube_adi):
-                return detay_service.get_fatura_detay(uid, yil, "gelir", unvan=sube_adi)
             dlg = DetayDialog(
-                baslik="Kesilen Faturalar — Ünvan Özeti",
-                ozet_rows=ozet,
-                detay_fn=detay_fn,
+                baslik="Kesilen Faturalar",
+                ozet_rows=[],
+                detay_fn=lambda _: detay_service.get_fatura_detay(uid, yil, "gelir"),
                 tablo_tipi="faturalar",
-                gelir_field="toplam_tutar",
-                gider_field="toplam_tutar",
                 tutar_field="toplam_tutar",
+                direct_detay=True,
                 parent=self,
             )
 
         elif key == "gelen_fatura":
-            ozet = detay_service.get_fatura_sube_ozet(uid, yil, "gider")
-            def detay_fn(sube_adi):
-                return detay_service.get_fatura_detay(uid, yil, "gider", unvan=sube_adi)
             dlg = DetayDialog(
-                baslik="Gelen Faturalar — Ünvan Özeti",
-                ozet_rows=ozet,
-                detay_fn=detay_fn,
+                baslik="Gelen Faturalar",
+                ozet_rows=[],
+                detay_fn=lambda _: detay_service.get_fatura_detay(uid, yil, "gider"),
                 tablo_tipi="faturalar",
-                gelir_field="toplam_tutar",
-                gider_field="toplam_tutar",
                 tutar_field="toplam_tutar",
+                direct_detay=True,
                 parent=self,
             )
 
-        elif key in ("gider_pusulasi", "kurum_odemeleri", "maas_kira_smm"):
-            ozet = detay_service.get_gider_sube_ozet(uid, mno, yil)
-            def detay_fn(sube_adi):
-                return detay_service.get_genel_hesap_detay(uid, mno, yil, sube_adi=sube_adi)
-            dlg = DetayDialog(
-                baslik="Gider Detayı — Kategori Özeti",
-                ozet_rows=ozet,
-                detay_fn=detay_fn,
-                tablo_tipi="genel_hesap",
-                gelir_field="toplam_gelir",
-                gider_field="toplam_gider",
-                parent=self,
-            )
+        elif key == "kurum_odemeleri":
+            dlg = KurumOdemeDialog(mno, yil, parent=self)
+            dlg.exec()
+            return
+
+        elif key == "kredi_karti":
+            dlg = KrediKartiDialog(uid, yil, parent=self)
+            dlg.exec()
+            return
 
         else:
             # Henüz uygulanmamış kartlar için basit mesaj
@@ -440,3 +440,1219 @@ class DashboardScreen(QWidget):
         for card in self._cards.values():
             card.set_value("Yükleniyor...")
         self._load_data()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kurum Ödemeleri Detay Dialog
+# PHP: nakitAkimParametreAjaxGider.php + gider_veriler.js DataTable
+# ─────────────────────────────────────────────────────────────────────────────
+
+class KurumOdemeDialog(QDialog):
+    """
+    Kurum Ödemeleri kartına tıklandığında açılan detay tablosu.
+    PHP gider_veriler.js DataTable ile birebir aynı sütun yapısı.
+    Düzeltmeler:
+      1) Yazılar daima siyah (hover dahil)
+      2) DateEdit picker — ilkTarih 01/01/YIL, sonTarih bugün
+      3) Ay seçince tarihler otomatik dolar (Şubat→01.02/28.02)
+      4) Satıra tıklandığında BeyannamePreviewDialog açılır
+    """
+
+    HESAP_ACIKLAMA = {
+        "770.01": "770.01 — Vergi Giderleri (SGK / KDV / Gelir Vergisi)",
+        "730.08": "730.08 — İşçilik / Müşavirlik Giderleri",
+    }
+    BEYANNAME_TUR = {
+        "770.01": "KDV / SGK Beyannamesi",
+        "730.08": "Muhtasar ve Prim Hizmet Beyannamesi",
+    }
+
+    AY_ADLARI = [
+        "Hepsi", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+        "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
+    ]
+
+    SUTUNLAR = [
+        ("Beyanname Türü",  "hesapKodu",     200),
+        ("Ünvan",           "unvan",         140),
+        ("Vergi No",        "vergiNo",       105),
+        ("İlk Tarih",       "ilkTarih",       95),
+        ("Son Tarih",       "sonTarih",       90),
+        ("Sözleşme No",     "sozlesmeNo",    100),
+        ("Sözl. Tarih",     "sozlesmeTarih",  90),
+        ("Tutar",           "tutar",         115),
+    ]
+
+    _CBS = (
+        "QComboBox{background:white;border:1.5px solid #cbd5e1;"
+        "border-radius:6px;padding:0 8px;font-size:12px;color:#1e293b;}"
+        "QComboBox:focus{border-color:#162C47;}"
+        "QComboBox::drop-down{border:none;width:18px;}"
+    )
+    _DES = (
+        "QDateEdit{background:white;border:1.5px solid #cbd5e1;"
+        "border-radius:6px;padding:0 6px;font-size:12px;color:#1e293b;}"
+        "QDateEdit:focus{border-color:#162C47;}"
+        "QDateEdit::drop-down{border:none;width:18px;}"
+    )
+
+    def __init__(self, musterino: int, yil: int, parent=None):
+        super().__init__(parent)
+        self._musterino = musterino
+        self._yil       = yil
+        self._rows: list[dict] = []
+        self._ay_degisiyor = False   # döngü koruması
+
+        self.setWindowTitle("Kurum Ödemeleri — Detay")
+        self.setMinimumSize(1060, 620)
+        self.resize(1180, 700)
+        self._setup_ui()
+        self._load()
+
+    # ── UI ───────────────────────────────────────────────────────────────────
+
+    def _setup_ui(self):
+        import calendar
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(8)
+
+        # ── Başlık ──
+        baslik = QLabel("📋  Kurum Ödemeleri — Gider Parametreleri")
+        baslik.setStyleSheet(
+            "font-size:15px;font-weight:700;color:#162C47;"
+            "padding-bottom:4px;"
+        )
+        root.addWidget(baslik)
+
+        # ── Filtre çubuğu ──
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+
+        # Ay seçici
+        bar.addWidget(self._lbl("Ay:"))
+        self._ay_cb = QComboBox()
+        self._ay_cb.setFixedSize(100, 32)
+        self._ay_cb.setStyleSheet(self._CBS)
+        for i, a in enumerate(self.AY_ADLARI):
+            self._ay_cb.addItem(a, i)
+        self._ay_cb.currentIndexChanged.connect(self._on_ay_change)
+        bar.addWidget(self._ay_cb)
+
+        # İlk Tarih DateEdit
+        bar.addWidget(self._lbl("İlk Tarih:"))
+        self._ilk_de = QDateEdit()
+        self._ilk_de.setCalendarPopup(True)
+        self._ilk_de.setDisplayFormat("dd.MM.yyyy")
+        self._ilk_de.setFixedSize(120, 32)
+        self._ilk_de.setStyleSheet(self._DES)
+        self._ilk_de.setDate(QDate(self._yil, 1, 1))    # 01/01/YIL
+        bar.addWidget(self._ilk_de)
+
+        # Son Tarih DateEdit
+        bar.addWidget(self._lbl("Son Tarih:"))
+        self._son_de = QDateEdit()
+        self._son_de.setCalendarPopup(True)
+        self._son_de.setDisplayFormat("dd.MM.yyyy")
+        self._son_de.setFixedSize(120, 32)
+        self._son_de.setStyleSheet(self._DES)
+        self._son_de.setDate(QDate.currentDate())
+        bar.addWidget(self._son_de)
+
+        bar.addStretch()
+
+        # Filtrele butonu
+        self._filtre_btn = QPushButton("🔍  Filtrele")
+        self._filtre_btn.setFixedSize(110, 32)
+        self._filtre_btn.setStyleSheet(
+            "QPushButton{background:#162C47;color:white;border:none;"
+            "border-radius:7px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:#1e3a5f;}"
+        )
+        self._filtre_btn.clicked.connect(self._load)
+        bar.addWidget(self._filtre_btn)
+        root.addLayout(bar)
+
+        # ── Özet bant ──
+        self._ozet_lbl = QLabel("")
+        self._ozet_lbl.setFixedHeight(28)
+        self._ozet_lbl.setStyleSheet(
+            "background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;"
+            "padding:0 10px;font-size:12px;color:#0c4a6e;"
+        )
+        root.addWidget(self._ozet_lbl)
+
+        # ── Bilgi notu ──
+        not_lbl = QLabel("💡  Satıra tıklayarak beyanname önizlemesini açabilirsiniz.")
+        not_lbl.setStyleSheet("font-size:11px;color:#64748b;")
+        root.addWidget(not_lbl)
+
+        # ── Tablo ──
+        self._tablo = QTableWidget()
+        self._tablo.setColumnCount(len(self.SUTUNLAR))
+        self._tablo.setHorizontalHeaderLabels([s[0] for s in self.SUTUNLAR])
+        self._tablo.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tablo.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tablo.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._tablo.setAlternatingRowColors(True)
+        self._tablo.verticalHeader().setVisible(False)
+        self._tablo.setSortingEnabled(True)
+        self._tablo.horizontalHeader().setStretchLastSection(True)
+        self._tablo.setMouseTracking(True)
+        for i, (_, _, w) in enumerate(self.SUTUNLAR):
+            self._tablo.setColumnWidth(i, w)
+        # 1) Yazılar DAİMA siyah — hover ve seçim dahil
+        self._tablo.setStyleSheet("""
+            QTableWidget {
+                background: white;
+                gridline-color: #e2e8f0;
+                font-size: 12px;
+                color: #1e293b;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }
+            QTableWidget::item {
+                color: #1e293b;
+                padding: 4px 6px;
+            }
+            QTableWidget::item:hover {
+                background: #eff6ff;
+                color: #1e293b;
+            }
+            QTableWidget::item:selected {
+                background: #dbeafe;
+                color: #1e293b;
+            }
+            QTableWidget::item:alternate {
+                background: #f8fafc;
+                color: #1e293b;
+            }
+            QHeaderView::section {
+                background: #1e293b;
+                color: white;
+                font-weight: 700;
+                font-size: 11px;
+                padding: 6px 4px;
+                border: none;
+                border-right: 1px solid #334155;
+            }
+        """)
+        self._tablo.cellClicked.connect(self._on_satir_tikla)
+        root.addWidget(self._tablo)
+
+        # ── Kapat ──
+        kapat = QPushButton("✕  Kapat")
+        kapat.setFixedSize(110, 32)
+        kapat.setStyleSheet(
+            "QPushButton{background:#64748b;color:white;border:none;"
+            "border-radius:7px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:#475569;}"
+        )
+        kapat.clicked.connect(self.accept)
+        bot = QHBoxLayout()
+        bot.addStretch()
+        bot.addWidget(kapat)
+        root.addLayout(bot)
+
+    # ── Yardımcılar ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _lbl(txt: str) -> QLabel:
+        l = QLabel(txt)
+        l.setStyleSheet("font-size:12px;color:#475569;font-weight:600;")
+        return l
+
+    @staticmethod
+    def _fmt_goster(t) -> str:
+        """YYYYMMDD → DD.MM.YYYY"""
+        s = str(t) if t else ""
+        if len(s) == 8 and s.isdigit():
+            return f"{s[6:8]}.{s[4:6]}.{s[0:4]}"
+        return s
+
+    # ── Ay seçince tarihler otomatik dolar ───────────────────────────────────
+
+    def _on_ay_change(self, idx: int):
+        """
+        Şubat seçilirse → ilkTarih=01.02.YYYY, sonTarih=28.02.YYYY
+        Hepsi seçilirse → ilkTarih=01.01.YYYY, sonTarih=bugün
+        """
+        import calendar
+        if self._ay_degisiyor:
+            return
+        self._ay_degisiyor = True
+        ay = self._ay_cb.currentData()   # 0=hepsi, 1=Ocak…12=Aralık
+        yil = self._yil
+        if ay and ay > 0:
+            son_gun = calendar.monthrange(yil, ay)[1]
+            self._ilk_de.setDate(QDate(yil, ay, 1))
+            self._son_de.setDate(QDate(yil, ay, son_gun))
+        else:
+            self._ilk_de.setDate(QDate(yil, 1, 1))
+            self._son_de.setDate(QDate.currentDate())
+        self._ay_degisiyor = False
+
+    # ── Veri yükleme ─────────────────────────────────────────────────────────
+
+    def _load(self):
+        from services.detay_service import get_kurum_odemeleri_detay_tarih
+        ilk = self._ilk_de.date()
+        son = self._son_de.date()
+        ilk_str = f"{ilk.year()}{ilk.month():02d}{ilk.day():02d}"
+        son_str = f"{son.year()}{son.month():02d}{son.day():02d}"
+        self._rows = get_kurum_odemeleri_detay_tarih(
+            self._musterino, ilk_str, son_str
+        )
+        self._doldur()
+
+    def _doldur(self):
+        from PyQt6.QtGui import QColor, QFont
+        self._tablo.setSortingEnabled(False)
+        self._tablo.setRowCount(0)
+
+        toplam = 0.0
+        for row in self._rows:
+            ri = self._tablo.rowCount()
+            self._tablo.insertRow(ri)
+            self._tablo.setRowHeight(ri, 30)
+
+            kod      = row.get("hesapKodu", "")
+            beyan_t  = self.BEYANNAME_TUR.get(kod, self.HESAP_ACIKLAMA.get(kod, kod))
+            unvan    = row.get("unvan", "") or "-"
+            vergino  = row.get("vergiNo", "") or ""
+            ilkT     = self._fmt_goster(row.get("ilkTarih", ""))
+            sonT     = self._fmt_goster(row.get("sonTarih", ""))
+            sozno    = row.get("sozlesmeNo", "") or ""
+            soztarih = self._fmt_goster(row.get("sozlesmeTarih", ""))
+            tutar    = float(row.get("tutar") or 0)
+            toplam  += tutar
+
+            degerler = [beyan_t, unvan, vergino, ilkT, sonT, sozno, soztarih, None]
+            for ci, val in enumerate(degerler):
+                if ci == 7:
+                    # Tutar — sağa yasla, teal renk ama siyah hover için
+                    it = QTableWidgetItem(f"{tutar:,.2f}")
+                    it.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                    it.setForeground(QColor("#0f766e"))
+                    it.setFont(QFont("", -1, QFont.Weight.Bold))
+                else:
+                    it = QTableWidgetItem(str(val))
+                    it.setTextAlignment(
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                    )
+                    it.setForeground(QColor("#1e293b"))
+                # satır indeksini UserRole olarak sakla (preview için)
+                it.setData(Qt.ItemDataRole.UserRole, ri)
+                self._tablo.setItem(ri, ci, it)
+
+        self._tablo.setSortingEnabled(True)
+
+        # Özet
+        ilk_txt = self._ilk_de.date().toString("dd.MM.yyyy")
+        son_txt = self._son_de.date().toString("dd.MM.yyyy")
+        self._ozet_lbl.setText(
+            f"📅 {ilk_txt} — {son_txt}  │  "
+            f"<b>{len(self._rows)}</b> kayıt  │  "
+            f"Toplam: <b>{toplam:,.2f} ₺</b>"
+        )
+        self._ozet_lbl.setTextFormat(Qt.TextFormat.RichText)
+
+    # ── Satır tıklama → Beyanname preview ───────────────────────────────────
+
+    def _on_satir_tikla(self, row: int, _col: int):
+        if row < 0 or row >= len(self._rows):
+            return
+        veri = self._rows[row]
+        dlg = BeyannamePreviewDialog(veri, self._musterino, self)
+        dlg.exec()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Beyanname Önizleme Dialog
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BeyannamePreviewDialog(QDialog):
+    """
+    Satıra tıklandığında açılan PDF önizleme dialog'u.
+    - Moy'dan gerçek zamanlı beyanname_listeleri sorgusu yapar
+    - İlgili dönemde bulunan beyannameleri listeler
+    - Seçilen beyanname'nin PDF'ini beyanname_gib.Belge_Data'dan çeker
+    - PDF'i geçici dosyaya yazıp sistem PDF görüntüleyicisiyle açar
+    """
+
+    BEYANNAME_TUR = {
+        "770.01": "KDV / SGK Beyannamesi",
+        "730.08": "Muhtasar ve Prim Hizmet Beyannamesi",
+    }
+    BEYANNAME_ICON = {"770.01": "🏛️", "730.08": "📄"}
+    BEYANNAME_RENK = {"770.01": "#1d4ed8", "730.08": "#7c3aed"}
+
+    BELGE_TUR_ADI = {
+        "KDV1":     "KDV Beyannamesi (1.Tür)",
+        "KDV2":     "KDV Beyannamesi (2.Tür)",
+        "MUHSGK":   "Muhtasar ve SGK Beyannamesi",
+        "KGECICI":  "Kurumlar Vergisi Geçici Beyan",
+        "KURUMLAR": "Kurumlar Vergisi Beyannamesi",
+        "LEVHA":    "Levha Beyannamesi",
+        "MUHTAR":   "Muhtasar Beyanname",
+    }
+
+    def __init__(self, veri: dict, musterino: int, parent=None):
+        super().__init__(parent)
+        self._veri      = veri
+        self._musterino = musterino
+        self._beyanlar: list[dict] = []
+        self._tmp_path: str | None = None
+
+        kod = veri.get("hesapKodu", "")
+        self._renk = self.BEYANNAME_RENK.get(kod, "#162C47")
+        self.setWindowTitle("Beyanname PDF Önizleme")
+        self.setMinimumSize(860, 640)
+        self.resize(960, 720)
+        self._setup_ui()
+        self._load_beyanlar()
+
+    @staticmethod
+    def _fmt(t) -> str:
+        s = str(t) if t else ""
+        if len(s) == 8 and s.isdigit():
+            return f"{s[6:8]}.{s[4:6]}.{s[0:4]}"
+        return s or "—"
+
+    def _donem_str(self) -> str:
+        t = str(self._veri.get("ilkTarih", "") or "")
+        if len(t) == 8 and t.isdigit():
+            ay_map = {"01":"Ocak","02":"Şubat","03":"Mart","04":"Nisan",
+                      "05":"Mayıs","06":"Haziran","07":"Temmuz","08":"Ağustos",
+                      "09":"Eylül","10":"Ekim","11":"Kasım","12":"Aralık"}
+            return f"{ay_map.get(t[4:6], t[4:6])} {t[0:4]}"
+        return t or "—"
+
+    # ── UI ───────────────────────────────────────────────────────────────────
+
+    def _setup_ui(self):
+        from PyQt6.QtGui import QColor
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        kod  = self._veri.get("hesapKodu", "")
+        tur  = self.BEYANNAME_TUR.get(kod, "Beyanname")
+        icon = self.BEYANNAME_ICON.get(kod, "📋")
+        renk = self._renk
+
+        # ── Başlık bandı ──
+        hdr = QFrame()
+        hdr.setFixedHeight(76)
+        hdr.setStyleSheet(
+            f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {renk},stop:1 #0f172a);"
+        )
+        h = QHBoxLayout(hdr)
+        h.setContentsMargins(20, 0, 20, 0)
+
+        left = QVBoxLayout()
+        t1 = QLabel(f"{icon}  {tur}")
+        t1.setStyleSheet("color:white;font-size:15px;font-weight:700;background:transparent;")
+        t2 = QLabel(f"📅  Dönem: {self._donem_str()}   •   Tutar: {float(self._veri.get('tutar') or 0):,.2f} ₺")
+        t2.setStyleSheet("color:rgba(255,255,255,0.82);font-size:12px;background:transparent;")
+        left.addWidget(t1)
+        left.addWidget(t2)
+        h.addLayout(left, 1)
+        root.addWidget(hdr)
+
+        # ── İçerik: Sol liste + Sağ PDF alanı ──
+        splitter_frame = QFrame()
+        splitter_frame.setStyleSheet("background:#f8fafc;")
+        sf_lay = QHBoxLayout(splitter_frame)
+        sf_lay.setContentsMargins(10, 10, 10, 10)
+        sf_lay.setSpacing(10)
+
+        # Sol: Beyanname listesi
+        sol = QFrame()
+        sol.setFixedWidth(290)
+        sol.setStyleSheet(
+            "background:white;border-radius:8px;"
+            "border:1px solid #e2e8f0;"
+        )
+        sol_lay = QVBoxLayout(sol)
+        sol_lay.setContentsMargins(0, 0, 0, 0)
+        sol_lay.setSpacing(0)
+
+        sol_baslik = QLabel("📋  İlgili Beyannameler")
+        sol_baslik.setFixedHeight(36)
+        sol_baslik.setStyleSheet(
+            f"background:{renk};color:white;font-size:12px;font-weight:700;"
+            "padding:0 10px;border-radius:8px 8px 0 0;"
+        )
+        sol_lay.addWidget(sol_baslik)
+
+        self._liste = QTableWidget()
+        self._liste.setColumnCount(3)
+        self._liste.setHorizontalHeaderLabels(["Tür", "Dönem", "Onay"])
+        self._liste.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._liste.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._liste.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._liste.verticalHeader().setVisible(False)
+        self._liste.setShowGrid(False)
+        self._liste.horizontalHeader().setStretchLastSection(True)
+        self._liste.setColumnWidth(0, 90)
+        self._liste.setColumnWidth(1, 80)
+        self._liste.setStyleSheet("""
+            QTableWidget { background:white; font-size:11px; border:none; color:#1e293b; }
+            QTableWidget::item { padding:4px 6px; color:#1e293b; }
+            QTableWidget::item:hover { background:#eff6ff; color:#1e293b; }
+            QTableWidget::item:selected { background:#dbeafe; color:#1e293b; }
+            QHeaderView::section {
+                background:#f1f5f9; color:#475569; font-weight:700;
+                font-size:10px; padding:4px; border:none;
+                border-bottom:1px solid #e2e8f0;
+            }
+        """)
+        self._liste.cellClicked.connect(self._on_beyanname_sec)
+        sol_lay.addWidget(self._liste, 1)
+
+        self._yukleniyor_lbl = QLabel("🔄  Moy'dan yükleniyor...")
+        self._yukleniyor_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._yukleniyor_lbl.setStyleSheet("color:#64748b;font-size:11px;padding:10px;")
+        sol_lay.addWidget(self._yukleniyor_lbl)
+        self._yukleniyor_lbl.hide()
+
+        sf_lay.addWidget(sol)
+
+        # Sağ: PDF alanı
+        sag = QFrame()
+        sag.setStyleSheet(
+            "background:white;border-radius:8px;"
+            "border:1px solid #e2e8f0;"
+        )
+        sag_lay = QVBoxLayout(sag)
+        sag_lay.setContentsMargins(0, 0, 0, 0)
+
+        sag_baslik_frame = QFrame()
+        sag_baslik_frame.setFixedHeight(36)
+        sag_baslik_frame.setStyleSheet(
+            "background:#1e293b;border-radius:8px 8px 0 0;"
+        )
+        sb_lay = QHBoxLayout(sag_baslik_frame)
+        sb_lay.setContentsMargins(12, 0, 12, 0)
+        self._pdf_baslik = QLabel("PDF Önizleme")
+        self._pdf_baslik.setStyleSheet(
+            "color:white;font-size:12px;font-weight:700;"
+        )
+        sb_lay.addWidget(self._pdf_baslik)
+        sb_lay.addStretch()
+
+        self._pdf_ac_btn = QPushButton("📂  PDF'i Aç")
+        self._pdf_ac_btn.setFixedSize(110, 26)
+        self._pdf_ac_btn.setStyleSheet(
+            "QPushButton{background:#0f766e;color:white;border:none;"
+            "border-radius:5px;font-size:11px;font-weight:600;}"
+            "QPushButton:hover{background:#0d9488;}"
+            "QPushButton:disabled{background:#334155;color:#64748b;}"
+        )
+        self._pdf_ac_btn.setEnabled(False)
+        self._pdf_ac_btn.clicked.connect(self._pdf_ac)
+        sb_lay.addWidget(self._pdf_ac_btn)
+        sag_lay.addWidget(sag_baslik_frame)
+
+        # PDF içerik alanı — metin tabanlı önizleme
+        self._pdf_alan = QLabel()
+        self._pdf_alan.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pdf_alan.setWordWrap(True)
+        self._pdf_alan.setStyleSheet(
+            "color:#94a3b8;font-size:13px;padding:20px;"
+            "background:white;"
+        )
+        self._pdf_alan.setText(
+            "⬅️  Soldaki listeden bir beyanname seçin\n"
+            "PDF önizlemesi burada gösterilecektir."
+        )
+
+        # PDF Image görüntüleme için QLabel (PDF → PNG dönüşümü)
+        self._pdf_img_scroll = QScrollArea()
+        self._pdf_img_scroll.setWidgetResizable(True)
+        self._pdf_img_scroll.setStyleSheet(
+            "QScrollArea{border:none;background:white;}"
+        )
+        self._pdf_img_container = QLabel()
+        self._pdf_img_container.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self._pdf_img_container.setStyleSheet("background:white;padding:8px;")
+        self._pdf_img_scroll.setWidget(self._pdf_img_container)
+        self._pdf_img_scroll.hide()
+
+        sag_lay.addWidget(self._pdf_alan, 1)
+        sag_lay.addWidget(self._pdf_img_scroll, 1)
+        sf_lay.addWidget(sag, 1)
+
+        root.addWidget(splitter_frame, 1)
+
+        # ── Alt butonlar ──
+        alt = QFrame()
+        alt.setFixedHeight(48)
+        alt.setStyleSheet("background:white;border-top:1px solid #e2e8f0;")
+        a = QHBoxLayout(alt)
+        a.setContentsMargins(16, 0, 16, 0)
+        a.addStretch()
+        kapat = QPushButton("✕  Kapat")
+        kapat.setFixedSize(110, 32)
+        kapat.setStyleSheet(
+            "QPushButton{background:#64748b;color:white;border:none;"
+            "border-radius:7px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:#475569;}"
+        )
+        kapat.clicked.connect(self.accept)
+        a.addWidget(kapat)
+        root.addWidget(alt)
+
+    # ── Beyanname listesini yükle ─────────────────────────────────────────────
+
+    def _load_beyanlar(self):
+        ilk_tarih = self._veri.get("ilkTarih", "") or ""
+        if not ilk_tarih:
+            self._liste_bos_goster("İlk tarih bilgisi yok.")
+            return
+        self._yukleniyor_lbl.show()
+        from services.moy_service import get_beyanname_listesi
+        try:
+            self._beyanlar = get_beyanname_listesi(self._musterino, ilk_tarih)
+        except Exception as e:
+            self._beyanlar = []
+        self._yukleniyor_lbl.hide()
+        self._liste_doldur()
+
+    def _liste_doldur(self):
+        self._liste.setRowCount(0)
+        if not self._beyanlar:
+            self._liste_bos_goster("Bu dönem için beyanname bulunamadı.")
+            return
+
+        for b in self._beyanlar:
+            ri = self._liste.rowCount()
+            self._liste.insertRow(ri)
+            self._liste.setRowHeight(ri, 26)
+
+            tur_adi = self.BELGE_TUR_ADI.get(b["belge_turu"], b["belge_turu"])
+            onay = b["onay_tarihi"]
+            # YYYYMMDDHHMMSS → DD.MM.YYYY
+            if len(onay) >= 8 and onay[:8].isdigit():
+                onay = f"{onay[6:8]}.{onay[4:6]}.{onay[0:4]}"
+
+            for ci, txt in enumerate([tur_adi, b["donem_adi"], onay]):
+                it = QTableWidgetItem(str(txt))
+                it.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
+                from PyQt6.QtGui import QColor
+                it.setForeground(QColor("#1e293b"))
+                self._liste.setItem(ri, ci, it)
+
+    def _liste_bos_goster(self, mesaj: str):
+        self._pdf_alan.setText(f"ℹ️  {mesaj}")
+        self._pdf_alan.show()
+        self._pdf_img_scroll.hide()
+
+    # ── Beyanname seçildi → PDF çek ──────────────────────────────────────────
+
+    def _on_beyanname_sec(self, row: int, _col: int):
+        if row < 0 or row >= len(self._beyanlar):
+            return
+        b = self._beyanlar[row]
+        tur_adi = self.BELGE_TUR_ADI.get(b["belge_turu"], b["belge_turu"])
+        self._pdf_baslik.setText(f"{tur_adi}  —  {b['donem_adi']} {b['donem_no']}")
+        self._pdf_alan.setText("⏳  PDF yükleniyor...")
+        self._pdf_alan.show()
+        self._pdf_img_scroll.hide()
+        self._pdf_ac_btn.setEnabled(False)
+
+        from services.moy_service import get_beyanname_pdf_bytes
+        pdf_bytes = get_beyanname_pdf_bytes(self._musterino, b["kayit_no"])
+
+        if not pdf_bytes:
+            self._pdf_alan.setText(
+                "⚠️  Bu beyanname için PDF verisi bulunamadı.\n"
+                "(beyanname_gib tablosunda kayıt yok)"
+            )
+            return
+
+        # Geçici PDF dosyasına yaz
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".pdf",
+            prefix=f"beyanname_{b['belge_turu']}_{b['donem_no']}_",
+            delete=False
+        )
+        tmp.write(pdf_bytes)
+        tmp.close()
+        self._tmp_path = tmp.name
+        self._pdf_ac_btn.setEnabled(True)
+
+        # PDF'i resme dönüştürüp önizle (pymupdf varsa)
+        self._pdf_goruntule(pdf_bytes)
+
+    def _pdf_goruntule(self, pdf_bytes: bytes):
+        """PDF'i resim olarak göster — fitz (PyMuPDF) kullanır."""
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            toplam = doc.page_count
+
+            from PyQt6.QtGui import QImage, QPixmap
+            from PyQt6.QtCore import QByteArray
+            import io
+
+            # Tüm sayfaları birleştirerek tek uzun görüntü oluştur
+            pixmaplar = []
+            toplam_y = 0
+            maks_x = 0
+
+            for pg_no in range(min(toplam, 10)):  # max 10 sayfa
+                pg = doc[pg_no]
+                mat = fitz.Matrix(1.8, 1.8)  # 1.8x zoom — yeterli kalite
+                clip = pg.get_pixmap(matrix=mat)
+                img_data = clip.tobytes("png")
+                pm = QPixmap()
+                pm.loadFromData(img_data)
+                pixmaplar.append(pm)
+                toplam_y += pm.height() + 4
+                maks_x = max(maks_x, pm.width())
+
+            doc.close()
+
+            if pixmaplar:
+                # Tek pixmap olarak birleştir
+                from PyQt6.QtGui import QPainter
+                combined = QPixmap(maks_x, toplam_y)
+                combined.fill()
+                p = QPainter(combined)
+                y = 0
+                for pm in pixmaplar:
+                    p.drawPixmap(0, y, pm)
+                    y += pm.height() + 4
+                p.end()
+
+                self._pdf_img_container.setPixmap(combined)
+                self._pdf_img_container.setFixedSize(combined.size())
+                self._pdf_alan.hide()
+                self._pdf_img_scroll.show()
+            else:
+                self._pdf_alan.setText("⚠️  PDF sayfası okunamadı.")
+
+        except ImportError:
+            # PyMuPDF yüklü değil — PDF bilgisi göster
+            kb = len(pdf_bytes) // 1024
+            self._pdf_alan.setText(
+                f"📄  PDF indirme başarılı ({kb} KB)\n\n"
+                f"PDF önizlemesi için PyMuPDF gerekli:\n"
+                f"  pip install pymupdf\n\n"
+                f"'📂 PDF'i Aç' butonu ile görüntüleyebilirsiniz."
+            )
+        except Exception as e:
+            self._pdf_alan.setText(f"⚠️  PDF görüntülenemedi:\n{e}")
+
+    # ── PDF'i sistem görüntüleyicisinde aç ───────────────────────────────────
+
+    def _pdf_ac(self):
+        if not self._tmp_path:
+            return
+        import subprocess, sys
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", self._tmp_path])
+            elif sys.platform == "win32":
+                import os; os.startfile(self._tmp_path)
+            else:
+                subprocess.Popen(["xdg-open", self._tmp_path])
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Hata", f"PDF açılamadı: {e}")
+
+    def closeEvent(self, event):
+        # Geçici dosyayı temizle
+        if self._tmp_path:
+            import os
+            try:
+                os.unlink(self._tmp_path)
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Kredi Kartı Detay Dialog
+# PHP: admin.php → Kredi Kartları kartı → modal (kart özet + ekstre tablo)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class KrediKartiDialog(QDialog):
+    """
+    PHP admin.php 'Kredi Kartları' modalının PyQt6 karşılığı.
+
+    Yapı (admin.php ile birebir):
+    - Sol panel : Kart özet listesi (Banka / Kart bazında GROUP BY toplam)
+    - Sağ panel: Seçilen karta ait ekstre satırları
+    - Tarih filtresi + Filtrele butonu
+    - Özet bantı: Kayıt sayısı + Toplam tutar
+    """
+
+    _TBL_STYLE = """
+        QTableWidget {
+            background: white;
+            gridline-color: #e2e8f0;
+            font-size: 12px;
+            color: #1e293b;
+            border: 1px solid #bfdbfe;
+            border-radius: 8px;
+        }
+        QTableWidget::item {
+            color: #1e293b;
+            padding: 4px 6px;
+        }
+        QTableWidget::item:hover {
+            background: #eff6ff;
+            color: #1e293b;
+        }
+        QTableWidget::item:selected {
+            background: #bfdbfe;
+            color: #1e293b;
+        }
+        QTableWidget::item:alternate {
+            background: #f0f7ff;
+            color: #1e293b;
+        }
+        QHeaderView::section {
+            background: #1e40af;
+            color: white;
+            font-weight: 700;
+            font-size: 11px;
+            padding: 6px 4px;
+            border: none;
+            border-right: 1px solid #1d4ed8;
+        }
+    """
+
+    _CBS = (
+        "QComboBox{background:white;border:1.5px solid #93c5fd;"
+        "border-radius:6px;padding:0 8px;font-size:12px;color:#1e293b;}"
+        "QComboBox::drop-down{border:none;width:18px;}"
+    )
+    _DES = (
+        "QDateEdit{background:white;border:1.5px solid #93c5fd;"
+        "border-radius:6px;padding:0 6px;font-size:12px;color:#1e293b;}"
+        "QDateEdit::drop-down{border:none;width:18px;}"
+    )
+
+    def __init__(self, userid: int, yil: int, parent=None):
+        super().__init__(parent)
+        self._userid    = userid
+        self._yil       = yil
+        self._ozet_rows: list[dict] = []
+        self._ekstre_rows: list[dict] = []
+        self._secili_banka: str = ""
+
+        self.setWindowTitle("💳  Kredi Kartları — Detay")
+        self.setMinimumSize(1160, 660)
+        self.resize(1280, 740)
+        self._setup_ui()
+        self._load_ozet()
+
+    # ── UI İnşası ─────────────────────────────────────────────
+
+    def _setup_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Başlık bantı ──
+        hdr = QFrame()
+        hdr.setFixedHeight(72)
+        hdr.setStyleSheet(
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #1e40af,stop:0.5 #2563eb,stop:1 #0f172a);"
+        )
+        h = QHBoxLayout(hdr)
+        h.setContentsMargins(20, 0, 20, 0)
+        ic = QLabel("💳")
+        ic.setStyleSheet("font-size:26px;background:transparent;")
+        h.addWidget(ic)
+        left = QVBoxLayout()
+        t1 = QLabel("Kredi Kartları")
+        t1.setStyleSheet("color:white;font-size:16px;font-weight:700;background:transparent;")
+        t2 = QLabel(f"📅  {self._yil} yılı ekstre verileri  •  SQLite kaydından")
+        t2.setStyleSheet("color:rgba(255,255,255,.80);font-size:12px;background:transparent;")
+        left.addWidget(t1)
+        left.addWidget(t2)
+        h.addLayout(left, 1)
+        root.addWidget(hdr)
+
+        # ── İçerik: Sol kart özet + Sağ ekstre ──
+        body = QFrame()
+        body.setStyleSheet("background:#f0f7ff;")
+        body_lay = QHBoxLayout(body)
+        body_lay.setContentsMargins(12, 12, 12, 12)
+        body_lay.setSpacing(12)
+
+        # ── Sol Panel: Kart Özet Listesi ──
+        sol = QFrame()
+        sol.setFixedWidth(310)
+        sol.setStyleSheet(
+            "background:white;border-radius:10px;"
+            "border:1.5px solid #bfdbfe;"
+        )
+        sol_lay = QVBoxLayout(sol)
+        sol_lay.setContentsMargins(0, 0, 0, 0)
+        sol_lay.setSpacing(0)
+
+        sol_hdr = QLabel("💳  Kayıtlı Kartlar")
+        sol_hdr.setFixedHeight(38)
+        sol_hdr.setStyleSheet(
+            "background:#1e40af;color:white;font-size:13px;font-weight:700;"
+            "padding:0 12px;border-radius:9px 9px 0 0;"
+        )
+        sol_lay.addWidget(sol_hdr)
+
+        self._ozet_tbl = QTableWidget()
+        self._ozet_tbl.setColumnCount(4)
+        self._ozet_tbl.setHorizontalHeaderLabels(["Kart / Banka", "Kayıt", "Harcama (₺)", "Net (₺)"])
+        self._ozet_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._ozet_tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._ozet_tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._ozet_tbl.verticalHeader().setVisible(False)
+        self._ozet_tbl.setAlternatingRowColors(True)
+        self._ozet_tbl.setShowGrid(False)
+        self._ozet_tbl.horizontalHeader().setStretchLastSection(True)
+        self._ozet_tbl.setColumnWidth(0, 130)
+        self._ozet_tbl.setColumnWidth(1, 42)
+        self._ozet_tbl.setColumnWidth(2, 90)
+        self._ozet_tbl.setStyleSheet(self._TBL_STYLE)
+        self._ozet_tbl.cellClicked.connect(self._on_kart_sec)
+        sol_lay.addWidget(self._ozet_tbl, 1)
+
+        self._ozet_toplam_lbl = QLabel("")
+        self._ozet_toplam_lbl.setFixedHeight(28)
+        self._ozet_toplam_lbl.setStyleSheet(
+            "background:#dbeafe;border-top:1px solid #bfdbfe;"
+            "padding:0 10px;font-size:11px;color:#1e40af;font-weight:600;"
+        )
+        sol_lay.addWidget(self._ozet_toplam_lbl)
+        body_lay.addWidget(sol)
+
+        # ── Sağ Panel: Ekstre Tablosu ──
+        sag = QFrame()
+        sag.setStyleSheet(
+            "background:white;border-radius:10px;"
+            "border:1.5px solid #bfdbfe;"
+        )
+        sag_lay = QVBoxLayout(sag)
+        sag_lay.setContentsMargins(0, 0, 0, 0)
+        sag_lay.setSpacing(0)
+
+        # Sağ başlık
+        sag_hdr_frame = QFrame()
+        sag_hdr_frame.setFixedHeight(38)
+        sag_hdr_frame.setStyleSheet(
+            "background:#2563eb;border-radius:9px 9px 0 0;"
+        )
+        sag_hdr_lay = QHBoxLayout(sag_hdr_frame)
+        sag_hdr_lay.setContentsMargins(12, 0, 12, 0)
+        self._sag_baslik = QLabel("📊  Kart seçin →")
+        self._sag_baslik.setStyleSheet(
+            "color:white;font-size:13px;font-weight:700;"
+        )
+        sag_hdr_lay.addWidget(self._sag_baslik, 1)
+        sag_lay.addWidget(sag_hdr_frame)
+
+        # Ay seçici + Filtre çubuğu
+        filtre_frame = QFrame()
+        filtre_frame.setFixedHeight(44)
+        filtre_frame.setStyleSheet(
+            "background:#eff6ff;border-bottom:1px solid #bfdbfe;"
+        )
+        filtre_lay = QHBoxLayout(filtre_frame)
+        filtre_lay.setContentsMargins(10, 0, 10, 0)
+        filtre_lay.setSpacing(8)
+
+        # Ay combo
+        filtre_lay.addWidget(self._lbl("Ay:"))
+        self._ay_cb = QComboBox()
+        self._ay_cb.setFixedSize(90, 30)
+        self._ay_cb.setStyleSheet(self._CBS)
+        AY_ADLARI = [
+            "Hepsi", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+            "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
+        ]
+        for i, ad in enumerate(AY_ADLARI):
+            self._ay_cb.addItem(ad, i)
+        self._ay_cb.currentIndexChanged.connect(self._on_ay_degis)
+        filtre_lay.addWidget(self._ay_cb)
+
+        filtre_lay.addWidget(self._lbl("İlk Tarih:"))
+        self._ilk_de = QDateEdit()
+        self._ilk_de.setCalendarPopup(True)
+        self._ilk_de.setDisplayFormat("dd.MM.yyyy")
+        self._ilk_de.setFixedSize(120, 30)
+        self._ilk_de.setStyleSheet(self._DES)
+        self._ilk_de.setDate(QDate(self._yil, 1, 1))
+        filtre_lay.addWidget(self._ilk_de)
+
+        filtre_lay.addWidget(self._lbl("Son Tarih:"))
+        self._son_de = QDateEdit()
+        self._son_de.setCalendarPopup(True)
+        self._son_de.setDisplayFormat("dd.MM.yyyy")
+        self._son_de.setFixedSize(120, 30)
+        self._son_de.setStyleSheet(self._DES)
+        self._son_de.setDate(QDate.currentDate())
+        filtre_lay.addWidget(self._son_de)
+
+        filtre_lay.addStretch()
+
+        self._filtre_btn = QPushButton("🔍  Filtrele")
+        self._filtre_btn.setFixedSize(100, 30)
+        self._filtre_btn.setStyleSheet(
+            "QPushButton{background:#2563eb;color:white;border:none;"
+            "border-radius:7px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:#1d4ed8;}"
+            "QPushButton:disabled{background:#cbd5e1;}"
+        )
+        self._filtre_btn.setEnabled(False)
+        self._filtre_btn.clicked.connect(self._load_ekstre)
+        filtre_lay.addWidget(self._filtre_btn)
+        sag_lay.addWidget(filtre_frame)
+
+        # Özet bantı
+        self._ekstre_ozet_lbl = QLabel("💳  Sol panelden bir kart seçin")
+        self._ekstre_ozet_lbl.setFixedHeight(26)
+        self._ekstre_ozet_lbl.setStyleSheet(
+            "background:#dbeafe;border-bottom:1px solid #bfdbfe;"
+            "padding:0 10px;font-size:11px;color:#1e40af;"
+        )
+        self._ekstre_ozet_lbl.setTextFormat(Qt.TextFormat.RichText)
+        sag_lay.addWidget(self._ekstre_ozet_lbl)
+
+        # Ekstre tablosu
+        SUTUNLAR = [
+            ("Tarih",       80),
+            ("Açıklama",   320),
+            ("Tutar",        110),
+            ("Hesap Kodu",   90),
+            ("Banka / Kart", 200),
+        ]
+        self._ekstre_tbl = QTableWidget()
+        self._ekstre_tbl.setColumnCount(len(SUTUNLAR))
+        self._ekstre_tbl.setHorizontalHeaderLabels([s[0] for s in SUTUNLAR])
+        self._ekstre_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._ekstre_tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._ekstre_tbl.setAlternatingRowColors(True)
+        self._ekstre_tbl.verticalHeader().setVisible(False)
+        self._ekstre_tbl.setSortingEnabled(True)
+        self._ekstre_tbl.horizontalHeader().setStretchLastSection(True)
+        for i, (_, w) in enumerate(SUTUNLAR):
+            self._ekstre_tbl.setColumnWidth(i, w)
+        self._ekstre_tbl.setStyleSheet(self._TBL_STYLE)
+        sag_lay.addWidget(self._ekstre_tbl, 1)
+
+        body_lay.addWidget(sag, 1)
+        root.addWidget(body, 1)
+
+        # ── Alt bar ──
+        alt = QFrame()
+        alt.setFixedHeight(48)
+        alt.setStyleSheet("background:white;border-top:1px solid #e2e8f0;")
+        a = QHBoxLayout(alt)
+        a.setContentsMargins(16, 0, 16, 0)
+        a.addStretch()
+        kapat = QPushButton("✕  Kapat")
+        kapat.setFixedSize(110, 32)
+        kapat.setStyleSheet(
+            "QPushButton{background:#64748b;color:white;border:none;"
+            "border-radius:7px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:#475569;}"
+        )
+        kapat.clicked.connect(self.accept)
+        a.addWidget(kapat)
+        root.addWidget(alt)
+
+    # ── Yardımcılar ───────────────────────────────────────────
+
+    @staticmethod
+    def _lbl(txt: str) -> QLabel:
+        l = QLabel(txt)
+        l.setStyleSheet("font-size:12px;color:#1e40af;font-weight:600;")
+        return l
+
+    # ── Ay Değişimi ────────────────────────────────────────────
+
+    def _on_ay_degis(self):
+        """Ay seçilince ilk/son tarihi otomatik doldurur, kart seçiliyse filtreler."""
+        import calendar as _cal
+        ay = self._ay_cb.currentData()   # 0=Hepsi, 1=Ocak ... 12=Aralık
+        yil = self._yil
+        if ay and ay > 0:
+            son_gun = _cal.monthrange(yil, ay)[1]
+            self._ilk_de.setDate(QDate(yil, ay, 1))
+            self._son_de.setDate(QDate(yil, ay, son_gun))
+        else:
+            self._ilk_de.setDate(QDate(yil, 1, 1))
+            self._son_de.setDate(QDate.currentDate())
+        if self._secili_banka:
+            self._load_ekstre()
+
+    # ── Kart Özet Yükleme ─────────────────────────────────────────
+
+    def _load_ozet(self):
+        from services.dashboard_service import get_kredi_karti_kart_ozet
+        self._ozet_rows = get_kredi_karti_kart_ozet(self._userid, self._yil)
+        self._ozet_tbl.setSortingEnabled(False)
+        self._ozet_tbl.setRowCount(0)
+
+        from PyQt6.QtGui import QColor, QFont as QF
+        toplam_borc  = 0.0
+        toplam_odeme = 0.0
+        toplam_net   = 0.0
+
+        for row in self._ozet_rows:
+            ri = self._ozet_tbl.rowCount()
+            self._ozet_tbl.insertRow(ri)
+            self._ozet_tbl.setRowHeight(ri, 28)
+
+            banka  = row.get("Banka", "")
+            kayit  = int(row.get("kayit_sayisi", 0))
+            borc   = float(row.get("borc",  0))
+            odeme  = float(row.get("odeme", 0))
+            net    = float(row.get("net",   0))
+            toplam_borc  += borc
+            toplam_odeme += odeme
+            toplam_net   += net
+
+            banka_kisa = banka[:22] + ("…" if len(banka) > 22 else "")
+
+            it0 = QTableWidgetItem(banka_kisa)
+            it0.setToolTip(banka)
+            it0.setForeground(QColor("#1e293b"))
+            it0.setData(Qt.ItemDataRole.UserRole, ri)
+
+            it1 = QTableWidgetItem(str(kayit))
+            it1.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            it1.setForeground(QColor("#374151"))
+
+            it2 = QTableWidgetItem(f"{borc:,.0f}")
+            it2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            it2.setForeground(QColor("#1d4ed8"))
+            it2.setFont(QF("", -1, QF.Weight.Bold))
+
+            net_clr = "#dc2626" if net < 0 else ("#059669" if net > 0 else "#6b7280")
+            it3 = QTableWidgetItem(f"{net:,.0f}")
+            it3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            it3.setForeground(QColor(net_clr))
+            it3.setFont(QF("", -1, QF.Weight.Bold))
+
+            for ci, it in enumerate([it0, it1, it2, it3]):
+                self._ozet_tbl.setItem(ri, ci, it)
+
+        self._ozet_tbl.setSortingEnabled(True)
+        self._ozet_toplam_lbl.setText(
+            f"Harcama: {toplam_borc:,.0f} ₺  "
+            f"Ödeme: {abs(toplam_odeme):,.0f} ₺  "
+            f"Net: {toplam_net:,.0f} ₺"
+        )
+
+    # ── Kart Seçimi ────────────────────────────────────────────
+
+    def _on_kart_sec(self, row: int, _col: int):
+        if row < 0 or row >= len(self._ozet_rows):
+            return
+        self._secili_banka = self._ozet_rows[row].get("Banka", "")
+        banka_kisa = self._secili_banka[:40] + ("…" if len(self._secili_banka) > 40 else "")
+        self._sag_baslik.setText(f"💳  {banka_kisa}")
+        self._filtre_btn.setEnabled(True)
+        self._load_ekstre()
+
+    # ── Ekstre Yükleme ─────────────────────────────────────────
+
+    def _load_ekstre(self):
+        if not self._secili_banka:
+            return
+
+        from services.dashboard_service import get_kredi_karti_ekstre_detay
+        ilk = self._ilk_de.date()
+        son = self._son_de.date()
+        ilk_str = f"{ilk.day():02d}.{ilk.month():02d}.{ilk.year()}"
+        son_str = f"{son.day():02d}.{son.month():02d}.{son.year()}"
+
+        self._ekstre_rows = get_kredi_karti_ekstre_detay(
+            userid=self._userid,
+            banka=self._secili_banka,
+            yil=self._yil,
+            ilk_tarih=ilk_str,
+            son_tarih=son_str,
+        )
+        self._doldur_ekstre(ilk_str, son_str)
+
+    def _doldur_ekstre(self, ilk_str: str, son_str: str):
+        from PyQt6.QtGui import QColor, QFont as QF
+        self._ekstre_tbl.setSortingEnabled(False)
+        self._ekstre_tbl.setRowCount(0)
+
+        toplam_borc  = 0.0
+        toplam_odeme = 0.0
+
+        for row in self._ekstre_rows:
+            ri = self._ekstre_tbl.rowCount()
+            self._ekstre_tbl.insertRow(ri)
+            self._ekstre_tbl.setRowHeight(ri, 26)
+
+            tarih      = row.get("tarih", "")
+            aciklama   = row.get("aciklama", "") or ""
+            tutar_val  = float(row.get("alinan_tutar1") or 0)
+            hesap_kodu = row.get("hesapKodu", "") or ""
+            banka      = row.get("Banka", "") or ""
+            tur        = row.get("tur", "borc")  # 'borc' | 'odeme'
+
+            if tutar_val < 0:
+                toplam_odeme += tutar_val
+            else:
+                toplam_borc  += tutar_val
+
+            # Satır rengi: ödeme satırları kırmızı tonı, harcama satırları normal
+            is_odeme = tutar_val < 0
+            row_bg   = "#fff1f2" if is_odeme else None   # çok hafif kırmızı
+            tutar_clr = "#dc2626" if is_odeme else "#1d4ed8"
+            tutar_txt = f"{tutar_val:,.2f}"  # negatif işaretli kalacak
+
+            ack_kisa = aciklama[:80] + ("…" if len(aciklama) > 80 else "")
+
+            vals = [tarih, ack_kisa, tutar_txt, hesap_kodu, banka]
+            aligns = [
+                Qt.AlignmentFlag.AlignCenter,
+                Qt.AlignmentFlag.AlignLeft,
+                Qt.AlignmentFlag.AlignRight,
+                Qt.AlignmentFlag.AlignCenter,
+                Qt.AlignmentFlag.AlignLeft,
+            ]
+            colors = ["#374151", "#1e293b", tutar_clr, "#6b7280", "#374151"]
+            bolds  = [False, False, True, False, False]
+
+            for ci, (val, aln, clr, bold) in enumerate(zip(vals, aligns, colors, bolds)):
+                it = QTableWidgetItem(str(val))
+                if ci == 1:
+                    it.setToolTip(aciklama)
+                it.setTextAlignment(aln | Qt.AlignmentFlag.AlignVCenter)
+                it.setForeground(QColor(clr))
+                if bold:
+                    it.setFont(QF("", -1, QF.Weight.Bold))
+                # Ödeme satırı arka planı
+                if row_bg:
+                    it.setBackground(QColor(row_bg))
+                self._ekstre_tbl.setItem(ri, ci, it)
+
+        self._ekstre_tbl.setSortingEnabled(True)
+
+        net = toplam_borc + toplam_odeme
+        self._ekstre_ozet_lbl.setText(
+            f"📅 {ilk_str} — {son_str}  │  "
+            f"<b>{len(self._ekstre_rows)}</b> kayıt  │  "
+            f"Harcama: <b style='color:#1d4ed8'>{toplam_borc:,.2f} ₺</b>  "
+            f"Ödeme: <b style='color:#dc2626'>{abs(toplam_odeme):,.2f} ₺</b>  "
+            f"Net: <b>{net:,.2f} ₺</b>"
+        )

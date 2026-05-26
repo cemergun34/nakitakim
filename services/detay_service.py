@@ -263,7 +263,7 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
             rows = conn.execute("""
                 SELECT id, tarih, unvan, vergino, vergiDairesi,
                        faturano, toplam, gelirGiderMod, faturaMod,
-                       formNo, kaynak, yuklenmeTarihi
+                       formNo, kaynak, yuklenmeTarihi, xml_dosya
                 FROM faturalar
                 WHERE userid = ?
                   AND substr(tarih, 1, 4) = ?
@@ -275,7 +275,7 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
             rows = conn.execute("""
                 SELECT id, tarih, unvan, vergino, vergiDairesi,
                        faturano, toplam, gelirGiderMod, faturaMod,
-                       formNo, kaynak, yuklenmeTarihi
+                       formNo, kaynak, yuklenmeTarihi, xml_dosya
                 FROM faturalar
                 WHERE userid = ?
                   AND substr(tarih, 1, 4) = ?
@@ -283,6 +283,77 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
                 ORDER BY tarih DESC, id DESC
                 LIMIT 500
             """, (userid, str(yil), mod)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_kurum_odemeleri_detay(musterino: int, yil: int,
+                               ay: Optional[int] = None) -> list[dict]:
+    """
+    Kurum Ödemeleri detay listesi — nakitakis_Parametre tablosundan.
+    PHP: ajax/nakitAkimParametreAjaxGider.php ile birebir aynı sorgu.
+
+    Sütunlar: hesapKodu, unvan, vergiNo, ilkTarih, sonTarih,
+              sozlesmeNo, sozlesmeTarih, tutar, aciklama
+    ilkTarih DB formatı: YYYYMMDD (20260126)
+    """
+    conn = get_connection()
+    try:
+        if ay and ay != 0:
+            # Ay filtreli: substr(ilkTarih,5,2) = '01' gibi
+            ay_str = f"{ay:02d}"
+            rows = conn.execute("""
+                SELECT
+                    id, hesapKodu, hesapAck, unvan, vergiNo,
+                    ilkTarih, sonTarih, sozlesmeNo, sozlesmeTarih,
+                    tutar, gelirGider, aciklama
+                FROM nakitakis_Parametre
+                WHERE musteriNo = ?
+                  AND gelirGider = 'gider'
+                  AND substr(ilkTarih, 1, 4) = ?
+                  AND substr(ilkTarih, 5, 2) = ?
+                ORDER BY ilkTarih DESC
+            """, (musterino, str(yil), ay_str)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT
+                    id, hesapKodu, hesapAck, unvan, vergiNo,
+                    ilkTarih, sonTarih, sozlesmeNo, sozlesmeTarih,
+                    tutar, gelirGider, aciklama
+                FROM nakitakis_Parametre
+                WHERE musteriNo = ?
+                  AND gelirGider = 'gider'
+                  AND substr(ilkTarih, 1, 4) = ?
+                ORDER BY ilkTarih DESC
+            """, (musterino, str(yil))).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_kurum_odemeleri_detay_tarih(musterino: int,
+                                    ilk_tarih: str,
+                                    son_tarih: str) -> list[dict]:
+    """
+    Tarih aralığı bazlı Kurum Ödemeleri detay listesi.
+    DateEdit picker'dan gelen YYYYMMDD formatında ilk/son tarih alır.
+    Örnek: ilk_tarih='20260201', son_tarih='20260228'
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                id, hesapKodu, hesapAck, unvan, vergiNo,
+                ilkTarih, sonTarih, sozlesmeNo, sozlesmeTarih,
+                tutar, gelirGider, aciklama
+            FROM nakitakis_Parametre
+            WHERE musteriNo = ?
+              AND gelirGider = 'gider'
+              AND ilkTarih >= ?
+              AND ilkTarih <= ?
+            ORDER BY ilkTarih DESC
+        """, (musterino, ilk_tarih, son_tarih)).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()

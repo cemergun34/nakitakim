@@ -119,7 +119,9 @@ def get_gider_pusulasi(userid: int, musterino: int, yil: Optional[int] = None) -
 
 
 def get_maaş_kira_smm(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
-    """Maaş, Kira ve Müşavirlik Giderleri."""
+    """Maaş, Kira ve Müşavirlik Giderleri — sadece genel_hesap_hareketleri'nden.
+    Not: Moy verileri (770.01, 730.08) Kurum Ödemeleri kartına gidiyor.
+    """
     yil = yil or _year()
     conn = get_connection()
     try:
@@ -141,11 +143,19 @@ def get_maaş_kira_smm(userid: int, musterino: int, yil: Optional[int] = None) -
 
 
 def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
-    """Kurum Ödemeleri (Vergi ödemeleri)."""
+    """Kurum Ödemeleri (Vergi ödemeleri + Moy nakitakis_Parametre verileri).
+    PHP: nakitAkimParametreAjaxGider.php ile aynı tablo — nakitakis_Parametre
+    hesapKodu 770.01 (SGK/vergi ödemeleri) ve 730.08 (işçilik/müşavirlik)
+
+    Kaynaklar:
+      1) genel_hesap_hareketleri — eski manuel girişler (Vergi, SGK, Kurum vb.)
+      2) nakitakis_Parametre    — Moy entegrasyonundan gelen 770.01 + 730.08
+    """
     yil = yil or _year()
     conn = get_connection()
     try:
-        row = conn.execute("""
+        # Kaynak 1 — genel_hesap_hareketleri
+        row1 = conn.execute("""
             SELECT COALESCE(SUM(gider), 0) AS toplam
             FROM genel_hesap_hareketleri
             WHERE userid = ?
@@ -156,7 +166,27 @@ def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) 
                 OR teslim_sekli LIKE '%Kurum%')
               AND strftime('%Y', tarih_date) = ?
         """, (userid, musterino, str(yil))).fetchone()
-        return {"toplam": float(row["toplam"] or 0)}
+        toplam1 = float(row1["toplam"] or 0)
+
+        # Kaynak 2 — nakitakis_Parametre (PHP: nakitAkimParametreAjaxGider.php mantığı)
+        # 770.01 = vergi giderleri (Moy 360 hesap kodu → vergi)
+        # 730.08 = işçilik/müşavirlik (Moy 361 hesap kodu)
+        # ilkTarih formatı: YYYYMMDD (20260126 gibi) — ilk 4 karakter yıl
+        row2 = conn.execute("""
+            SELECT COALESCE(SUM(CAST(tutar AS REAL)), 0) AS toplam
+            FROM nakitakis_Parametre
+            WHERE musteriNo = ?
+              AND hesapKodu IN ('770.01', '730.08')
+              AND gelirGider = 'gider'
+              AND substr(ilkTarih, 1, 4) = ?
+        """, (musterino, str(yil))).fetchone()
+        toplam2 = float(row2["toplam"] or 0)
+
+        return {
+            "toplam":       toplam1 + toplam2,
+            "genel_hesap":  toplam1,
+            "moy":          toplam2,
+        }
     finally:
         conn.close()
 
@@ -187,26 +217,120 @@ def get_sanal_pos_toplam(userid: int, yil: Optional[int] = None) -> dict:
 
 
 def get_kredi_karti_toplam(userid: int, yil: Optional[int] = None) -> dict:
-    """Kredi kartı borç ve ödeme toplamı."""
+    """
+    Kredi kartı KPI özeti.
+    tarih kolonu 'DD.MM.YYYY' → son 4 karakter yıl.
+    BORC  = pozitif alinan_tutar1 toplamı (harcama)
+    ODEME = negatif alinan_tutar1 toplamı (geri ödeme / iade)
+    NET   = BORC + ODEME  (admin.php göstergesi)
+    """
     yil = yil or _year()
     conn = get_connection()
     try:
         row = conn.execute("""
             SELECT
-                COALESCE(SUM(borc), 0)  AS toplam_borc,
-                COALESCE(SUM(odeme), 0) AS toplam_odeme
+                COALESCE(SUM(CASE WHEN alinan_tutar1 >= 0 THEN alinan_tutar1 ELSE 0 END), 0) AS toplam_borc,
+                COALESCE(SUM(CASE WHEN alinan_tutar1 <  0 THEN alinan_tutar1 ELSE 0 END), 0) AS toplam_odeme,
+                COALESCE(SUM(alinan_tutar1), 0)                                               AS toplam_net
             FROM kredikartiData
             WHERE userid = ?
-              AND strftime('%Y', tarih) = ?
-        """, (userid, str(yil))).fetchone()
+              AND substr(tarih, -4) = ?
+        """, (str(userid), str(yil))).fetchone()
         return {
             "borc":  float(row["toplam_borc"]  or 0),
             "odeme": float(row["toplam_odeme"] or 0),
+            "net":   float(row["toplam_net"]   or 0),
         }
     except Exception:
-        return {"borc": 0.0, "odeme": 0.0}
+        return {"borc": 0.0, "odeme": 0.0, "net": 0.0}
     finally:
         conn.close()
+
+
+def get_kredi_karti_kart_ozet(userid: int, yil: Optional[int] = None) -> list[dict]:
+    """
+    Kart bazlı özet — admin.php modal ilk seviyesi.
+    Her kart için: borc (harcama), odeme (iade/ödeme), net, kayıt sayısı.
+    """
+    yil = yil or _year()
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                Banka,
+                COUNT(*) AS kayit_sayisi,
+                COALESCE(SUM(CASE WHEN alinan_tutar1 >= 0 THEN alinan_tutar1 ELSE 0 END), 0) AS borc,
+                COALESCE(SUM(CASE WHEN alinan_tutar1 <  0 THEN alinan_tutar1 ELSE 0 END), 0) AS odeme,
+                COALESCE(SUM(alinan_tutar1), 0) AS net,
+                MIN(tarih) AS ilk_tarih,
+                MAX(tarih) AS son_tarih
+            FROM kredikartiData
+            WHERE userid = ?
+              AND substr(tarih, -4) = ?
+            GROUP BY Banka
+            ORDER BY borc DESC
+        """, (str(userid), str(yil))).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def get_kredi_karti_ekstre_detay(
+    userid: int,
+    banka: str,
+    yil: Optional[int] = None,
+    ilk_tarih: Optional[str] = None,
+    son_tarih: Optional[str] = None,
+) -> list[dict]:
+    """
+    Belirli bir karta ait ekstre satırları.
+    Tarih filtresi DD.MM.YYYY formatında verilir.
+    alinan_tutar1 negatif olanlar = ödeme/iade satırı.
+    """
+    yil = yil or _year()
+    conn = get_connection()
+    try:
+        params: list = [str(userid), banka]
+
+        def tr2iso(d: str) -> str:
+            """DD.MM.YYYY → YYYY-MM-DD (SQLite karşılaştırması için)"""
+            p = d.split(".")
+            return f"{p[2]}-{p[1]}-{p[0]}" if len(p) == 3 else d
+
+        if ilk_tarih and son_tarih:
+            where_extra = """
+                AND (
+                    substr(tarih,-4)||'-'||substr(tarih,4,2)||'-'||substr(tarih,1,2)
+                    BETWEEN ? AND ?
+                )
+            """
+            params += [tr2iso(ilk_tarih), tr2iso(son_tarih)]
+        else:
+            where_extra = "AND substr(tarih, -4) = ?"
+            params.append(str(yil))
+
+        rows = conn.execute(f"""
+            SELECT
+                id, tarih, aciklama, Tutar,
+                CAST(alinan_tutar1 AS REAL) AS alinan_tutar1,
+                hesapKodu, womsiskey, islem, Banka,
+                CASE WHEN alinan_tutar1 < 0 THEN 'odeme' ELSE 'borc' END AS tur
+            FROM kredikartiData
+            WHERE userid = ?
+              AND Banka = ?
+              {where_extra}
+            ORDER BY
+                substr(tarih,-4)||'-'||substr(tarih,4,2)||'-'||substr(tarih,1,2) ASC,
+                id ASC
+        """, params).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
 
 
 def get_subeler(userid: int) -> list:

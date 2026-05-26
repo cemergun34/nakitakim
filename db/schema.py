@@ -140,6 +140,17 @@ CREATE TABLE IF NOT EXISTS faturalar (
     xml_dosya       TEXT
 );
 
+CREATE TABLE IF NOT EXISTS cariHesaplar (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    unvan       TEXT,
+    vergiDaire  TEXT,
+    vergiNo     TEXT,
+    tcno        TEXT,
+    userid      INTEGER,
+    logtarih    TEXT,
+    hesapKodu   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS nakitakis_Hareket (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     faturano        TEXT,
@@ -169,7 +180,22 @@ CREATE TABLE IF NOT EXISTS nakitakis_Parametre (
     sonTarih        TEXT,
     sozlesmeNo      TEXT,
     sozlesmeTarih   TEXT,
-    tutar           REAL
+    tutar           REAL,
+    gelirGider      TEXT,   -- 'gelir' | 'gider'
+    aciklama        TEXT,
+    iQmod           TEXT    -- 'hareket' | ...
+);
+
+CREATE TABLE IF NOT EXISTS sirket_profili (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid       INTEGER NOT NULL UNIQUE,
+    unvan        TEXT    NOT NULL DEFAULT '',
+    vergino      TEXT    NOT NULL DEFAULT '',
+    tckn         TEXT             DEFAULT '',
+    vergidairesi TEXT             DEFAULT '',
+    adres        TEXT             DEFAULT '',
+    il           TEXT             DEFAULT '',
+    ilce         TEXT             DEFAULT ''
 );
 
 -- İndeksler
@@ -181,4 +207,88 @@ CREATE INDEX IF NOT EXISTS idx_ghh_userid_nerden_tarih
     ON genel_hesap_hareketleri(userid, nerden_geliyor, tarih_date);
 CREATE INDEX IF NOT EXISTS idx_faturalar_userid_tarih 
     ON faturalar(userid, tarih);
+
+CREATE TABLE IF NOT EXISTS vomsisBilgileri (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid   INTEGER NOT NULL UNIQUE,
+    appkey   TEXT    NOT NULL DEFAULT '',
+    seckey   TEXT    NOT NULL DEFAULT '',
+    url      TEXT    NOT NULL DEFAULT 'https://developers.vomsis.com/api/v2',
+    kayit_tarihi TEXT DEFAULT CURRENT_TIMESTAMP,
+    guncelleme_tarihi TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_vomsis_userid
+    ON vomsisBilgileri(userid);
+
+CREATE TABLE IF NOT EXISTS moy_bilgileri (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    musteriNo   INTEGER NOT NULL UNIQUE,
+    url         TEXT    NOT NULL DEFAULT '',
+    username    TEXT    NOT NULL DEFAULT '',
+    sifre       TEXT    NOT NULL DEFAULT '',
+    moyKayitNo  TEXT             DEFAULT '',
+    tarih       TEXT             DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_moy_musteri
+    ON moy_bilgileri(musteriNo);
+
+-- ── Vergi Muhtasar ─────────────────────────────────────────────────────────
+-- PHP: VergiMuhtasar MySQL tablosunun karşılığı
+-- UPSERT anahtarı: (userid, hesapkodu, donem)
+CREATE TABLE IF NOT EXISTS VergiMuhtasar (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid       INTEGER NOT NULL,
+    musteri_no   INTEGER,
+    hesapkodu    TEXT    NOT NULL,
+    ack          TEXT,
+    donem        TEXT    NOT NULL,
+    gaytutar     REAL,
+    vergkestutar REAL,
+    eklenme_tarihi TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_vergimuhtasar_userid_donem
+    ON VergiMuhtasar(userid, donem);
+
+-- ── Kredi Kartı Tanımları ─────────────────────────────────────────────────
+-- PHP: key_kartlari MySQL tablosunun karşılığı
+-- Kullanıcıya ait kayıtlı kart tanımları (banka, hesap kodu, IBAN vb.)
+CREATE TABLE IF NOT EXISTS key_kartlari (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    banka     TEXT    NOT NULL,          -- Kart etiketi (Örn: "Yapı Kredi-1234")
+    no        TEXT    NOT NULL DEFAULT '',
+    tag       TEXT,
+    userid    INTEGER NOT NULL,
+    hesapKodu TEXT             DEFAULT '',
+    bankaAdi  TEXT             DEFAULT '', -- Banka adı (Örn: "Yapı Kredi", "İş Bankası")
+    iban      TEXT             DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_kartlari_userid
+    ON key_kartlari(userid);
+
+-- ── Kredi Kartı Ekstre Verileri ───────────────────────────────────────────
+-- PHP: kredikartiData MySQL tablosunun karşılığı
+-- CSV/PDF/XLSX dosyalarından aktarılan banka ekstresi kayıtları
+CREATE TABLE IF NOT EXISTS kredikartiData (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid       TEXT,
+    musterino    TEXT,
+    tarih        TEXT,
+    aciklama     TEXT,
+    Tutar        TEXT,
+    carihesapId  TEXT,
+    hesapKodu    TEXT,
+    alinan_tutar1 REAL,
+    womsiskey    TEXT    NOT NULL DEFAULT '',
+    islem        INTEGER,
+    Banka        TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_kredikarti_userid_tarih
+    ON kredikartiData(userid, tarih);
+CREATE INDEX IF NOT EXISTS idx_kredikarti_womsiskey
+    ON kredikartiData(womsiskey);
 """

@@ -11,6 +11,7 @@ from ui.theme import COLORS, SIDEBAR_WIDTH
 from ui.components.sidebar import Sidebar
 from ui.screens.dashboard_screen import DashboardScreen
 from ui.screens.raporlar_screen import RaporlarScreen
+from ui.screens.ayarlar_screen import AyarlarScreen
 
 
 class MainWindow(QMainWindow):
@@ -55,6 +56,14 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(rapor)
         self._screens["raporlar"] = rapor
 
+        ayarlar = AyarlarScreen(self._user)
+        self.stack.addWidget(ayarlar)
+        self._screens["ayarlar"] = ayarlar
+
+        # Moy'dan veri çekilince dashboard'u otomatik yenile
+        if hasattr(ayarlar, "_moy_card"):
+            ayarlar._moy_card.data_changed.connect(dash.refresh)
+
         self.stack.setCurrentWidget(dash)
 
     def _navigate(self, page_id: str):
@@ -63,7 +72,11 @@ class MainWindow(QMainWindow):
             return
 
         if page_id in self._screens:
-            self.stack.setCurrentWidget(self._screens[page_id])
+            screen = self._screens[page_id]
+            self.stack.setCurrentWidget(screen)
+            # Sayfanın refresh() methodu varsa çağır (canlı güncelleme)
+            if hasattr(screen, "refresh") and callable(screen.refresh):
+                screen.refresh()
         else:
             # Henüz implement edilmemiş sayfalar
             from PyQt6.QtWidgets import QLabel
