@@ -149,7 +149,7 @@ def get_cari_hesaplar(userid: int) -> list[dict]:
             "SELECT id, unvan FROM carihesaplar WHERE userid = ? ORDER BY unvan ASC",
             (userid,)
         ).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     except Exception:
         return []
     finally:

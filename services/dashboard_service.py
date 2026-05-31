@@ -283,7 +283,7 @@ def get_kredi_karti_kart_ozet(userid: int, yil: Optional[int] = None) -> list[di
             GROUP BY Banka
             ORDER BY borc DESC
         """, (str(userid), str(yil))).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     except Exception:
         return []
     finally:
@@ -332,7 +332,7 @@ def get_kredi_karti_ekstre_detay(
               {where_extra}
             ORDER BY {_iso} ASC, id ASC
         """, params).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     except Exception:
         return []
     finally:
@@ -346,7 +346,7 @@ def get_subeler(userid: int) -> list:
         rows = conn.execute(
             'SELECT id, subeAck FROM subeler WHERE userid=? ORDER BY id', (userid,)
         ).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -366,7 +366,7 @@ def get_monthly_comparison(userid: int, musterino: int, yil: Optional[int] = Non
             GROUP BY {mo("tarih_date")}
             ORDER BY {mo("tarih_date")}
         """, (userid, musterino, str(yil))).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 

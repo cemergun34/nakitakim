@@ -225,7 +225,7 @@ def get_gunluk_mali_durum(userid: int, musterino: int, ay: int, yil: Optional[in
             GROUP BY tarih_date
             ORDER BY tarih_date
         """, (userid, musterino, str(yil), ay)).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -249,7 +249,7 @@ def get_vadesi_gecen_tahsilatlar(userid: int, musterino: int) -> list:
             GROUP BY unvan
             ORDER BY hesap_bakiyesi DESC
         """, (userid, musterino, today)).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 

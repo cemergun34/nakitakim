@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import QApplication
 from ui.theme import COLORS
 
 
-
 class LoginWorker(QThread):
     """Authenticate işlemini arka thread'de çalıştırır (UI donmasını önler)."""
     finished = pyqtSignal(object)  # dict | None
@@ -67,27 +66,8 @@ class LoginScreen(QWidget):
         right.setMinimumWidth(440)
         r_layout = QVBoxLayout(right)
         r_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        r_layout.setContentsMargins(60, 60, 60, 20)
+        r_layout.setContentsMargins(60, 60, 60, 60)
         r_layout.setSpacing(0)
-
-        # Logo metin
-        logo_lbl = QLabel("IQ Finans")
-        logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo_lbl.setStyleSheet(f"""
-            color: {COLORS['btn_primary']};
-            font-size: 32px;
-            font-weight: 800;
-            letter-spacing: 2px;
-        """)
-        r_layout.addWidget(logo_lbl)
-
-        subtitle = QLabel("Nakit Akış Yönetimi")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet(
-            f"color: {COLORS['text_secondary']}; font-size: 14px; margin-bottom: 40px;"
-        )
-        r_layout.addWidget(subtitle)
-        r_layout.addSpacing(40)
 
         # Kart
         card = QFrame()
@@ -211,9 +191,9 @@ class LoginScreen(QWidget):
         self.exit_btn.clicked.connect(self._on_exit)
         card_layout.addWidget(self.exit_btn)
 
+        r_layout.addStretch()
         r_layout.addWidget(card)
         r_layout.addStretch()
-        r_layout.addSpacing(12)
 
         main.addWidget(right, 1)
 
@@ -234,10 +214,6 @@ class LoginScreen(QWidget):
     # ── DB bekleme banneri (PG modu) ─────────────────────────────────────────
 
     def set_db_loading(self, loading: bool, error: str = ""):
-        """
-        loading=True  : animasyonlu bekleme göster, login butonunu kilitle
-        loading=False : banneri gizle (veya hata/başarı mesajı göster)
-        """
         if loading:
             self._db_banner.show()
             self._db_banner.setFixedHeight(40)
@@ -249,7 +225,6 @@ class LoginScreen(QWidget):
             self.login_btn.setText("Bağlantı bekleniyor...")
             self._anim_frame = 0
             self._anim_timer.start(480)
-            # WARP butonunu gizle
             if hasattr(self, "_warp_btn"):
                 self._warp_btn.hide()
             if hasattr(self, "_retry_btn"):
@@ -257,7 +232,6 @@ class LoginScreen(QWidget):
         else:
             self._anim_timer.stop()
             if error:
-                # ── Hata banneri ──────────────────────────────────────────────
                 self._db_banner.setFixedHeight(52)
                 self._db_banner.setText(
                     f"⚠  Sunucu bağlantısı kurulamadı.\n"
@@ -272,11 +246,8 @@ class LoginScreen(QWidget):
                 self.login_btn.setEnabled(True)
                 self.login_btn.setText("GİRİŞ YAP")
 
-                # ── Cloudflare WARP & Tekrar Dene butonları ───────────────────
                 if not hasattr(self, "_warp_btn"):
-                    import os
                     from PyQt6.QtWidgets import QHBoxLayout
-                    # Buton layout — banner'ın parent layout'unu bul
                     banner_parent_layout = self._db_banner.parentWidget().layout()
                     banner_idx = None
                     for i in range(banner_parent_layout.count()):
@@ -319,7 +290,6 @@ class LoginScreen(QWidget):
                 self._warp_btn.show()
                 self._retry_btn.show()
             else:
-                # ── Başarı banneri ────────────────────────────────────────────
                 self._db_banner.setFixedHeight(40)
                 self._db_banner.setText("✅  Sunucuya bağlandı — giriş yapabilirsiniz")
                 self._db_banner.setStyleSheet(
@@ -336,18 +306,10 @@ class LoginScreen(QWidget):
                 QTimer.singleShot(3000, self._db_banner.hide)
 
     def _open_warp_download(self):
-        """Cloudflare WARP indirme sayfasını tarayıcıda açar."""
-        import webbrowser
-        import sys
-        if sys.platform == "darwin":
-            webbrowser.open("https://1.1.1.1/")   # Mac: App Store + web
-        elif sys.platform == "win32":
-            webbrowser.open("https://1.1.1.1/")
-        else:
-            webbrowser.open("https://1.1.1.1/")
+        import webbrowser, sys
+        webbrowser.open("https://1.1.1.1/")
 
     def _retry_pg_connect(self):
-        """PostgreSQL bağlantısını tekrar dener."""
         self.set_db_loading(True)
         from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -368,7 +330,6 @@ class LoginScreen(QWidget):
         self._retry_thread.start()
 
     def _tick_anim(self):
-        """Her timer tick'inde animasyon karesini günceller."""
         self._anim_frame = (self._anim_frame + 1) % len(self._ANIM_FRAMES)
         self._db_banner.setText(
             f"🔄  Lütfen bekleyiniz...  {self._ANIM_FRAMES[self._anim_frame]}"
@@ -401,7 +362,6 @@ class LoginScreen(QWidget):
         self.login_btn.setEnabled(False)
         self.login_btn.setText("Giriş yapılıyor...")
 
-        # PG modunda bekleme bannerı göster
         try:
             from db.db_config import get_mode
             if get_mode() == "postgres":
@@ -409,20 +369,17 @@ class LoginScreen(QWidget):
         except Exception:
             pass
 
-        # Arka thread'de çalıştır — PostgreSQL modunda UI donmasını önler
         self._login_worker = LoginWorker(username, password)
         self._login_worker.finished.connect(self._on_login_result)
         self._login_worker.start()
 
     def _on_login_result(self, user):
         if user:
-            # Başarı: banner'i gizle, ana pencereye geç
             self._anim_timer.stop()
             self._db_banner.hide()
             self.error_lbl.hide()
             self.login_success.emit(user)
         else:
-            # Hata: banner'i kaldır, hata mesajı göster
             self._anim_timer.stop()
             self._db_banner.hide()
             self._show_error("Kullanıcı adı veya şifre hatalı.")
@@ -439,37 +396,118 @@ class LoginScreen(QWidget):
         dlg.exec()
 
     def _on_exit(self):
-        """Uygulamayı kapatır."""
         QApplication.quit()
 
 
+# ── Animasyonlu Gradient Panel ────────────────────────────────────────────────
+
 class GradientPanel(QWidget):
-    """Giriş ekranının sol tarafındaki gradient dekoratif panel."""
+    """
+    Giriş ekranının sol tarafındaki gradient dekoratif panel.
+    Baloncuklar rastgele hareket eder, duvarlardan sekip geri döner — 30fps.
+    """
+
+    _BUBBLE_COUNT = 9
+
+    _LABELS = [
+        "Nakit Akış", "Gelir", "Gider",
+        "Bankalar", "Kredi Kartları",
+        "Nakit Akış", "Gelir", "Gider", "Bankalar",
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        import random
+        self._rng = random.Random()
+
+        # Her baloncuk: [x, y, radius, vx, vy, alpha, label]
+        self._bubbles: list[list] = []
+        for i in range(self._BUBBLE_COUNT):
+            r   = self._rng.uniform(28, 90)
+            vx  = self._rng.uniform(0.35, 1.1) * self._rng.choice([-1, 1])
+            vy  = self._rng.uniform(0.35, 1.1) * self._rng.choice([-1, 1])
+            a   = self._rng.uniform(12, 32)
+            lbl = self._LABELS[i % len(self._LABELS)]
+            self._bubbles.append([
+                self._rng.uniform(50, 430),
+                self._rng.uniform(50, 550),
+                r, vx, vy, a, lbl
+            ])
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)   # ~30fps
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+    def _tick(self):
+        """Her frame'de baloncukları hareket ettir, sınırlardan sekir."""
+        w = max(self.width(), 1)
+        h = max(self.height(), 1)
+        for b in self._bubbles:
+            x, y, r, vx, vy = b[0], b[1], b[2], b[3], b[4]
+            x += vx
+            y += vy
+            if x - r < 0:
+                x = r;  vx = abs(vx)
+            elif x + r > w:
+                x = w - r;  vx = -abs(vx)
+            if y - r < 0:
+                y = r;  vy = abs(vy)
+            elif y + r > h:
+                y = h - r;  vy = -abs(vy)
+            b[0], b[1], b[3], b[4] = x, y, vx, vy
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w, h = self.width(), self.height()
+        for b in self._bubbles:
+            r = b[2]
+            if b[0] < r or b[0] > w - r:
+                b[0] = self._rng.uniform(r, max(r + 1, w - r))
+            if b[1] < r or b[1] > h - r:
+                b[1] = self._rng.uniform(r, max(r + 1, h - r))
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
 
+        # ── Gradient arka plan ──────────────────────────────────────────────────
         grad = QLinearGradient(0, 0, rect.width(), rect.height())
         grad.setColorAt(0.0, QColor("#1E3A5F"))
         grad.setColorAt(0.5, QColor("#2563EB"))
         grad.setColorAt(1.0, QColor("#7C3AED"))
-
         painter.fillRect(rect, QBrush(grad))
 
-        # Dekoratif daireler
+        # ── Animasyonlu baloncuklar ─────────────────────────────────────────────
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 15))
-        painter.drawEllipse(-80, -80, 320, 320)
-        painter.setBrush(QColor(255, 255, 255, 10))
-        painter.drawEllipse(rect.width() - 200, rect.height() - 200, 320, 320)
-        painter.setBrush(QColor(255, 255, 255, 8))
-        painter.drawEllipse(
-            rect.width() // 2 - 100, rect.height() // 2 - 100, 200, 200
-        )
+        for b in self._bubbles:
+            x, y, r, _, _, a, label = b[0], b[1], b[2], b[3], b[4], b[5], b[6]
+            ai = int(a)
+            # İç saydam daire
+            painter.setBrush(QColor(255, 255, 255, ai))
+            painter.drawEllipse(int(x - r), int(y - r), int(r * 2), int(r * 2))
+            # Kenar halkası
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255, min(255, int(ai * 2.5))), 1.5))
+            painter.drawEllipse(int(x - r), int(y - r), int(r * 2), int(r * 2))
 
-        # Metin
+            # ── Baloncuk içi silik etiket ─────────────────────────────────────
+            font_size = max(7, int(r * 0.28))   # Yarıçapa göre ölçekli font
+            lbl_font = QFont(".AppleSystemUIFont", font_size)
+            painter.setFont(lbl_font)
+            # Opaklık: baloncuğun kenara göre biraz daha belirgin ama hâlâ silik
+            painter.setPen(QColor(255, 255, 255, min(255, int(ai * 3.2))))
+            from PyQt6.QtCore import QRectF
+            painter.drawText(
+                QRectF(x - r, y - r, r * 2, r * 2),
+                Qt.AlignmentFlag.AlignCenter,
+                label
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+
+        # ── Merkez metin ────────────────────────────────────────────────────────
         painter.setPen(QColor(255, 255, 255))
         font = QFont(".AppleSystemUIFont", 28, QFont.Weight.Bold)
         painter.setFont(font)
@@ -479,51 +517,29 @@ class GradientPanel(QWidget):
             "IQ Finans\nNakit Akış Yönetimi"
         )
 
-        sub_font = QFont(".AppleSystemUIFont", 13)
-        painter.setFont(sub_font)
-        painter.setPen(QColor(255, 255, 255, 180))
-        painter.drawText(
-            rect.adjusted(40, 80, -40, 0),
-            Qt.AlignmentFlag.AlignCenter,
-            "Finansal verilerinizi\ngüvenle yönetin"
-        )
-
-        # ── Veritabanı Bilgi Rozeti (Bottom-Left Badge) ────────────────────────
+        # ── Veritabanı Bilgi Rozeti (alt sol köşe) ─────────────────────────────
         try:
             from db.db_config import get_mode
             mode = get_mode()
             if mode == "postgres":
                 db_text = "🌐  Sunucu (PostgreSQL) veritabanınızda açılıyorsunuz."
-                bg_color = QColor("#1D4ED8")  # Premium koyu mavi
+                bg_color = QColor("#1D4ED8")
             else:
                 db_text = "💻  Lokal (SQLite) veritabanınızda açılıyorsunuz."
-                bg_color = QColor("#2563EB")  # Premium canlı mavi
+                bg_color = QColor("#2563EB")
 
             badge_font = QFont(".AppleSystemUIFont", 11, QFont.Weight.Bold)
             painter.setFont(badge_font)
-
-            # Metin genişliği/yüksekliğini hesapla
             fm = painter.fontMetrics()
             text_w = fm.horizontalAdvance(db_text)
             text_h = fm.height()
-
-            # Rozet konum ve ölçüleri
-            pad_x = 18
-            pad_y = 9
+            pad_x, pad_y = 18, 9
             b_w = text_w + pad_x * 2
             b_h = text_h + pad_y * 2
-            b_x = 24
-            b_y = rect.height() - b_h - 24
-
-            badge_rect = QRect(b_x, b_y, b_w, b_h)
-
-            # Arka plan çiz
+            badge_rect = QRect(24, rect.height() - b_h - 24, b_w, b_h)
             painter.setBrush(QBrush(bg_color))
-            # İnce şık sınır çizgisi
             painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
             painter.drawRoundedRect(badge_rect, 8, 8)
-
-            # Metni çiz
             painter.setPen(QColor(255, 255, 255))
             painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, db_text)
         except Exception:

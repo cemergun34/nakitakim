@@ -56,8 +56,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("Subeler", """
-        CREATE TABLE IF NOT EXISTS "Subeler" (
+    ("subeler", """
+        CREATE TABLE IF NOT EXISTS subeler (
             id       INTEGER PRIMARY KEY,
             subeack  TEXT NOT NULL,
             userid   INTEGER,
@@ -74,8 +74,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("odemeSekli", """
-        CREATE TABLE IF NOT EXISTS "odemeSekli" (
+    ("odemesekli", """
+        CREATE TABLE IF NOT EXISTS odemesekli (
             id             INTEGER PRIMARY KEY,
             odemesekliack  TEXT NOT NULL,
             userid         INTEGER,
@@ -84,8 +84,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("altHesapKodu", """
-        CREATE TABLE IF NOT EXISTS "altHesapKodu" (
+    ("althesapkodu", """
+        CREATE TABLE IF NOT EXISTS althesapkodu (
             id          SERIAL PRIMARY KEY,
             kod         TEXT NOT NULL,
             aciklama    TEXT NOT NULL,
@@ -167,8 +167,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("cariHesaplar", """
-        CREATE TABLE IF NOT EXISTS "cariHesaplar" (
+    ("carihesaplar", """
+        CREATE TABLE IF NOT EXISTS carihesaplar (
             id          SERIAL PRIMARY KEY,
             unvan       TEXT,
             vergidaire  TEXT,
@@ -180,8 +180,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("nakitakis_Hareket", """
-        CREATE TABLE IF NOT EXISTS "nakitakis_Hareket" (
+    ("nakitakis_hareket", """
+        CREATE TABLE IF NOT EXISTS nakitakis_hareket (
             id              SERIAL PRIMARY KEY,
             faturano        TEXT,
             musterino       TEXT,
@@ -200,8 +200,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("nakitakis_Parametre", """
-        CREATE TABLE IF NOT EXISTS "nakitakis_Parametre" (
+    ("nakitakis_parametre", """
+        CREATE TABLE IF NOT EXISTS nakitakis_parametre (
             id              SERIAL PRIMARY KEY,
             musterino       INTEGER,
             hesapkodu       TEXT,
@@ -233,8 +233,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("vomsisBilgileri", """
-        CREATE TABLE IF NOT EXISTS vomsisBilgileri (
+    ("vomsisbilgileri", """
+        CREATE TABLE IF NOT EXISTS vomsisbilgileri (
             id       SERIAL PRIMARY KEY,
             userid   INTEGER NOT NULL UNIQUE,
             appkey   TEXT    NOT NULL DEFAULT '',
@@ -257,8 +257,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("VergiMuhtasar", """
-        CREATE TABLE IF NOT EXISTS "VergiMuhtasar" (
+    ("vergimuhtasar", """
+        CREATE TABLE IF NOT EXISTS vergimuhtasar (
             id           SERIAL PRIMARY KEY,
             userid       INTEGER NOT NULL,
             musteri_no   INTEGER,
@@ -284,8 +284,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("kredikartiData", """
-        CREATE TABLE IF NOT EXISTS "kredikartiData" (
+    ("kredikartidata", """
+        CREATE TABLE IF NOT EXISTS kredikartidata (
             id            SERIAL PRIMARY KEY,
             userid        TEXT,
             musterino     TEXT,
@@ -384,8 +384,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("ibanHesapBilgileri", """
-        CREATE TABLE IF NOT EXISTS "ibanHesapBilgileri" (
+    ("ibanhesapbilgileri", """
+        CREATE TABLE IF NOT EXISTS ibanhesapbilgileri (
             id               SERIAL PRIMARY KEY,
             userid           INTEGER NOT NULL,
             ibanhesapbaslik  TEXT NOT NULL,
@@ -404,16 +404,16 @@ PG_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_hareketler_gelirgider ON hareketler(gelirgider);",
     "CREATE INDEX IF NOT EXISTS idx_ghh_userid_nerden_tarih ON genel_hesap_hareketleri(userid, nerden_geliyor, tarih_date);",
     "CREATE INDEX IF NOT EXISTS idx_faturalar_userid_tarih ON faturalar(userid, tarih);",
-    "CREATE INDEX IF NOT EXISTS idx_vomsis_userid ON vomsisBilgileri(userid);",
+    "CREATE INDEX IF NOT EXISTS idx_vomsis_userid ON vomsisbilgileri(userid);",
     'CREATE INDEX IF NOT EXISTS idx_moy_musteri ON moy_bilgileri(musterino);',
-    'CREATE INDEX IF NOT EXISTS idx_vergimuhtasar_userid_donem ON "VergiMuhtasar"(userid, donem);',
+    'CREATE INDEX IF NOT EXISTS idx_vergimuhtasar_userid_donem ON vergimuhtasar(userid, donem);',
     "CREATE INDEX IF NOT EXISTS idx_key_kartlari_userid ON key_kartlari(userid);",
-    'CREATE INDEX IF NOT EXISTS idx_kredikarti_userid_tarih ON "kredikartiData"(userid, tarih);',
-    'CREATE INDEX IF NOT EXISTS idx_kredikarti_womsiskey ON "kredikartiData"(womsiskey);',
+    'CREATE INDEX IF NOT EXISTS idx_kredikarti_userid_tarih ON kredikartidata(userid, tarih);',
+    'CREATE INDEX IF NOT EXISTS idx_kredikarti_womsiskey ON kredikartidata(womsiskey);',
     "CREATE INDEX IF NOT EXISTS idx_paytr_userid_islemtarihi ON paytr(userid, islemtarihi);",
     "CREATE INDEX IF NOT EXISTS idx_paytr_sync_log_userid ON paytr_sync_log(userid, musterino);",
     "CREATE INDEX IF NOT EXISTS idx_apisanalpos_userid ON apisanalpos(userid);",
-    'CREATE INDEX IF NOT EXISTS idx_iban_userid ON "ibanHesapBilgileri"(userid);',
+    'CREATE INDEX IF NOT EXISTS idx_iban_userid ON ibanhesapbilgileri(userid);',
 ]
 
 # Taşıma dışı bırakılacak tablolar (sistem tabloları)

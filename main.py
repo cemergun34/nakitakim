@@ -55,6 +55,13 @@ def main():
     from db.db_config import get_mode
     from db.database import initialize_db
 
+    # ── FPPRO fabrika ayarları (ilk kurulumda bir kez çalışır) ─────────────
+    try:
+        from bootstrap_fppro import run_bootstrap
+        run_bootstrap(force=False)   # sentinel varsa otomatik atlanır
+    except Exception as _bs_exc:
+        print(f"[Bootstrap] Uyarı: {_bs_exc}")
+
     mode = get_mode()
 
     # SQLite şeması her zaman hazırlanır (hızlı, yerel, fallback için gerekli)

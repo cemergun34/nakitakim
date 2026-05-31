@@ -69,7 +69,7 @@ def get_nakit_kasa_sube_ozet(userid: int, musterino: int, yil: int) -> list[dict
             """, params_yil).fetchall()
             if rows:
                 break
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -94,7 +94,7 @@ def get_genel_hesap_sube_ozet(userid: int, musterino: int, yil: int) -> list[dic
             GROUP BY g.sube
             ORDER BY toplam_gelir DESC
         """, (userid, musterino, str(yil))).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -120,7 +120,7 @@ def get_fatura_sube_ozet(userid: int, yil: int, mod: str) -> list[dict]:
             ORDER BY toplam_tutar DESC
             LIMIT 50
         """, (userid, str(yil), mod)).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -147,7 +147,7 @@ def get_gider_sube_ozet(userid: int, musterino: int, yil: int) -> list[dict]:
             GROUP BY g.teslim_sekli
             ORDER BY toplam_gider DESC
         """, (userid, musterino, str(yil))).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -212,7 +212,7 @@ def get_hareketler_detay(userid: int, musterino: int, yil: int,
                 """, params).fetchall()
             if rows:
                 break
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -227,7 +227,7 @@ def get_genel_hesap_detay(userid: int, musterino: int, yil: int,
         if sube_adi and sube_adi != "(Şubesiz)":
             rows = conn.execute(f"""
                 SELECT
-                    g.id, g.tarih_date AS tarih, g.aciklama,
+                    g.id, g.tarih_date AS tarih, g.form_id, g.aciklama,
                     g.sube AS sube_adi, g.gelir, g.gider,
                     g.teslim_sekli, g.odeme_sekli, g.kategori,
                     g.nerden_geliyor
@@ -242,7 +242,7 @@ def get_genel_hesap_detay(userid: int, musterino: int, yil: int,
         else:
             rows = conn.execute(f"""
                 SELECT
-                    g.id, g.tarih_date AS tarih, g.aciklama,
+                    g.id, g.tarih_date AS tarih, g.form_id, g.aciklama,
                     COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
                     g.gelir, g.gider,
                     g.teslim_sekli, g.odeme_sekli, g.kategori,
@@ -254,7 +254,7 @@ def get_genel_hesap_detay(userid: int, musterino: int, yil: int,
                 ORDER BY g.tarih_date DESC, g.id DESC
                 LIMIT 500
             """, (userid, musterino, str(yil))).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -302,7 +302,7 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
                 ORDER BY tarih DESC, id DESC
                 LIMIT 10000
             """, (userid, str(yil), mod)).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -345,7 +345,7 @@ def get_kurum_odemeleri_detay(musterino: int, yil: int,
                   AND {left4(_ilkt)} = ?
                 ORDER BY {_ilkt} DESC
             """, (musterino, str(yil))).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
     finally:
         conn.close()
 
@@ -375,6 +375,137 @@ def get_kurum_odemeleri_detay_tarih(musterino: int,
               AND {_ilkt} <= ?
             ORDER BY {_ilkt} DESC
         """, (musterino, ilk_tarih, son_tarih)).fetchall()
-        return [dict(r) for r in rows]
+        return list(rows)
+    finally:
+        conn.close()
+
+
+# ─── FATURA ŞUBE BAZLI ÖZET ───────────────────────────────────────────────────
+
+def get_fatura_sube_ozet(userid: int, musterino: int, yil: int,
+                          mod: str) -> list[dict]:
+    """
+    Kesilen (mod='gelir') veya Gelen (mod='gider') faturaları
+    genel_hesap_hareketleri.form_id üzerinden şubeye bağlayarak
+    şube bazlı özet döndürür.
+
+    Faturanın form_no'su eşleşmiyorsa '(Şubesiz)' grubuna düşer.
+    """
+    _mod_col = _col("gelirGiderMod", "gelirgidermod")
+    conn = get_connection()
+    try:
+        rows = conn.execute(f"""
+            SELECT
+                COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
+                COUNT(DISTINCT f.id)           AS kayit_sayisi,
+                {_round_sql("SUM(CAST(f.toplam AS REAL))")} AS toplam_gelir,
+                0                              AS toplam_gider
+            FROM faturalar f
+            LEFT JOIN genel_hesap_hareketleri g
+                ON g.form_id = f.{_col("formNo", "formno")}
+               AND g.userid  = f.userid
+               AND g.musteri_no = ?
+            WHERE f.userid = ?
+              AND {left4("f.tarih")} = ?
+              AND f.{_mod_col} = ?
+            GROUP BY COALESCE(g.sube, '(Şubesiz)')
+            ORDER BY toplam_gelir DESC
+        """, (musterino, userid, str(yil), mod)).fetchall()
+        return list(rows)
+    finally:
+        conn.close()
+
+
+def get_fatura_detay_by_sube(userid: int, musterino: int, yil: int,
+                              mod: str, sube_adi: str) -> list[dict]:
+    """
+    Belirli bir şubeye ait fatura listesi.
+    Şube bilgisi genel_hesap_hareketleri.sube üzerinden JOIN ile gelir.
+    sube_adi='(Şubesiz)' → eşleşmeyen faturalar.
+    """
+    _mod_col = _col("gelirGiderMod", "gelirgidermod")
+    _fmod_col = _col("faturaMod", "faturamod")
+    _fno_col  = _col("formNo", "formno")
+    _ykl_col  = _col("yuklenmeTarihi", "yuklenmetarihi")
+    conn = get_connection()
+    try:
+        if sube_adi == "(Şubesiz)":
+            rows = conn.execute(f"""
+                SELECT DISTINCT f.id, f.tarih, f.unvan, f.vergino,
+                       {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,
+                       {_col("f.faturano", "f.faturano")} AS faturano,
+                       f.toplam, f.{_mod_col} AS gelirgidermod,
+                       f.{_fmod_col} AS faturamod,
+                       f.{_fno_col} AS formno, f.kaynak,
+                       f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
+                       NULL AS sube_adi
+                FROM faturalar f
+                LEFT JOIN genel_hesap_hareketleri g
+                    ON g.form_id = f.{_fno_col}
+                   AND g.userid  = f.userid
+                   AND g.musteri_no = ?
+                WHERE f.userid = ?
+                  AND {left4("f.tarih")} = ?
+                  AND f.{_mod_col} = ?
+                  AND g.id IS NULL
+                ORDER BY f.tarih DESC, f.id DESC
+                LIMIT 5000
+            """, (musterino, userid, str(yil), mod)).fetchall()
+        else:
+            rows = conn.execute(f"""
+                SELECT DISTINCT f.id, f.tarih, f.unvan, f.vergino,
+                       {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,
+                       {_col("f.faturano", "f.faturano")} AS faturano,
+                       f.toplam, f.{_mod_col} AS gelirgidermod,
+                       f.{_fmod_col} AS faturamod,
+                       f.{_fno_col} AS formno, f.kaynak,
+                       f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
+                       g.sube AS sube_adi
+                FROM faturalar f
+                JOIN genel_hesap_hareketleri g
+                    ON g.form_id = f.{_fno_col}
+                   AND g.userid  = f.userid
+                   AND g.musteri_no = ?
+                WHERE f.userid = ?
+                  AND {left4("f.tarih")} = ?
+                  AND f.{_mod_col} = ?
+                  AND g.sube = ?
+                ORDER BY f.tarih DESC, f.id DESC
+                LIMIT 5000
+            """, (musterino, userid, str(yil), mod, sube_adi)).fetchall()
+        return list(rows)
+    finally:
+        conn.close()
+
+
+def get_fatura_by_formno(userid: int, formno: str) -> list[dict]:
+    """
+    Form No (form_id) ile eşleşen fatura(ları) döndürür.
+    Hem gelen hem kesilen faturalarda arar.
+    Genel hesap tablosundaki bir satıra tıklanınca çağrılır.
+    """
+    if not formno or formno.strip() in ("", "-", "None"):
+        return []
+    _fno_col  = _col("formNo", "formno")
+    _mod_col  = _col("gelirGiderMod", "gelirgidermod")
+    _fmod_col = _col("faturaMod", "faturamod")
+    _ykl_col  = _col("yuklenmeTarihi", "yuklenmetarihi")
+    conn = get_connection()
+    try:
+        rows = conn.execute(f"""
+            SELECT id, tarih, unvan, vergino,
+                   {_col("vergiDairesi", "vergidairesi")} AS vergidairesi,
+                   {_col("faturano", "faturano")} AS faturano,
+                   toplam, {_mod_col} AS gelirgidermod,
+                   {_fmod_col} AS faturamod,
+                   {_fno_col} AS formno, kaynak,
+                   {_ykl_col} AS yuklenmetarihi, xml_dosya
+            FROM faturalar
+            WHERE userid = ?
+              AND {_fno_col} = ?
+            ORDER BY tarih DESC, id DESC
+            LIMIT 100
+        """, (userid, str(formno).strip())).fetchall()
+        return list(rows)
     finally:
         conn.close()

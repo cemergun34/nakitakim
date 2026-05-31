@@ -25,3 +25,14 @@ db/*.sqlite
 .venv/
 venv/
 env/
+
+# PyInstaller derleme çıktıları
+build/
+dist/
+*.spec.bak
+
+# Icon geçici dosyaları
+assets/icon.iconset/
+
+# Hassas kimlik bilgileri — GİT'E EKLENMEZ
+bootstrap_fppro_secrets.py

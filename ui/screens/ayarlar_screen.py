@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QFileDialog, QFrame, QScrollArea,
     QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
-    QLineEdit, QDateEdit, QSizePolicy,
+    QLineEdit, QDateEdit, QSizePolicy, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
@@ -362,89 +362,92 @@ class TopluBankalarIsleWorker(QThread):
         self._userid     = userid
 
     def run(self):
-        from services.vomsis_service import (
-            vomsis_authenticate, vomsis_get_all_transactions
-        )
-        self.progress.emit("🔑  VOMSİS token alınıyor...")
-        token, err_msg = vomsis_authenticate(
-            self._api_base, self._app_key, self._app_secret
-        )
-        if not token:
-            self.finished.emit({
-                "success": False,
-                "message": err_msg or "Token alınamadı.",
-                "count": 0
-            })
-            return
-
-        # PHP: 15 günlük batch döngüsü  (topluWomIsle.php benzeri)
-        batches: list[tuple[datetime.datetime, datetime.datetime]] = []
-        cur = self._start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        while cur <= self._end_dt:
-            batch_end = min(
-                cur + datetime.timedelta(days=14),
-                self._end_dt.replace(hour=23, minute=59, second=59)
-            )
-            batches.append((cur, batch_end))
-            cur = batch_end + datetime.timedelta(seconds=1)
-            cur = cur.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        total_batches  = len(batches)
-        total_inserted = 0
-        conn = get_connection()
         try:
-            for i, (bs, be) in enumerate(batches):
-                begin_str = bs.strftime("%d-%m-%Y %H:%M:%S")
-                end_str   = be.strftime("%d-%m-%Y %H:%M:%S")
-                self.progress.emit(
-                    f"📡  Parça {i+1}/{total_batches}: "
-                    f"{bs.strftime('%d.%m.%Y')} → {be.strftime('%d.%m.%Y')} çekiliyor..."
-                )
-                txs = vomsis_get_all_transactions(
-                    self._api_base, token, begin_str, end_str
-                )
-                for tx in txs:
-                    tarih_raw  = tx.get("date") or tx.get("processDate") or ""
-                    aciklama   = tx.get("description") or tx.get("explanation") or ""
-                    tutar_raw  = tx.get("amount") or tx.get("tryAmount") or 0
-                    try:
-                        tutar = float(str(tutar_raw).replace(",", "."))
-                    except (ValueError, TypeError):
-                        tutar = 0.0
-                    yon       = tx.get("direction") or tx.get("transactionDirection") or ""
-                    gelir_gider = "gelir" if str(yon).upper() in ("CREDIT", "ALACAK", "+") else "gider"
-                    vomsis_key = tx.get("id") or tx.get("transactionId") or ""
+            from services.vomsis_service import (
+                vomsis_authenticate, vomsis_get_all_transactions
+            )
+            self.progress.emit("🔑  VOMSİS token alınıyor...")
+            token, err_msg = vomsis_authenticate(
+                self._api_base, self._app_key, self._app_secret
+            )
+            if not token:
+                self.finished.emit({
+                    "success": False,
+                    "message": err_msg or "Token alınamadı.",
+                    "count": 0
+                })
+                return
 
-                    if vomsis_key:
-                        exists = conn.execute(
-                            "SELECT id FROM hareketler WHERE womsisKey=? AND userid=? LIMIT 1",
-                            (str(vomsis_key), self._userid)
-                        ).fetchone()
-                        if exists:
-                            continue
+            # PHP: 15 günlük batch döngüsü  (topluWomIsle.php benzeri)
+            batches: list[tuple[datetime.datetime, datetime.datetime]] = []
+            cur = self._start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            while cur <= self._end_dt:
+                batch_end = min(
+                    cur + datetime.timedelta(days=14),
+                    self._end_dt.replace(hour=23, minute=59, second=59)
+                )
+                batches.append((cur, batch_end))
+                cur = batch_end + datetime.timedelta(seconds=1)
+                cur = cur.replace(hour=0, minute=0, second=0, microsecond=0)
 
-                    conn.execute(
-                        """INSERT INTO hareketler
-                           (tarih, aciklama, gelirGider, alinan_tutar1, kaynak, womsisKey, userid)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (tarih_raw, aciklama, gelir_gider, tutar, "vomsis",
-                         str(vomsis_key), self._userid)
+            total_batches  = len(batches)
+            total_inserted = 0
+            conn = get_connection()
+            try:
+                for i, (bs, be) in enumerate(batches):
+                    begin_str = bs.strftime("%d-%m-%Y %H:%M:%S")
+                    end_str   = be.strftime("%d-%m-%Y %H:%M:%S")
+                    self.progress.emit(
+                        f"📡  Parça {i+1}/{total_batches}: "
+                        f"{bs.strftime('%d.%m.%Y')} → {be.strftime('%d.%m.%Y')} çekiliyor..."
                     )
-                    total_inserted += 1
-                conn.commit()
-                self.batch_done.emit(i + 1, total_batches)
-        except Exception as exc:
-            conn.rollback()
-            self.finished.emit({"success": False, "message": str(exc), "count": total_inserted})
-            return
-        finally:
-            conn.close()
+                    txs = vomsis_get_all_transactions(
+                        self._api_base, token, begin_str, end_str
+                    )
+                    for tx in txs:
+                        tarih_raw  = tx.get("date") or tx.get("processDate") or ""
+                        aciklama   = tx.get("description") or tx.get("explanation") or ""
+                        tutar_raw  = tx.get("amount") or tx.get("tryAmount") or 0
+                        try:
+                            tutar = float(str(tutar_raw).replace(",", "."))
+                        except (ValueError, TypeError):
+                            tutar = 0.0
+                        yon       = tx.get("direction") or tx.get("transactionDirection") or ""
+                        gelir_gider = "gelir" if str(yon).upper() in ("CREDIT", "ALACAK", "+") else "gider"
+                        vomsis_key = tx.get("id") or tx.get("transactionId") or ""
 
-        self.finished.emit({
-            "success": True,
-            "message": f"{total_inserted} banka hareketi aktarıldı ({total_batches} parça).",
-            "count": total_inserted
-        })
+                        if vomsis_key:
+                            exists = conn.execute(
+                                "SELECT id FROM hareketler WHERE womsiskey=? AND userid=? LIMIT 1",
+                                (str(vomsis_key), self._userid)
+                            ).fetchone()
+                            if exists:
+                                continue
+
+                        conn.execute(
+                            """INSERT INTO hareketler
+                               (tarih, aciklama, gelirgider, alinan_tutar1, kaynak, womsiskey, userid)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (tarih_raw, aciklama, gelir_gider, tutar, "vomsis",
+                             str(vomsis_key), self._userid)
+                        )
+                        total_inserted += 1
+                    conn.commit()
+                    self.batch_done.emit(i + 1, total_batches)
+            except Exception as exc:
+                conn.rollback()
+                self.finished.emit({"success": False, "message": str(exc), "count": total_inserted})
+                return
+            finally:
+                conn.close()
+
+            self.finished.emit({
+                "success": True,
+                "message": f"{total_inserted} banka hareketi aktarıldı ({total_batches} parça).",
+                "count": total_inserted
+            })
+        except Exception as exc:
+            self.finished.emit({"success": False, "message": f"Beklenmeyen hata: {exc}", "count": 0})
 
 
 class WomsisPosIsleWorker(QThread):
@@ -467,92 +470,93 @@ class WomsisPosIsleWorker(QThread):
         self._userid     = userid
 
     def run(self):
-        from services.vomsis_service import (
-            vomsis_authenticate, vomsis_get_terminals, vomsis_get_terminal_transactions
-        )
-        from services.fiziksel_pos_service import ensure_tables
-
-        ensure_tables()
-        self.progress.emit("🔑  VOMSİS POS token alınıyor...")
-        token, err_msg = vomsis_authenticate(
-            self._api_base, self._app_key, self._app_secret
-        )
-        if not token:
-            self.finished.emit({
-                "success": False,
-                "message": err_msg or "Token alınamadı.",
-                "count": 0
-            })
-            return
-
-        self.progress.emit("📋  Terminal listesi alınıyor...")
-        terminals = vomsis_get_terminals(self._api_base, token)
-        if not terminals:
-            self.finished.emit({
-                "success": False,
-                "message": "Hiç POS terminali bulunamadı. VOMSİS POS tanımlarınızı kontrol edin.",
-                "count": 0
-            })
-            return
-
-        begin_str = self._start_dt.strftime("%d-%m-%Y %H:%M:%S")
-        end_str   = self._end_dt.replace(hour=23, minute=59, second=59).strftime("%d-%m-%Y %H:%M:%S")
-
-        total_inserted = 0
-        conn = get_connection()
         try:
-            # PHP: önce o tarih aralığındaki eski kayıtları sil, sonra yeniden yaz
-            bas_str_norm = self._start_dt.strftime("%Y-%m-%d")
-            bit_str_norm = self._end_dt.strftime("%Y-%m-%d")
-            conn.execute(
-                "DELETE FROM womsi_pos WHERE userid=? AND islemTarihi >= ? AND islemTarihi <= ?",
-                (self._userid, bas_str_norm, bit_str_norm)
+            from services.vomsis_service import (
+                vomsis_authenticate, vomsis_get_terminals, vomsis_get_terminal_transactions
             )
-            conn.commit()
+            from services.fiziksel_pos_service import ensure_tables
 
-            for idx, terminal in enumerate(terminals):
-                tid = terminal.get("id") or terminal.get("stationId") or ""
-                tname = terminal.get("name") or terminal.get("terminalNo") or str(tid)
-                self.progress.emit(
-                    f"💳  Terminal {idx+1}/{len(terminals)}: {tname} çekiliyor..."
-                )
-                txs = vomsis_get_terminal_transactions(
-                    self._api_base, token, tid, begin_str, end_str
-                )
-                for tx in txs:
-                    islem_tarihi     = tx.get("transactionDate") or tx.get("date") or ""
-                    islem_tutari     = float(str(tx.get("amount", 0)).replace(",", ".") or 0)
-                    net_tutar        = float(str(tx.get("netAmount", 0)).replace(",", ".") or 0)
-                    isyeri_ucreti    = float(str(tx.get("commissionAmount", 0)).replace(",", ".") or 0)
-                    islem_tipi       = tx.get("type") or tx.get("transactionType") or ""
-                    kart_no          = tx.get("maskedCardNumber") or tx.get("cardNo") or ""
-                    brand            = tx.get("brand") or tx.get("cardBrand") or ""
-                    aciklama         = tx.get("description") or ""
-                    isyeri_no        = tx.get("merchantId") or str(tid)
+            ensure_tables()
+            self.progress.emit("🔑  VOMSİS POS token alınıyor...")
+            token, err_msg = vomsis_authenticate(
+                self._api_base, self._app_key, self._app_secret
+            )
+            if not token:
+                self.finished.emit({
+                    "success": False,
+                    "message": err_msg or "Token alınamadı.",
+                    "count": 0
+                })
+                return
 
-                    conn.execute(
-                        """INSERT INTO womsi_pos
-                           (userid, musterino, isyeriNo, islemTarihi, islemTutari,
-                            netTutar, isyeriUcretiTutar, islemTipi, kartNo, brand,
-                            aciklama, kayitTarihi)
-                           VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-                        (self._userid, isyeri_no, islem_tarihi, islem_tutari,
-                         net_tutar, isyeri_ucreti, islem_tipi, kart_no, brand, aciklama)
+            self.progress.emit("📋  Terminal listesi alınıyor...")
+            terminals = vomsis_get_terminals(self._api_base, token)
+            if not terminals:
+                self.finished.emit({
+                    "success": False,
+                    "message": "Hiç POS terminali bulunamadı.",
+                    "count": 0
+                })
+                return
+
+            begin_str = self._start_dt.strftime("%d-%m-%Y %H:%M:%S")
+            end_str   = self._end_dt.replace(hour=23, minute=59, second=59).strftime("%d-%m-%Y %H:%M:%S")
+
+            total_inserted = 0
+            conn = get_connection()
+            try:
+                bas_str_norm = self._start_dt.strftime("%Y-%m-%d")
+                bit_str_norm = self._end_dt.strftime("%Y-%m-%d")
+                conn.execute(
+                    "DELETE FROM womsi_pos WHERE userid=? AND islemtarihi >= ? AND islemtarihi <= ?",
+                    (self._userid, bas_str_norm, bit_str_norm)
+                )
+                conn.commit()
+
+                for idx, terminal in enumerate(terminals):
+                    tid = terminal.get("id") or terminal.get("stationId") or ""
+                    tname = terminal.get("name") or terminal.get("terminalNo") or str(tid)
+                    self.progress.emit(
+                        f"💳  Terminal {idx+1}/{len(terminals)}: {tname} çekiliyor..."
                     )
-                    total_inserted += 1
-            conn.commit()
-        except Exception as exc:
-            conn.rollback()
-            self.finished.emit({"success": False, "message": str(exc), "count": total_inserted})
-            return
-        finally:
-            conn.close()
+                    txs = vomsis_get_terminal_transactions(
+                        self._api_base, token, tid, begin_str, end_str
+                    )
+                    for tx in txs:
+                        islem_tarihi     = tx.get("transactionDate") or tx.get("date") or ""
+                        islem_tutari     = float(str(tx.get("amount", 0)).replace(",", ".") or 0)
+                        net_tutar        = float(str(tx.get("netAmount", 0)).replace(",", ".") or 0)
+                        isyeri_ucreti    = float(str(tx.get("commissionAmount", 0)).replace(",", ".") or 0)
+                        islem_tipi       = tx.get("type") or tx.get("transactionType") or ""
+                        kart_no          = tx.get("maskedCardNumber") or tx.get("cardNo") or ""
+                        brand            = tx.get("brand") or tx.get("cardBrand") or ""
+                        aciklama         = tx.get("description") or ""
+                        isyeri_no        = tx.get("merchantId") or str(tid)
 
-        self.finished.emit({
-            "success": True,
-            "message": f"{total_inserted} POS hareketi aktarıldı ({len(terminals)} terminal).",
-            "count": total_inserted
-        })
+                        conn.execute(
+                            """INSERT INTO womsi_pos
+                               (userid, isyerino, islemtarihi, islemtutari,
+                                nettutar, isyeriucretitutar, islemtipi, kartno, brand, aciklama)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (self._userid, isyeri_no, islem_tarihi, islem_tutari,
+                             net_tutar, isyeri_ucreti, islem_tipi, kart_no, brand, aciklama)
+                        )
+                        total_inserted += 1
+                conn.commit()
+            except Exception as exc:
+                conn.rollback()
+                self.finished.emit({"success": False, "message": str(exc), "count": total_inserted})
+                return
+            finally:
+                conn.close()
+
+            self.finished.emit({
+                "success": True,
+                "message": f"{total_inserted} POS hareketi aktarıldı ({len(terminals)} terminal).",
+                "count": total_inserted
+            })
+        except Exception as exc:
+            self.finished.emit({"success": False, "message": f"Beklenmeyen hata: {exc}", "count": 0})
 
 
 class PaytrTopluIsleWorker(QThread):
@@ -629,9 +633,10 @@ class ManuelTopluIsleDialog(QDialog):
     """
 
     def __init__(self, userid: int, api_base: str, app_key: str,
-                 app_secret: str, parent=None):
+                 app_secret: str, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid     = userid
+        self._musterino  = musterino
         self._api_base   = api_base
         self._app_key    = app_key
         self._app_secret = app_secret
@@ -793,7 +798,7 @@ class ManuelTopluIsleDialog(QDialog):
         foot = QHBoxLayout()
         foot.setSpacing(10)
 
-        self._btn_toplu = QPushButton("⚡  Toplu İşle  (Bankalar + POS + PayTR)")
+        self._btn_toplu = QPushButton("⚡  Toplu İşle  (Bankalar + POS + PayTR + Google Sheets)")
         self._btn_toplu.setFixedHeight(42)
         self._btn_toplu.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_toplu.setStyleSheet(
@@ -935,26 +940,43 @@ class ManuelTopluIsleDialog(QDialog):
     # ── Google Sheets İşle ────────────────────────────────────────────────
 
     def _on_gsheets_isle(self):
-        """Google Sheets entegrasyonu web sürümüne özel olduğu için bilgi göster."""
-        self._show_status(
-            "ℹ️  Google Sheets entegrasyonu yalnızca web sürümünde kullanılabilir. "
-            "Bu masaüstü uygulamasında bu özellik desteklenmemektedir.",
-            "#0c4a6e", ok=True
+        """Google Sheets → genel_hesap_hareketleri aktarımı."""
+        if not self._validate_dates():
+            return
+        import datetime as _dt
+        bas_q = self._bas_date.date()
+        bit_q = self._bit_date.date()
+        bas = _dt.date(bas_q.year(), bas_q.month(), bas_q.day())
+        bit = _dt.date(bit_q.year(), bit_q.month(), bit_q.day())
+
+        self._set_buttons_enabled(False)
+        self._show_status("📥  Google Sheets verileri indiriliyor...", "#34a853")
+        self._start_progress()
+
+        self._worker = GoogleSheetsAktarWorker(
+            userid=self._userid,
+            musterino=self._musterino,
+            bas=bas,
+            bit=bit,
+            kaynaklar=["kasa", "gider", "genelHesap"],
         )
+        self._worker.progress.connect(lambda m: self._show_status(m, "#34a853"))
+        self._worker.finished.connect(self._on_done)
+        self._worker.start()
 
     # ── Toplu İşle (sırayla 3 işlem) ─────────────────────────────────────
 
     def _on_toplu_isle(self):
-        """Bankalar + WomsisPos + PayTR sırayla çalıştırır."""
+        """Bankalar + WomsisPos + PayTR + Google Sheets sırayla çalıştırır."""
         if not self._validate_dates():
             return
         if not self._validate_api():
             return
         # Sırayı belirle
-        self._queue = ["bankalar", "wpos", "paytr"]
+        self._queue = ["bankalar", "wpos", "paytr", "gsheets"]
         self._set_buttons_enabled(False)
         self._show_status("⏳  Toplu işlem başlatıldı...", "#4f46e5")
-        self._start_progress(3)
+        self._start_progress(4)
         self._run_next_in_queue()
 
     def _run_next_in_queue(self):
@@ -962,13 +984,13 @@ class ManuelTopluIsleDialog(QDialog):
             self._progress_bar.setValue(self._progress_bar.maximum())
             self._set_buttons_enabled(True)
             self._show_status(
-                "✅  Toplu işlem tamamlandı. Tüm kaynaklar aktarıldı.", "#059669", ok=True
+                "✅  Toplu işlem tamamlandı. Tüm kaynaklar aktarıldı (Bankalar + POS + PayTR + Google Sheets).", "#059669", ok=True
             )
             return
         next_op = self._queue.pop(0)
         start, end = self._get_dates()
         if next_op == "bankalar":
-            self._show_status("📡  (1/3) Bankalar İşleniyor...", "#6366f1")
+            self._show_status("📡  (1/4) Bankalar İşleniyor...", "#6366f1")
             self._worker = TopluBankalarIsleWorker(
                 self._api_base, self._app_key, self._app_secret,
                 start, end, self._userid
@@ -977,7 +999,7 @@ class ManuelTopluIsleDialog(QDialog):
             self._worker.finished.connect(self._on_queue_step_done)
             self._worker.start()
         elif next_op == "wpos":
-            self._show_status("📟  (2/3) Womsis POS İşleniyor...", "#1a3a5c")
+            self._show_status("📟  (2/4) Womsis POS İşleniyor...", "#1a3a5c")
             self._worker = WomsisPosIsleWorker(
                 self._api_base, self._app_key, self._app_secret,
                 start, end, self._userid
@@ -986,14 +1008,29 @@ class ManuelTopluIsleDialog(QDialog):
             self._worker.finished.connect(self._on_queue_step_done)
             self._worker.start()
         elif next_op == "paytr":
-            self._show_status("💳  (3/3) PayTR Sanal POS İşleniyor...", "#374151")
+            self._show_status("💳  (3/4) PayTR Sanal POS İşleniyor...", "#374151")
             self._worker = PaytrTopluIsleWorker(start, end, self._userid)
             self._worker.progress.connect(lambda m: self._show_status(m, "#374151"))
             self._worker.finished.connect(self._on_queue_step_done)
             self._worker.start()
+        elif next_op == "gsheets":
+            import datetime as _dt
+            bas = _dt.date(start.year, start.month, start.day)
+            bit = _dt.date(end.year, end.month, end.day)
+            self._show_status("📊  (4/4) Google Sheets Aktarılıyor...", "#34a853")
+            self._worker = GoogleSheetsAktarWorker(
+                userid=self._userid,
+                musterino=self._musterino,
+                bas=bas,
+                bit=bit,
+                kaynaklar=["kasa", "gider", "genelHesap"],
+            )
+            self._worker.progress.connect(lambda m: self._show_status(m, "#34a853"))
+            self._worker.finished.connect(self._on_queue_step_done)
+            self._worker.start()
 
     def _on_queue_step_done(self, result: dict):
-        done = 3 - len(self._queue)
+        done = 4 - len(self._queue)
         self._progress_bar.setValue(done)
         self._run_next_in_queue()
 
@@ -1006,6 +1043,402 @@ class ManuelTopluIsleDialog(QDialog):
             self._show_status(f"✅  {result['message']}", "#059669", ok=True)
         else:
             self._show_status(f"❌  {result['message']}", "#dc2626", ok=False)
+
+
+# ── Google Sheets Aktarım Worker ─────────────────────────────────────────────
+
+class GoogleSheetsAktarWorker(QThread):
+    """PHP google_sheets_aktar.php → Python worker."""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+
+    def __init__(self, userid: int, musterino, bas: "datetime.date", bit: "datetime.date",
+                 kaynaklar: list, parent=None):
+        super().__init__(parent)
+        self._userid    = userid
+        self._musterino = musterino
+        self._bas       = bas
+        self._bit       = bit
+        self._kaynaklar = kaynaklar
+
+    def run(self):
+        try:
+            import datetime
+            from services.google_sheets_service import google_sheets_aktar
+            result = google_sheets_aktar(
+                userid=self._userid,
+                musterino=self._musterino,
+                bas_tarih=self._bas,
+                bit_tarih=self._bit,
+                kaynaklar=self._kaynaklar,
+                progress_cb=lambda m: self.progress.emit(m),
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.finished.emit({"success": False, "message": str(exc),
+                                "eklenen": 0, "atlanan": 0, "hatalar": [str(exc)]})
+
+
+
+# ── Google Sheets Ayarları Kartı ──────────────────────────────────────────────
+
+class GoogleSheetsSettingsCard(QFrame):
+    """
+    Eklentiler - Manuel Toplu Isle nin ustunde yer alan kart.
+    Nakit/Kasa, Gider ve Genel Hesap tablolari icin
+    Google Sheets URL si veya ID girisi saglar.
+    Ayarlar ~/NakitAkim/data/gsheets_config.json dosyasina kaydedilir.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
+        self._load_saved()
+
+    def _setup_ui(self):
+        self.setObjectName("gsheetsSettingsCard")
+        self.setStyleSheet("""
+            QFrame#gsheetsSettingsCard {
+                background: #ffffff;
+                border: 1.5px solid #e0e7ff;
+                border-radius: 16px;
+            }
+        """)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(14)
+
+        hdr = QHBoxLayout()
+        icon = QLabel("\U0001f4ca")
+        icon.setStyleSheet("font-size:22px;")
+        title_lbl = QLabel("Google Sheets Bağlantıları")
+        title_lbl.setStyleSheet(
+            "font-size:15px;font-weight:700;color:#1e3a8a;letter-spacing:0.5px;"
+        )
+        sub_lbl = QLabel("Her sheet için URL veya ID girin — tam URL yapıştırabilirsiniz")
+        sub_lbl.setStyleSheet("font-size:11px;color:#6b7280;")
+        txt_v = QVBoxLayout()
+        txt_v.setSpacing(2)
+        txt_v.addWidget(title_lbl)
+        txt_v.addWidget(sub_lbl)
+        hdr.addWidget(icon)
+        hdr.addSpacing(8)
+        hdr.addLayout(txt_v)
+        hdr.addStretch()
+        root.addLayout(hdr)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#e0e7ff;")
+        root.addWidget(sep)
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        grid.setColumnStretch(1, 1)
+        self._inputs: dict[str, QLineEdit] = {}
+        sheets_def = [
+            ("\U0001f4b0  Nakit / Kasa",        "kasa_sheet_id",        False),
+            ("    Tab Adı:",                      "kasa_tab_name",        True),
+            ("\U0001f4b8  Gider",               "gider_sheet_id",       False),
+            ("\U0001f4cb  Genel Hesap Tablosu", "genel_hesap_sheet_id", False),
+        ]
+        for r, (lbl_txt, key, small) in enumerate(sheets_def):
+            lbl = QLabel(lbl_txt)
+            lbl.setStyleSheet(
+                "font-size:12px;font-weight:600;color:#374151;min-width:170px;"
+            )
+            grid.addWidget(lbl, r, 0, Qt.AlignmentFlag.AlignVCenter)
+            inp = QLineEdit()
+            if small:
+                inp.setPlaceholderText("ör: Kasa")
+                inp.setFixedHeight(34)
+                inp.setStyleSheet(self._input_style(small=True))
+            else:
+                inp.setPlaceholderText(
+                    "URL veya Sheet ID  (https://docs.google.com/spreadsheets/d/...)"
+                )
+                inp.setFixedHeight(38)
+                inp.setStyleSheet(self._input_style())
+            self._inputs[key] = inp
+            grid.addWidget(inp, r, 1)
+        root.addLayout(grid)
+
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet("font-size:12px;color:#374151;")
+        self._status.hide()
+        root.addWidget(self._status)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        self._btn_save = QPushButton("\U0001f4be  Kaydet")
+        self._btn_save.setFixedHeight(38)
+        self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_save.setStyleSheet(
+            "QPushButton{background:#1e3a8a;color:white;border:none;border-radius:10px;"
+            "font-size:13px;font-weight:700;padding:0 20px;}"
+            "QPushButton:hover{background:#1d4ed8;}"
+        )
+        self._btn_save.clicked.connect(self._on_save)
+        btn_row.addWidget(self._btn_save)
+        self._btn_test = QPushButton("\U0001f517  Bağlantıyı Doğrula")
+        self._btn_test.setFixedHeight(38)
+        self._btn_test.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_test.setStyleSheet(
+            "QPushButton{background:#0f766e;color:white;border:none;border-radius:10px;"
+            "font-size:13px;font-weight:600;padding:0 20px;}"
+            "QPushButton:hover{background:#0d9488;}"
+        )
+        self._btn_test.clicked.connect(self._on_test)
+        btn_row.addWidget(self._btn_test)
+        btn_row.addStretch()
+        self._btn_reset = QPushButton("\u21a9  Fabrika Değerlerine Dön")
+        self._btn_reset.setFixedHeight(38)
+        self._btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_reset.setStyleSheet(
+            "QPushButton{background:#f3f4f6;color:#374151;border:1px solid #d1d5db;"
+            "border-radius:10px;font-size:12px;font-weight:600;padding:0 16px;}"
+            "QPushButton:hover{background:#e5e7eb;}"
+        )
+        self._btn_reset.clicked.connect(self._on_reset)
+        btn_row.addWidget(self._btn_reset)
+        root.addLayout(btn_row)
+
+    def _input_style(self, small: bool = False) -> str:
+        fs = "12px" if small else "13px"
+        return (
+            f"QLineEdit{{background:#f8fafc;border:1.5px solid #e2e8f0;"
+            f"border-radius:8px;padding:0 12px;font-size:{fs};color:#1e293b;}}"
+            "QLineEdit:focus{border-color:#3b82f6;background:white;}"
+        )
+
+    def _show_status(self, msg: str, color: str = "#374151"):
+        self._status.setText(msg)
+        self._status.setStyleSheet(f"font-size:12px;color:{color};")
+        self._status.show()
+
+    def _load_saved(self):
+        try:
+            from services.gsheets_config_service import load_config
+            cfg = load_config()
+            for key, inp in self._inputs.items():
+                val = cfg.get(key, "")
+                if val:
+                    inp.setText(val)
+        except Exception as exc:
+            self._show_status(f"Ayarlar yuklenemedi: {exc}", "#dc2626")
+
+    def _on_save(self):
+        try:
+            from services.gsheets_config_service import save_config, extract_sheet_id
+            cfg = {}
+            for key, inp in self._inputs.items():
+                val = inp.text().strip()
+                if key.endswith("_sheet_id"):
+                    val = extract_sheet_id(val)
+                    inp.setText(val)
+                cfg[key] = val
+            save_config(cfg)
+            self._show_status(
+                "\u2705  Ayarlar kaydedildi. Bir sonraki Toplu Islede yeni baglantilar kullanilacak.",
+                "#059669"
+            )
+        except Exception as exc:
+            self._show_status(f"Kaydetme hatasi: {exc}", "#dc2626")
+
+    def _on_test(self):
+        self._show_status("\U0001f504  Test ediliyor, lutfen bekleyin...", "#4f46e5")
+        self._btn_test.setEnabled(False)
+        self._btn_save.setEnabled(False)
+        from PyQt6.QtCore import QThread, pyqtSignal as _sig
+
+        class _Tester(QThread):
+            done = _sig(str, str)
+            def __init__(self, cfg_vals):
+                super().__init__()
+                self._cfg_vals = cfg_vals
+            def run(self):
+                import urllib.request
+                from services.google_sheets_service import _build_urls, _TIMEOUT
+                from services.gsheets_config_service import extract_sheet_id, load_config
+                base = load_config()
+                for k, v in self._cfg_vals.items():
+                    if k.endswith("_sheet_id"):
+                        v = extract_sheet_id(v)
+                    base[k] = v
+                kasa_url, gider_tpl, genel_url = _build_urls(base)
+                results = []
+                for name, url in [
+                    ("Kasa",        kasa_url),
+                    ("Gider",       gider_tpl.format(year=2025)),
+                    ("Genel Hesap", genel_url),
+                ]:
+                    try:
+                        req = urllib.request.Request(url, headers={"User-Agent": "NakitAkim/1.0"})
+                        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+                            results.append(f"\u2705  {name} — OK (HTTP {r.status})")
+                    except Exception as e:
+                        results.append(f"\u274c  {name} — {e}")
+                ok = all(r.startswith("\u2705") for r in results)
+                self.done.emit("\n".join(results), "#059669" if ok else "#b45309")
+
+        vals = {k: inp.text().strip() for k, inp in self._inputs.items()}
+        self._tester = _Tester(vals)
+
+        def _done(m, c):
+            self._show_status(m, c)
+            self._btn_test.setEnabled(True)
+            self._btn_save.setEnabled(True)
+
+        self._tester.done.connect(_done)
+        self._tester.start()
+
+    def _on_reset(self):
+        from services.gsheets_config_service import _DEFAULTS
+        for key, inp in self._inputs.items():
+            inp.setText(_DEFAULTS.get(key, ""))
+        self._show_status(
+            "\u21a9  Fabrika degerleri yuklendi. Kaydetmek icin Kaydet tusuna basin.",
+            "#6b7280"
+        )
+
+    def refresh(self):
+        self._load_saved()
+
+
+# ── Manuel Toplu İşle Kartı ───────────────────────────────────────────────────
+
+class ManuelTopluIsleCard(QFrame):
+    """
+    E-fatura grubunun üstünde ayrı bir kart olarak görünen
+    'Manuel Toplu İşle' düğmesi. VOMSİS API kartından bağımsız çalışır.
+    """
+
+    def __init__(self, userid: int, parent=None):
+        super().__init__(parent)
+        self._userid = userid
+        self.setStyleSheet(
+            "QFrame{background:white;border:2px solid #bbf7d0;"
+            "border-radius:16px;}"
+        )
+        self._build()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 22)
+        root.setSpacing(14)
+
+        # ── Başlık satırı ──
+        h = QHBoxLayout()
+        ic = QLabel("🗂️")
+        ic.setStyleSheet("font-size:22px;")
+        h.addWidget(ic)
+        t = QLabel("Manuel Toplu İşle")
+        t.setStyleSheet(
+            "font-size:15px;font-weight:800;color:#065f46;"
+            "letter-spacing:.6px;"
+        )
+        h.addWidget(t)
+        badge = QLabel("VOMSİS + PayTR")
+        badge.setStyleSheet(
+            "background:#d1fae5;color:#065f46;border-radius:8px;"
+            "padding:3px 10px;font-size:11px;font-weight:700;border:none;"
+        )
+        h.addWidget(badge)
+        h.addStretch()
+        root.addLayout(h)
+
+        # ── Bilgi/uyarı alanı (yeşil üzerine beyaz) ──
+        info_frame = QFrame()
+        info_frame.setStyleSheet(
+            "QFrame{background:#059669;border-radius:12px;border:none;}"
+        )
+        info_lay = QVBoxLayout(info_frame)
+        info_lay.setContentsMargins(16, 14, 16, 14)
+        info_lay.setSpacing(6)
+
+        baslik_lbl = QLabel("ℹ️  Bu mod ne yapar?")
+        baslik_lbl.setStyleSheet(
+            "color:white;font-size:13px;font-weight:700;background:transparent;"
+        )
+        info_lay.addWidget(baslik_lbl)
+
+        maddeler = [
+            "✅  Bankalar İşle  —  VOMSİS API'ünden banka hesabı hareketlerini çeker ve "
+            "hareketler tablosuna aktarır (15 günlük toplu işlemler halinde).",
+            "✅  VOMSİS POS İşle  —  Kayıtlı fiziksel POS terminallerinin işlem "
+            "verilerini çeker, womsi_pos tablosuna yazar (eskiler silinir, yeniden yazılır).",
+            "✅  PayTR Sanal POS İşle  —  PayTR API'ünden müşteri bazında satış işlemlerini "
+            "senkronize eder; tekrarı olan kayıtlar güncellenir, yeni kayıtlar eklenir.",
+            "📌  Tarih aralığı seçerek hangi dönem için veri çekeceğinizi belirleyebilirsiniz.",
+            "⚠️  VOMSİS işlemlerinin çalışması için VOMSİS API bilgilerinizin ve IP whitelist "
+            "tanımının doğru yapılandırılmış olması gerekir.",
+        ]
+        for m in maddeler:
+            lbl = QLabel(m)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(
+                "color:white;font-size:12px;background:transparent;"
+                "padding:1px 0;"
+            )
+            info_lay.addWidget(lbl)
+
+        root.addWidget(info_frame)
+
+        # ── Büyük, dikkat çekici buton ──
+        btn_row = QHBoxLayout()
+        self._toplu_btn = QPushButton("📦  Tüm Hesap Tablolarını İşle — Toplu İşle (Bankalar + POS + PayTR)")
+        self._toplu_btn.setFixedHeight(48)
+        self._toplu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toplu_btn.setStyleSheet(
+            "QPushButton{"
+            "  background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "    stop:0 #059669,stop:1 #047857);"
+            "  color:white;border:none;border-radius:12px;"
+            "  font-size:14px;font-weight:700;"
+            "  padding:0 24px;letter-spacing:.5px;"
+            "}"
+            "QPushButton:hover{"
+            "  background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "    stop:0 #10b981,stop:1 #059669);"
+            "}"
+            "QPushButton:pressed{background:#047857;}"
+        )
+        self._toplu_btn.clicked.connect(self._on_toplu_isle)
+        btn_row.addWidget(self._toplu_btn)
+        btn_row.addStretch()
+        root.addLayout(btn_row)
+
+    # ── Tıklama ──────────────────────────────────────────────────────────────
+
+    def _on_toplu_isle(self):
+        """
+        VOMSİS API kartından API bilgilerini al,
+        ManuelTopluIsleDialog'u aç.
+        """
+        url = appkey = seckey = ""
+        # Üst widget hiyerarşisinde VomsisCard'ı bul
+        p = self.parent()
+        while p is not None:
+            if hasattr(p, '_vomsis_card'):
+                vc = p._vomsis_card
+                url    = vc._url_inp.text().strip()
+                appkey = vc._key_inp.text().strip()
+                seckey = vc._sec_inp.text().strip()
+                break
+            p = p.parent() if callable(getattr(p, 'parent', None)) else None
+
+        dlg = ManuelTopluIsleDialog(
+            userid=self._userid,
+            api_base=url,
+            app_key=appkey,
+            app_secret=seckey,
+            parent=self
+        )
+        dlg.exec()
+
+    def refresh(self):
+        pass
 
 
 # ── VOMSİS API Kartı ──────────────────────────────────────────────────────────
@@ -1179,13 +1612,6 @@ class VomsisCard(QFrame):
         self._isle_btn.clicked.connect(self._on_isle)
         btn_row.addWidget(self._isle_btn)
 
-        self._manuel_toplu_btn = QPushButton("🗂️  Manuel Toplu İşle")
-        self._manuel_toplu_btn.setFixedHeight(38)
-        self._manuel_toplu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._manuel_toplu_btn.setStyleSheet(self._btn_style("#7c3aed"))
-        self._manuel_toplu_btn.clicked.connect(self._on_manuel_toplu_isle)
-        btn_row.addWidget(self._manuel_toplu_btn)
-
         btn_row.addStretch()
         root.addLayout(btn_row)
 
@@ -1330,7 +1756,6 @@ class VomsisCard(QFrame):
         self._kontrol_btn.setEnabled(not busy)
         self._kaydet_btn.setEnabled(not busy)
         self._isle_btn.setEnabled(not busy)
-        self._manuel_toplu_btn.setEnabled(not busy)
         if busy and msg:
             self._show_status(msg, "#6366f1")
 
@@ -3255,6 +3680,13 @@ class AyarlarScreen(QWidget):
         self._sirket_card = SirketProfilCard(self._userid)
         self._content_layout.addWidget(self._sirket_card)
 
+        # Manuel Toplu İşle kartı — EFatura'nın üstünde
+        self._gsheets_settings_card = GoogleSheetsSettingsCard()
+        self._content_layout.addWidget(self._gsheets_settings_card)
+
+        self._manuel_toplu_card = ManuelTopluIsleCard(self._userid)
+        self._content_layout.addWidget(self._manuel_toplu_card)
+
         # Eklentiler kartı
         self._efatura_card = EFaturaCard(self._userid)
         self._content_layout.addWidget(self._efatura_card)
@@ -4122,6 +4554,13 @@ class AyarlarScreen(QWidget):
         # Kullanıcı Yetkileri kartı — Şirket Profili'nin altında
         self._kullanici_yonetim_card = KullaniciYonetimCard(self._userid)
         self._content_layout.addWidget(self._kullanici_yonetim_card)
+
+        # Manuel Toplu İşle kartı — EFatura'nın üstünde
+        self._gsheets_settings_card = GoogleSheetsSettingsCard()
+        self._content_layout.addWidget(self._gsheets_settings_card)
+
+        self._manuel_toplu_card = ManuelTopluIsleCard(self._userid)
+        self._content_layout.addWidget(self._manuel_toplu_card)
 
         # Eklentiler kartı
         self._efatura_card = EFaturaCard(self._userid)

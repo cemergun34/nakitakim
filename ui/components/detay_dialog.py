@@ -183,10 +183,10 @@ class IslemTablosu(QTableWidget):
             ("Fatura No", "faturaNo"),
         ],
         "genel_hesap": [
-            ("Tarih", "tarih"), ("Açıklama", "aciklama"),
+            ("Tarih", "tarih"), ("Form No", "form_id"), ("Açıklama", "aciklama"),
             ("Şube", "sube_adi"), ("Gelir", "gelir"), ("Gider", "gider"),
             ("Teslim Şekli", "teslim_sekli"), ("Ödeme Şekli", "odeme_sekli"),
-            ("Kategori", "kategori"),
+            ("Kategori", "kategori"), ("Kaynak", "nerden_geliyor"),
         ],
         "faturalar": [
             ("Tarih", "tarih"), ("Ünvan", "unvan"),
@@ -199,6 +199,7 @@ class IslemTablosu(QTableWidget):
     def __init__(self, tablo_tipi: str = "hareketler", parent=None):
         super().__init__(parent)
         self._tablo_tipi = tablo_tipi
+        self._userid: int | None = None
         self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.setAlternatingRowColors(True)
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -289,6 +290,15 @@ class IslemTablosu(QTableWidget):
                         item.setToolTip("XML dosyası yok — Bu fatura önizlenemiyor")
                     item.setData(Qt.ItemDataRole.UserRole, row)
 
+                # Form No (genel_hesap) — fatura ile eşleşme varsa tıklanabilir
+                if (key == "form_id" and self._tablo_tipi == "genel_hesap"
+                        and val and str(val).strip() not in ("", "-", "None")):
+                    item.setForeground(QBrush(QColor("#2563EB")))
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
+                    item.setToolTip("🔗 Bu form numarasına ait faturayı görmek için tıklayın")
+
                 self.setItem(r_idx, c_idx, item)
         if len(rows) < 300:
             self.resizeRowsToContents()
@@ -296,16 +306,133 @@ class IslemTablosu(QTableWidget):
             self.verticalHeader().setDefaultSectionSize(28)
         self.setSortingEnabled(True)
 
+    def set_userid(self, userid: int):
+        self._userid = userid
+
     def _on_cell_clicked(self, row_idx, col_idx):
         cols = self.KOLON_SETLERI.get(self._tablo_tipi, [])
-        if col_idx < len(cols):
-            _, key = cols[col_idx]
-            if key in ("faturano", "faturaNo"):
-                item = self.item(row_idx, col_idx)
-                if item:
-                    row_data = item.data(Qt.ItemDataRole.UserRole)
-                    if row_data:
-                        self._show_fatura_preview(row_data)
+        if col_idx >= len(cols):
+            return
+        _, key = cols[col_idx]
+
+        # E-Fatura XML önizleme
+        if key in ("faturano", "faturaNo"):
+            item = self.item(row_idx, col_idx)
+            if item:
+                row_data = item.data(Qt.ItemDataRole.UserRole)
+                if row_data:
+                    self._show_fatura_preview(row_data)
+
+        # Genel Hesap → Form No tıklandı → eşleşen fatura(lar)
+        elif key == "form_id" and self._tablo_tipi == "genel_hesap":
+            item = self.item(row_idx, col_idx)
+            if item:
+                formno_val = item.text().strip()
+                if formno_val and formno_val != "-":
+                    self._show_formno_fatura(formno_val)
+
+    def _show_formno_fatura(self, formno: str):
+        """
+        Form No ile eşleşen fatura(ları) mini bir diyalogda gösterir.
+        """
+        from PyQt6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+            QTableWidget, QTableWidgetItem, QHeaderView
+        )
+        from services import detay_service
+
+        userid = self._userid
+        if userid is None:
+            return
+
+        faturalar = detay_service.get_fatura_by_formno(userid, formno)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"📄  Form No: {formno}  —  Eşleşen Fatura(lar)")
+        dlg.setMinimumSize(820, 320)
+        dlg.setStyleSheet("background:#f0f4ff;")
+
+        vlay = QVBoxLayout(dlg)
+        vlay.setContentsMargins(16, 16, 16, 16)
+        vlay.setSpacing(10)
+
+        # Başlık
+        hdr = QLabel(f"🔗  Form No <b>{formno}</b> ile eşleşen fatura(lar):")
+        hdr.setStyleSheet(
+            "background:#1e40af;color:white;border-radius:8px;"
+            "padding:8px 14px;font-size:13px;"
+        )
+        vlay.addWidget(hdr)
+
+        if not faturalar:
+            lbl = QLabel("⚠️  Bu form numarasına ait fatura bulunamadı.")
+            lbl.setStyleSheet(
+                "color:#92400e;background:#fef3c7;border-radius:8px;"
+                "padding:10px 14px;font-size:13px;"
+            )
+            vlay.addWidget(lbl)
+        else:
+            basliklar = ["Tarih", "Unvan", "Fatura No", "Tutar",
+                         "Tip", "Fatura Modu", "Form No", "Kaynak"]
+            keys_     = ["tarih", "unvan", "faturano", "toplam",
+                         "gelirgidermod", "faturamod", "formno", "kaynak"]
+
+            tbl = QTableWidget(len(faturalar), len(basliklar))
+            tbl.setHorizontalHeaderLabels(basliklar)
+            tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            tbl.setAlternatingRowColors(True)
+            tbl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            tbl.verticalHeader().setVisible(False)
+            tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            tbl.horizontalHeader().setStretchLastSection(True)
+            tbl.setStyleSheet(
+                "QTableWidget{background:white;alternate-background-color:#f0f9ff;"
+                "border:1.5px solid #bfdbfe;border-radius:8px;font-size:12px;}"
+                "QTableWidget::item{padding:5px 8px;}"
+                "QTableWidget::item:selected{background:#dbeafe;color:#1e40af;}"
+                "QHeaderView::section{background:#1e40af;color:white;"
+                "font-size:11px;font-weight:700;padding:6px;"
+                "border:none;border-bottom:1px solid #1d4ed8;}"
+            )
+
+            from utils.format import fmt_para
+            for r_i, row in enumerate(faturalar):
+                for c_i, k in enumerate(keys_):
+                    val = row.get(k) if hasattr(row, 'get') else (
+                        row[k] if isinstance(row, dict) else None
+                    )
+                    if k == "toplam" and val is not None:
+                        try: text = fmt_para(float(val))
+                        except: text = str(val)
+                    else:
+                        text = str(val) if val is not None else "-"
+                    item = QTableWidgetItem(text)
+                    if k == "gelirgidermod":
+                        item.setForeground(__import__("PyQt6.QtGui", fromlist=["QColor", "QBrush"]).QBrush(
+                            __import__("PyQt6.QtGui", fromlist=["QColor"]).QColor(
+                                "#059669" if text == "gelir" else "#dc2626"
+                            )
+                        ))
+                    tbl.setItem(r_i, c_i, item)
+
+            vlay.addWidget(tbl)
+
+        # Kapat
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        kapat = QPushButton("✕  Kapat")
+        kapat.setFixedHeight(34)
+        kapat.setFixedWidth(100)
+        kapat.setCursor(Qt.CursorShape.PointingHandCursor)
+        kapat.setStyleSheet(
+            "QPushButton{background:#1e40af;color:white;border:none;"
+            "border-radius:8px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{background:#1d4ed8;}"
+        )
+        kapat.clicked.connect(dlg.accept)
+        btn_row.addWidget(kapat)
+        vlay.addLayout(btn_row)
+        dlg.exec()
 
     def _show_fatura_preview(self, row_data):
         """
@@ -542,10 +669,12 @@ class DetayDialog(QDialog):
                  gelir_field="toplam_gelir", gider_field="toplam_gider",
                  tutar_field=None,
                  direct_detay: bool = False,   # True → özet atla, direkt liste aç
+                 userid: int | None = None,
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle(baslik)
         self.setStyleSheet(f"background: {COLORS['bg']};")
+        self._userid = userid
 
         self._detay_fn = detay_fn
         self._tablo_tipi = tablo_tipi
@@ -801,6 +930,8 @@ class DetayDialog(QDialog):
         dp_layout.addWidget(self._filter_container)
 
         self._tablo = IslemTablosu(tablo_tipi)
+        if self._userid is not None:
+            self._tablo.set_userid(self._userid)
         dp_layout.addWidget(self._tablo, 1)
 
         self._stack.addWidget(detay_page)

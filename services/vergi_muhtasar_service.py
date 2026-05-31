@@ -13,6 +13,12 @@ import chardet
 from typing import Optional
 
 from db.database import get_connection
+from db.db_config import get_mode
+
+
+def _mno_col() -> str:
+    """PostgreSQL: musteri_no, SQLite: musterino"""
+    return "musteri_no" if get_mode() == "postgres" else "musterino"
 
 
 # ── Tablo adı (PHP ile birebir) ───────────────────────────────────────────────
@@ -61,7 +67,7 @@ def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "") -> d
         params: list = [userid]
 
         if musterino is not None:
-            where += " AND musterino = ?"
+            where += f" AND {_mno_col()} = ?"
             params.append(str(musterino))
 
         if donem:
@@ -83,7 +89,7 @@ def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "") -> d
             gay_toplam  += gay
             verg_toplam += verg
             fark_toplam += abs(fark)   # PHP: Math.abs(gay - verg)
-            d = dict(r)
+            d = dict(r)  # _CIRow'dan plain dict oluştur (fark eklemek için)
             d["fark"] = fark
             data.append(d)
 

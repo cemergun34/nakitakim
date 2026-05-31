@@ -70,6 +70,53 @@ def _to_pg_sql(sql: str) -> str:
 
 # ── PostgreSQL cursor wrapper (sqlite3.Cursor uyumlu) ────────────────────────
 
+class _CIRow(dict):
+    """
+    Büyük/küçük harf duyarsız satır sarmalayıcı.
+    - row['hesapKodu'] == row['hesapkodu']  (string, case-insensitive)
+    - row[0]                                (integer index)
+    """
+    def __init__(self, row):
+        super().__init__(row)
+        self._keys_list = list(row.keys())
+        self._lower_map = {k.lower(): k for k in self._keys_list}
+
+    def __getitem__(self, key):
+        # Integer index desteği: row[0], row[1] ...
+        if isinstance(key, int):
+            actual_key = self._keys_list[key]
+            return super().__getitem__(actual_key)
+        # String: önce birebir, sonra lowercase
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            actual = self._lower_map.get(key.lower())
+            if actual is not None:
+                return super().__getitem__(actual)
+            raise
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except (KeyError, IndexError):
+            return default
+
+    def __contains__(self, key):
+        if isinstance(key, int):
+            return 0 <= key < len(self._keys_list)
+        return super().__contains__(key) or key.lower() in self._lower_map
+
+    def keys(self):
+        return dict.keys(self)
+
+
+def _wrap_row(row):
+    """psycopg2 DictRow → _CIRow (None ise None döndür)."""
+    if row is None:
+        return None
+    return _CIRow(dict(row))
+
+
 class _PgCursor:
     """psycopg2 cursor'ını sqlite3.Cursor gibi davranır hale getirir."""
 
@@ -80,13 +127,15 @@ class _PgCursor:
         self.rowcount: int = -1
 
     def fetchone(self):
-        return self._cur.fetchone()
+        row = self._cur.fetchone()
+        return _wrap_row(row)
 
     def fetchall(self):
-        return self._cur.fetchall()
+        rows = self._cur.fetchall()
+        return [_wrap_row(r) for r in rows]
 
     def __iter__(self):
-        return iter(self._cur.fetchall())
+        return iter(self.fetchall())
 
     def keys(self):
         if self._cur.description:

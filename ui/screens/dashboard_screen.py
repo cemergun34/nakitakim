@@ -612,28 +612,33 @@ class DashboardScreen(QWidget):
                 ozet_rows=ozet,
                 detay_fn=detay_fn,
                 tablo_tipi="genel_hesap",
+                userid=uid,
                 parent=self,
             )
 
         elif key == "kesilen_fatura":
+            ozet = detay_service.get_fatura_sube_ozet(uid, mno, yil, "gelir")
+            def _kes_detay(sube_adi, _u=uid, _m=mno, _y=yil):
+                return detay_service.get_fatura_detay_by_sube(_u, _m, _y, "gelir", sube_adi)
             dlg = DetayDialog(
-                baslik="Kesilen Faturalar",
-                ozet_rows=[],
-                detay_fn=lambda _: detay_service.get_fatura_detay(uid, yil, "gelir"),
+                baslik="Kesilen Faturalar — Şube Özeti",
+                ozet_rows=ozet,
+                detay_fn=_kes_detay,
                 tablo_tipi="faturalar",
-                tutar_field="toplam_tutar",
-                direct_detay=True,
+                userid=uid,
                 parent=self,
             )
 
         elif key == "gelen_fatura":
+            ozet = detay_service.get_fatura_sube_ozet(uid, mno, yil, "gider")
+            def _gel_detay(sube_adi, _u=uid, _m=mno, _y=yil):
+                return detay_service.get_fatura_detay_by_sube(_u, _m, _y, "gider", sube_adi)
             dlg = DetayDialog(
-                baslik="Gelen Faturalar",
-                ozet_rows=[],
-                detay_fn=lambda _: detay_service.get_fatura_detay(uid, yil, "gider"),
+                baslik="Gelen Faturalar — Şube Özeti",
+                ozet_rows=ozet,
+                detay_fn=_gel_detay,
                 tablo_tipi="faturalar",
-                tutar_field="toplam_tutar",
-                direct_detay=True,
+                userid=uid,
                 parent=self,
             )
 
