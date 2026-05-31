@@ -4,7 +4,7 @@ Ana pencere — tüm ekranları barındıran shell.
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QStackedWidget, QApplication
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
 
 from ui.theme import COLORS, SIDEBAR_WIDTH
@@ -16,10 +16,12 @@ from ui.screens.ayarlar_screen import AyarlarScreen
 
 class MainWindow(QMainWindow):
     """Ana uygulama penceresi."""
+    logout_requested = pyqtSignal()   # Çıkış → login ekranına dön
 
     def __init__(self, user: dict):
         super().__init__()
         self._user = user
+        self._is_logging_out = False
         self.setWindowTitle("IQ Finans — Nakit Akış Yönetimi")
         self.setMinimumSize(1280, 780)
         self.resize(1440, 860)
@@ -68,7 +70,8 @@ class MainWindow(QMainWindow):
 
     def _navigate(self, page_id: str):
         if page_id == "exit":
-            self.close()
+            self._is_logging_out = True
+            self.logout_requested.emit()
             return
 
         if page_id in self._screens:
@@ -93,3 +96,11 @@ class MainWindow(QMainWindow):
             geo = screen.availableGeometry()
             w, h = self.width(), self.height()
             self.move((geo.width() - w) // 2, (geo.height() - h) // 2)
+
+    def closeEvent(self, event):
+        if not self._is_logging_out:
+            event.ignore()
+            self._is_logging_out = True
+            self.logout_requested.emit()
+        else:
+            event.accept()

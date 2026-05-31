@@ -52,18 +52,25 @@ def authenticate(kullanici_adi: str, sifre: str) -> dict | None:
 
 
 def _build_user(row: dict) -> dict:
-    """Standart kullanıcı sözlüğü oluşturur."""
+    """Standart kullanıcı sözlüğü oluşturur.
+    PG'de kolon adları küçük harf (firmaadi, hesapturu vb.)
+    SQLite'da camelCase (firmaAdi, hesapTuru vb.)
+    """
     # bagli_hesap > 0 ise o hesabın ID'si, değilse kendi ID
-    bagli = int(row.get("bagli_hesap", -1))
-    user_id = bagli if bagli > 0 else int(row.get("id", 1))
+    bagli = int(row.get("bagli_hesap", -1) or -1)
+    user_id = bagli if bagli > 0 else int(row.get("id", 1) or 1)
     return {
-        "Kayitno":      int(row.get("id", 1)),
+        "Kayitno":      int(row.get("id", 1) or 1),
         "Adi":          row.get("kullanici_adi", ""),
-        "GercekUserId": user_id,           # musteri_no
-        "firmaAdi":     row.get("firmaAdi", "IQ Finans"),
-        "yetki":        row.get("yetki", "0"),
-        "hesapTuru":    row.get("hesapTuru", 0),
+        "GercekUserId": user_id,
+        # PG: firmaadi, SQLite: firmaAdi — her ikisini de dene
+        "firmaAdi":     row.get("firmaadi") or row.get("firmaAdi") or "IQ Finans",
+        "yetki":        row.get("yetki", "0") or "0",
+        # PG: hesapturu, SQLite: hesapTuru
+        "hesapTuru":    row.get("hesapturu") if row.get("hesapturu") is not None
+                        else row.get("hesapTuru", 0),
     }
+
 
 
 def get_user_by_id(user_id: int) -> dict | None:

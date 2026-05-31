@@ -3,81 +3,144 @@ IQ Finans — Nakit Akış Masaüstü Uygulaması
 Giriş noktası.
 """
 import sys
-from PyQt6.QtWidgets import QApplication, QMessageBox
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
 # QWebEngineView macOS'ta QApplication'dan ÖNCE initialize edilmeli
 try:
-    from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401 — import tetikler
-    import PyQt6.QtWebEngineCore  # noqa: F401
+    from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+    import PyQt6.QtWebEngineCore                         # noqa: F401
 except ImportError:
-    pass  # WebEngine yoksa normal çalışmaya devam et
+    pass
 
-from db.database import initialize_db, db_exists
-from ui.screens.login_screen import LoginScreen
-from ui.screens.setup_dialog import SetupDialog
-from ui.main_window import MainWindow
+
+# ── PostgreSQL sıfırdan kurulum thread'i ──────────────────────────────────────
+
+class _PgSetupThread(QThread):
+    """
+    PostgreSQL modunda arka planda:
+     - Şema oluşturur (IF NOT EXISTS)
+     - uyelik tablosu boşsa superadmin/123 ekler
+    UI donmaz.
+    """
+    done = pyqtSignal(bool, str)   # (başarılı, mesaj)
+
+    def run(self):
+        try:
+            from db.database import ensure_pg_ready
+            ok = ensure_pg_ready()
+            self.done.emit(ok, "")
+        except Exception as exc:
+            self.done.emit(False, str(exc))
 
 
 def main():
-    # QWebEngineView için zorunlu — QApplication'dan önce çağrılmalı
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
     app = QApplication(sys.argv)
     app.setApplicationName("IQ Finans")
     app.setOrganizationName("FPPRO")
 
-    # Varsayılan font — platforma göre sistem fontunu seç
-    import sys as _sys
-    if _sys.platform == "darwin":
-        font = QFont(".AppleSystemUIFont", 13)   # macOS: SF Pro / San Francisco
-    elif _sys.platform == "win32":
-        font = QFont("Segoe UI", 9)              # Windows
+    # Sistem fontunu seç
+    if sys.platform == "darwin":
+        font = QFont(".AppleSystemUIFont", 13)
+    elif sys.platform == "win32":
+        font = QFont("Segoe UI", 9)
     else:
-        font = QFont("Ubuntu", 10)               # Linux
+        font = QFont("Ubuntu", 10)
     app.setFont(font)
 
-    # Yüksek DPI desteği (PyQt6'da otomatik)
+    # ── Veritabanını başlat ────────────────────────────────────────────
+    from db.db_config import get_mode
+    from db.database import initialize_db
 
-    # Veritabanını başlat
+    mode = get_mode()
+
+    # SQLite şeması her zaman hazırlanır (hızlı, yerel, fallback için gerekli)
     initialize_db()
 
-    # İlk kurulum gerekli mi?
-    if not db_exists():
-        setup = SetupDialog()
-        if setup.exec() != SetupDialog.DialogCode.Accepted:
-            sys.exit(0)
+    # ── SQLite modu: DB yoksa sessizce oluştur ────────────────────────────
+    if mode != "postgres":
+        import sqlite3 as _sqlite3
+        from db.database import DB_PATH as _DB_PATH
 
-    # Global durum
+        def _sqlite_has_data() -> bool:
+            """uyelik tablosu var ve dolu mu?"""
+            if not _DB_PATH.exists():
+                return False
+            try:
+                conn = _sqlite3.connect(str(_DB_PATH))
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type='table' AND name='uyelik'"
+                ).fetchone()[0]
+                conn.close()
+                return count > 0
+            except Exception:
+                return False
+
+        if not _sqlite_has_data():
+            # Yeni makine / ilk çalıştırma — sessizce şema oluştur
+            # initialize_db() zaten superadmin/123 ekliyor (uyelik boşsa)
+            print("[DB] Yeni kurulum: veritabanı ve superadmin kullanıcısı oluşturuluyor...")
+            from db.database import initialize_db as _reinit
+            _reinit()
+            print("[DB] Sessiz kurulum tamamlandı — superadmin / 123 ile giriş yapabilirsiniz.")
+
+    # ── Giriş ekranı ─────────────────────────────────────────────────
+    from ui.screens.login_screen import LoginScreen
+    from ui.main_window import MainWindow
+
     _state = {"user": None, "main_win": None}
 
-    # Giriş ekranı
     login_screen = LoginScreen()
     login_screen.setWindowTitle("IQ Finans — Giriş")
     login_screen.resize(1100, 700)
     login_screen.show()
 
+    # ── PostgreSQL modu: arka planda şema + superadmin kur ────────────
+    if mode == "postgres":
+        _pg_setup = _PgSetupThread()
+
+        def _on_pg_setup_done(ok: bool, msg: str):
+            # Arka planda sessizce çalışır — banner login butonuna basılınca gösterilir
+            if not ok:
+                print(f"[DB] PG setup hata: {msg}")
+            else:
+                print("[DB] PostgreSQL hazır.")
+
+        _pg_setup.done.connect(_on_pg_setup_done)
+        _pg_setup.start()
+        app._pg_setup = _pg_setup  # GC'den korunmak için referans sakla
+
     def _on_login(user: dict):
         _state["user"] = user
-        
-        # Uygulamanın login kapanınca tamamen kapanmasını engelle
         app.setQuitOnLastWindowClosed(False)
         login_screen.hide()
 
-        def _after_setup():
-            win = MainWindow(user)
-            _state["main_win"] = win
-            win.show()
-            # Ana pencere açılınca normal davranışa geri dön
-            app.setQuitOnLastWindowClosed(True)
-            login_screen.close()
+        win = MainWindow(user)
+        _state["main_win"] = win
 
-        # Artık her girişte sormayacak. İlk kurulum zaten girişte yapılıyor.
-        _after_setup()
+        def _on_logout():
+            app.setQuitOnLastWindowClosed(False)
+            win.close()
+            _state["main_win"] = None
+            # Login alanlarını temizle
+            login_screen.username_input.clear()
+            login_screen.password_input.clear()
+            login_screen.error_lbl.hide()
+            login_screen.login_btn.setEnabled(True)
+            login_screen.login_btn.setText("GİRİŞ YAP")
+            login_screen.show()
+            app.setQuitOnLastWindowClosed(True)
+
+        win.logout_requested.connect(_on_logout)
+        win.show()
+        app.setQuitOnLastWindowClosed(True)
+        login_screen.hide()
 
     login_screen.login_success.connect(_on_login)
-
     sys.exit(app.exec())
 
 

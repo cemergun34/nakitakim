@@ -73,7 +73,6 @@ class Sidebar(QFrame):
     MENU_ITEMS = [
         ("🏠", "Dashboard",   "dashboard"),
         ("📊", "Raporlar",    "raporlar"),
-        ("📋", "Hareketler",  "hareketler"),
         ("⚙️",  "Ayarlar",    "ayarlar"),
     ]
 

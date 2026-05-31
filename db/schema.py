@@ -291,4 +291,108 @@ CREATE INDEX IF NOT EXISTS idx_kredikarti_userid_tarih
     ON kredikartiData(userid, tarih);
 CREATE INDEX IF NOT EXISTS idx_kredikarti_womsiskey
     ON kredikartiData(womsiskey);
+
+-- ── PayTR Sanal Pos İşlem Dökümü ──────────────────────────────────────────
+-- PHP: ajax/paytr_sync_chunk.php → CREATE TABLE paytr
+-- PayTR API'den veya manuel import ile gelen sanal pos işlemleri
+CREATE TABLE IF NOT EXISTS paytr (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid            INTEGER NOT NULL,
+    musterino         TEXT    NOT NULL DEFAULT '',
+    islemtarihi       TEXT    DEFAULT NULL,
+    siparisno         TEXT    DEFAULT NULL,
+    islemtutari       REAL    DEFAULT 0.0,
+    odemetutari       REAL    DEFAULT 0.0,
+    kur               TEXT    DEFAULT 'TL',
+    magazano          TEXT    DEFAULT NULL,
+    adsoyad           TEXT    DEFAULT NULL,
+    nettutar          REAL    DEFAULT 0.0,
+    kesintitutari     REAL    DEFAULT 0.0,
+    kesintiorani      TEXT    DEFAULT NULL,
+    kartbankasi       TEXT    DEFAULT NULL,
+    kartmarkasi       TEXT    DEFAULT NULL,
+    kartno            TEXT    DEFAULT NULL,
+    odemetipi         TEXT    DEFAULT NULL,
+    karttipi          TEXT    DEFAULT NULL,
+    taksitsayisi      INTEGER DEFAULT 0,
+    guncelleme_tarihi TEXT    DEFAULT CURRENT_TIMESTAMP,
+    created_at        TEXT    DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (userid, siparisno)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paytr_userid_islemtarihi
+    ON paytr(userid, islemtarihi);
+
+-- ── PayTR Senkronizasyon Logu ─────────────────────────────────────────────
+-- PHP: ajax/paytr_sync_chunk.php → CREATE TABLE paytr_sync_log
+-- Son başarılı senkronizasyon tarihi (dashboard kartı için)
+CREATE TABLE IF NOT EXISTS paytr_sync_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid          INTEGER NOT NULL,
+    musterino       TEXT    NOT NULL DEFAULT '',
+    son_sync_tarihi TEXT    DEFAULT NULL,
+    updated_at      TEXT    DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (userid, musterino)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paytr_sync_log_userid
+    ON paytr_sync_log(userid, musterino);
+
+-- ── API Sanal Pos Kimlik Bilgileri ────────────────────────────────────────
+-- PHP: apisanalpos MySQL tablosunun karşılığı
+-- PayTR entegrasyonu için Mağaza No / Parola / Gizli Anahtar
+CREATE TABLE IF NOT EXISTS apisanalpos (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid                INTEGER NOT NULL,
+    musterino             TEXT    NOT NULL DEFAULT '1',
+    firma_adi             TEXT    DEFAULT '',
+    magaza_no             TEXT    DEFAULT '',
+    magaza_parola         TEXT    DEFAULT '',
+    magaza_gizli_anahtar  TEXT    DEFAULT '',
+    kayit_tarihi          TEXT    DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_apisanalpos_userid
+    ON apisanalpos(userid);
+
+-- ── IBAN Hesap Bilgileri ───────────────────────────────────────────────────
+-- PHP: ibanHesapBilgileri MySQL tablosunun karşılığı
+CREATE TABLE IF NOT EXISTS ibanHesapBilgileri (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    userid           INTEGER NOT NULL,
+    ibanHesapbaslik  TEXT NOT NULL,
+    cariHesapid      INTEGER NOT NULL,
+    bankaAdi         TEXT NOT NULL,
+    subeAdi          TEXT,
+    bankaHesapno     TEXT,
+    ibanNo           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_iban_userid
+    ON ibanHesapBilgileri(userid);
+
+-- ── Alt Kullanıcı Yetkileri ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS alt_kullanici (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_userid   INTEGER NOT NULL,
+    kullanici_adi   TEXT    NOT NULL,
+    eposta          TEXT    NOT NULL DEFAULT '',
+    sifre_hash      TEXT    DEFAULT NULL,
+    uyelik_tarihi   TEXT    DEFAULT NULL,
+    yetki           TEXT    DEFAULT '1'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ak_kullanici ON alt_kullanici(kullanici_adi);
+CREATE INDEX IF NOT EXISTS idx_ak_parent ON alt_kullanici(parent_userid);
+
+-- ── Varsayılan Super Admin Kullanıcısı ───────────────────────────────────────
+-- Yalnızca 'superadmin' adlı kullanıcı yoksa eklenir (yetki='superadmin', sifre='123')
+INSERT INTO uyelik (
+    kullanici_adi, sifre, yetki, firmaAdi,
+    hesapTuru, bagli_hesap, altKullaniciSayisi
+)
+SELECT 'superadmin', '123', 'superadmin', 'IQ Finans', 0, -1, 0
+WHERE NOT EXISTS (
+    SELECT 1 FROM uyelik WHERE kullanici_adi = 'superadmin'
+);
+
 """

@@ -335,9 +335,683 @@ class VomsisIsleWorker(QThread):
         })
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ── Manuel Toplu İşle — Worker Sınıfları  (PHP: btnTopluBankalarIsle, vb.)  ──
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TopluBankalarIsleWorker(QThread):
+    """
+    PHP: #btnTopluBankalarIsle click → ajax/topluWomIsle.php
+    VOMSİS banka hareketlerini 15 günlük batch'ler halinde çekip hareketler
+    tablosuna yazar.  VomsisIsleWorker'dan farklı olarak tarihi dışarıdan alır
+    ve tüm batch döngüsü boyunca ilerleme bildirir.
+    """
+    progress = pyqtSignal(str)    # durum metni
+    batch_done = pyqtSignal(int, int)   # (tamamlanan_batch, toplam_batch)
+    finished = pyqtSignal(dict)   # {'success': bool, 'message': str, 'count': int}
+
+    def __init__(self, api_base: str, app_key: str, app_secret: str,
+                 start_dt: datetime.datetime, end_dt: datetime.datetime,
+                 userid: int):
+        super().__init__()
+        self._api_base   = api_base
+        self._app_key    = app_key
+        self._app_secret = app_secret
+        self._start_dt   = start_dt
+        self._end_dt     = end_dt
+        self._userid     = userid
+
+    def run(self):
+        from services.vomsis_service import (
+            vomsis_authenticate, vomsis_get_all_transactions
+        )
+        self.progress.emit("🔑  VOMSİS token alınıyor...")
+        token, err_msg = vomsis_authenticate(
+            self._api_base, self._app_key, self._app_secret
+        )
+        if not token:
+            self.finished.emit({
+                "success": False,
+                "message": err_msg or "Token alınamadı.",
+                "count": 0
+            })
+            return
+
+        # PHP: 15 günlük batch döngüsü  (topluWomIsle.php benzeri)
+        batches: list[tuple[datetime.datetime, datetime.datetime]] = []
+        cur = self._start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        while cur <= self._end_dt:
+            batch_end = min(
+                cur + datetime.timedelta(days=14),
+                self._end_dt.replace(hour=23, minute=59, second=59)
+            )
+            batches.append((cur, batch_end))
+            cur = batch_end + datetime.timedelta(seconds=1)
+            cur = cur.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        total_batches  = len(batches)
+        total_inserted = 0
+        conn = get_connection()
+        try:
+            for i, (bs, be) in enumerate(batches):
+                begin_str = bs.strftime("%d-%m-%Y %H:%M:%S")
+                end_str   = be.strftime("%d-%m-%Y %H:%M:%S")
+                self.progress.emit(
+                    f"📡  Parça {i+1}/{total_batches}: "
+                    f"{bs.strftime('%d.%m.%Y')} → {be.strftime('%d.%m.%Y')} çekiliyor..."
+                )
+                txs = vomsis_get_all_transactions(
+                    self._api_base, token, begin_str, end_str
+                )
+                for tx in txs:
+                    tarih_raw  = tx.get("date") or tx.get("processDate") or ""
+                    aciklama   = tx.get("description") or tx.get("explanation") or ""
+                    tutar_raw  = tx.get("amount") or tx.get("tryAmount") or 0
+                    try:
+                        tutar = float(str(tutar_raw).replace(",", "."))
+                    except (ValueError, TypeError):
+                        tutar = 0.0
+                    yon       = tx.get("direction") or tx.get("transactionDirection") or ""
+                    gelir_gider = "gelir" if str(yon).upper() in ("CREDIT", "ALACAK", "+") else "gider"
+                    vomsis_key = tx.get("id") or tx.get("transactionId") or ""
+
+                    if vomsis_key:
+                        exists = conn.execute(
+                            "SELECT id FROM hareketler WHERE womsisKey=? AND userid=? LIMIT 1",
+                            (str(vomsis_key), self._userid)
+                        ).fetchone()
+                        if exists:
+                            continue
+
+                    conn.execute(
+                        """INSERT INTO hareketler
+                           (tarih, aciklama, gelirGider, alinan_tutar1, kaynak, womsisKey, userid)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (tarih_raw, aciklama, gelir_gider, tutar, "vomsis",
+                         str(vomsis_key), self._userid)
+                    )
+                    total_inserted += 1
+                conn.commit()
+                self.batch_done.emit(i + 1, total_batches)
+        except Exception as exc:
+            conn.rollback()
+            self.finished.emit({"success": False, "message": str(exc), "count": total_inserted})
+            return
+        finally:
+            conn.close()
+
+        self.finished.emit({
+            "success": True,
+            "message": f"{total_inserted} banka hareketi aktarıldı ({total_batches} parça).",
+            "count": total_inserted
+        })
+
+
+class WomsisPosIsleWorker(QThread):
+    """
+    PHP: #btnGiderlerIsle click → ajax/ayarlar/womsisPosIsle.php
+    VOMSİS POS terminal hareketlerini çekip womsi_pos tablosuna yazar.
+    """
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(dict)
+
+    def __init__(self, api_base: str, app_key: str, app_secret: str,
+                 start_dt: datetime.datetime, end_dt: datetime.datetime,
+                 userid: int):
+        super().__init__()
+        self._api_base   = api_base
+        self._app_key    = app_key
+        self._app_secret = app_secret
+        self._start_dt   = start_dt
+        self._end_dt     = end_dt
+        self._userid     = userid
+
+    def run(self):
+        from services.vomsis_service import (
+            vomsis_authenticate, vomsis_get_terminals, vomsis_get_terminal_transactions
+        )
+        from services.fiziksel_pos_service import ensure_tables
+
+        ensure_tables()
+        self.progress.emit("🔑  VOMSİS POS token alınıyor...")
+        token, err_msg = vomsis_authenticate(
+            self._api_base, self._app_key, self._app_secret
+        )
+        if not token:
+            self.finished.emit({
+                "success": False,
+                "message": err_msg or "Token alınamadı.",
+                "count": 0
+            })
+            return
+
+        self.progress.emit("📋  Terminal listesi alınıyor...")
+        terminals = vomsis_get_terminals(self._api_base, token)
+        if not terminals:
+            self.finished.emit({
+                "success": False,
+                "message": "Hiç POS terminali bulunamadı. VOMSİS POS tanımlarınızı kontrol edin.",
+                "count": 0
+            })
+            return
+
+        begin_str = self._start_dt.strftime("%d-%m-%Y %H:%M:%S")
+        end_str   = self._end_dt.replace(hour=23, minute=59, second=59).strftime("%d-%m-%Y %H:%M:%S")
+
+        total_inserted = 0
+        conn = get_connection()
+        try:
+            # PHP: önce o tarih aralığındaki eski kayıtları sil, sonra yeniden yaz
+            bas_str_norm = self._start_dt.strftime("%Y-%m-%d")
+            bit_str_norm = self._end_dt.strftime("%Y-%m-%d")
+            conn.execute(
+                "DELETE FROM womsi_pos WHERE userid=? AND islemTarihi >= ? AND islemTarihi <= ?",
+                (self._userid, bas_str_norm, bit_str_norm)
+            )
+            conn.commit()
+
+            for idx, terminal in enumerate(terminals):
+                tid = terminal.get("id") or terminal.get("stationId") or ""
+                tname = terminal.get("name") or terminal.get("terminalNo") or str(tid)
+                self.progress.emit(
+                    f"💳  Terminal {idx+1}/{len(terminals)}: {tname} çekiliyor..."
+                )
+                txs = vomsis_get_terminal_transactions(
+                    self._api_base, token, tid, begin_str, end_str
+                )
+                for tx in txs:
+                    islem_tarihi     = tx.get("transactionDate") or tx.get("date") or ""
+                    islem_tutari     = float(str(tx.get("amount", 0)).replace(",", ".") or 0)
+                    net_tutar        = float(str(tx.get("netAmount", 0)).replace(",", ".") or 0)
+                    isyeri_ucreti    = float(str(tx.get("commissionAmount", 0)).replace(",", ".") or 0)
+                    islem_tipi       = tx.get("type") or tx.get("transactionType") or ""
+                    kart_no          = tx.get("maskedCardNumber") or tx.get("cardNo") or ""
+                    brand            = tx.get("brand") or tx.get("cardBrand") or ""
+                    aciklama         = tx.get("description") or ""
+                    isyeri_no        = tx.get("merchantId") or str(tid)
+
+                    conn.execute(
+                        """INSERT INTO womsi_pos
+                           (userid, musterino, isyeriNo, islemTarihi, islemTutari,
+                            netTutar, isyeriUcretiTutar, islemTipi, kartNo, brand,
+                            aciklama, kayitTarihi)
+                           VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                        (self._userid, isyeri_no, islem_tarihi, islem_tutari,
+                         net_tutar, isyeri_ucreti, islem_tipi, kart_no, brand, aciklama)
+                    )
+                    total_inserted += 1
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            self.finished.emit({"success": False, "message": str(exc), "count": total_inserted})
+            return
+        finally:
+            conn.close()
+
+        self.finished.emit({
+            "success": True,
+            "message": f"{total_inserted} POS hareketi aktarıldı ({len(terminals)} terminal).",
+            "count": total_inserted
+        })
+
+
+class PaytrTopluIsleWorker(QThread):
+    """
+    PHP: #btnPaytrPosIsle click → ajax/paytrPosIsle.php
+    PayTR API'den 30 günlük batch'ler halinde işlem dökümü çekip paytr tablosuna yazar.
+    """
+    progress = pyqtSignal(str)
+    batch_done = pyqtSignal(int, int)
+    finished = pyqtSignal(dict)
+
+    def __init__(self, start_dt: datetime.datetime, end_dt: datetime.datetime, userid: int):
+        super().__init__()
+        self._start_dt = start_dt
+        self._end_dt   = end_dt
+        self._userid   = userid
+
+    def run(self):
+        from services.paytr_service import sync_chunk
+
+        # 30 günlük batch'ler oluştur (PHP: batchEnd.setDate(batchEnd.getDate() + 29))
+        batches: list[tuple[str, str]] = []
+        cur = self._start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        while cur <= self._end_dt:
+            batch_end = min(cur + datetime.timedelta(days=29), self._end_dt)
+            batches.append((cur.strftime("%Y-%m-%d"), batch_end.strftime("%Y-%m-%d")))
+            cur = batch_end + datetime.timedelta(days=1)
+            cur = cur.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        total_batches  = len(batches)
+        total_inserted = 0
+        total_skipped  = 0
+
+        for i, (bs, be) in enumerate(batches):
+            self.progress.emit(
+                f"💳  PayTR Parça {i+1}/{total_batches}: "
+                f"{bs} → {be} işleniyor..."
+            )
+            result = sync_chunk(
+                userid=self._userid,
+                musterino="",
+                chunk_start=bs,
+                chunk_end=be
+            )
+            if result.get("success"):
+                total_inserted += result.get("inserted", 0)
+                total_skipped  += result.get("skipped", 0)
+            self.batch_done.emit(i + 1, total_batches)
+
+        self.finished.emit({
+            "success": True,
+            "message": (
+                f"{total_inserted} yeni PayTR kaydı aktarıldı, "
+                f"{total_skipped} mevcut kayıt atlandı ({total_batches} parça)."
+            ),
+            "count": total_inserted
+        })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── Manuel Toplu İşlemler Dialog  (PHP: #modalMtopluisle + JS handler'ları)  ─
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ManuelTopluIsleDialog(QDialog):
+    """
+    PHP ayarlar.php → #modalMtopluisle dialog'unun PyQt6 tam karşılığı.
+
+    Butonlar:
+      • Bankalar İşle       → TopluBankalarIsleWorker (ajax/topluWomIsle.php)
+      • Womsis Pos İşle     → WomsisPosIsleWorker     (ajax/ayarlar/womsisPosIsle.php)
+      • Sanal Pos İşle      → PaytrTopluIsleWorker    (ajax/ayarlar/paytrPosIsle.php)
+      • Google Sheets       → Web sürümüne özel (bilgi mesajı gösterilir)
+      • Toplu İşle          → Bankalar + WomsisPos + PayTR sırayla çalıştırır
+    """
+
+    def __init__(self, userid: int, api_base: str, app_key: str,
+                 app_secret: str, parent=None):
+        super().__init__(parent)
+        self._userid     = userid
+        self._api_base   = api_base
+        self._app_key    = app_key
+        self._app_secret = app_secret
+        self._worker: QThread | None = None
+        self._queue: list[str] = []     # sıradaki işlemler
+
+        self.setWindowTitle("Manuel Toplu İşlemler")
+        self.setMinimumWidth(540)
+        self.setModal(True)
+        self.setStyleSheet(
+            "QDialog{background:#ffffff;}"
+            "QLabel{font-family:'Segoe UI',Arial,sans-serif;}"
+        )
+        self._build()
+
+    # ── UI ────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 24)
+        root.setSpacing(16)
+
+        # Başlık
+        title_row = QHBoxLayout()
+        ic = QLabel("⚡")
+        ic.setStyleSheet("font-size:22px;")
+        title_row.addWidget(ic)
+        t = QLabel("Manuel Toplu İşlemler")
+        t.setStyleSheet("font-size:16px;font-weight:700;color:#1e293b;")
+        title_row.addWidget(t)
+        title_row.addStretch()
+        root.addLayout(title_row)
+
+        # ── Tarih aralığı seçici (PHP: #topluWomsisBas / #topluWomsisBit) ──
+        date_frame = QFrame()
+        date_frame.setStyleSheet(
+            "QFrame{background:#f8f9fa;border:1px solid #e0e0e0;"
+            "border-radius:8px;padding:4px;}"
+        )
+        date_layout = QVBoxLayout(date_frame)
+        date_layout.setContentsMargins(14, 12, 14, 12)
+        date_layout.setSpacing(8)
+
+        range_lbl = QLabel("📅 Çekilecek Tarih Aralığı")
+        range_lbl.setStyleSheet("font-size:13px;font-weight:600;color:#555;")
+        date_layout.addWidget(range_lbl)
+
+        DATE_STYLE = (
+            "QDateEdit{background:white;border:1.5px solid #ccc;"
+            "border-radius:6px;padding:0 8px;font-size:13px;color:#1f2937;}"
+            "QDateEdit:focus{border-color:#6366f1;}"
+        )
+        date_row = QHBoxLayout()
+        date_row.setSpacing(10)
+
+        bas_col = QVBoxLayout()
+        bas_lbl = QLabel("Başlangıç Tarihi")
+        bas_lbl.setStyleSheet("font-size:11px;color:#888;")
+        self._bas_date = QDateEdit()
+        self._bas_date.setFixedHeight(34)
+        self._bas_date.setDisplayFormat("dd.MM.yyyy")
+        self._bas_date.setDate(QDate(QDate.currentDate().year(), 1, 1))
+        self._bas_date.setCalendarPopup(True)
+        self._bas_date.setStyleSheet(DATE_STYLE)
+        bas_col.addWidget(bas_lbl)
+        bas_col.addWidget(self._bas_date)
+        date_row.addLayout(bas_col)
+
+        bit_col = QVBoxLayout()
+        bit_lbl = QLabel("Bitiş Tarihi")
+        bit_lbl.setStyleSheet("font-size:11px;color:#888;")
+        self._bit_date = QDateEdit()
+        self._bit_date.setFixedHeight(34)
+        self._bit_date.setDisplayFormat("dd.MM.yyyy")
+        self._bit_date.setDate(QDate.currentDate())
+        self._bit_date.setCalendarPopup(True)
+        self._bit_date.setStyleSheet(DATE_STYLE)
+        bit_col.addWidget(bit_lbl)
+        bit_col.addWidget(self._bit_date)
+        date_row.addLayout(bit_col)
+        date_row.addStretch()
+
+        date_layout.addLayout(date_row)
+        root.addWidget(date_frame)
+
+        # ── 4 ana buton (PHP: alertp içindeki 4 buton) ──
+        BTN_BASE = (
+            "QPushButton{border:none;border-radius:8px;font-size:13px;"
+            "font-weight:600;padding:10px 14px;text-align:left;}"
+            "QPushButton:hover{opacity:.85;}"
+            "QPushButton:disabled{background:#e2e8f0;color:#94a3b8;}"
+        )
+        btn_grid = QVBoxLayout()
+        btn_grid.setSpacing(8)
+
+        # Bankalar İşle
+        self._btn_bankalar = QPushButton("🏦  Bankalar İşle")
+        self._btn_bankalar.setStyleSheet(
+            BTN_BASE + "QPushButton{background:#3b82f6;color:white;}"
+            "QPushButton:hover{background:#2563eb;}"
+        )
+        self._btn_bankalar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_bankalar.clicked.connect(self._on_bankalar_isle)
+        btn_grid.addWidget(self._btn_bankalar)
+
+        # Womsis Pos İşle
+        self._btn_wpos = QPushButton("📟  Womsis POS İşle")
+        self._btn_wpos.setStyleSheet(
+            BTN_BASE + "QPushButton{background:#1a3a5c;color:white;}"
+            "QPushButton:hover{background:#152e4a;}"
+        )
+        self._btn_wpos.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_wpos.clicked.connect(self._on_wpos_isle)
+        btn_grid.addWidget(self._btn_wpos)
+
+        # Sanal Pos İşle
+        self._btn_paytr = QPushButton("💳  Sanal Pos İşle  (PayTR)")
+        self._btn_paytr.setStyleSheet(
+            BTN_BASE + "QPushButton{background:#212121;color:white;}"
+            "QPushButton:hover{background:#111111;}"
+        )
+        self._btn_paytr.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_paytr.clicked.connect(self._on_paytr_isle)
+        btn_grid.addWidget(self._btn_paytr)
+
+        # Google Sheets — web only
+        self._btn_gsheets = QPushButton("📊  Tüm Hesap Tablolarını İşle  (Google Sheets)")
+        self._btn_gsheets.setStyleSheet(
+            BTN_BASE + "QPushButton{background:#34a853;color:white;}"
+            "QPushButton:hover{background:#2d9248;}"
+        )
+        self._btn_gsheets.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_gsheets.clicked.connect(self._on_gsheets_isle)
+        btn_grid.addWidget(self._btn_gsheets)
+
+        root.addLayout(btn_grid)
+
+        # ── İlerleme / durum etiketi ──
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFixedHeight(6)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setStyleSheet(
+            "QProgressBar{background:#f1f5f9;border-radius:3px;border:none;}"
+            "QProgressBar::chunk{background:#3b82f6;border-radius:3px;}"
+        )
+        self._progress_bar.hide()
+        root.addWidget(self._progress_bar)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setWordWrap(True)
+        self._status_lbl.setStyleSheet(
+            "font-size:12px;color:#374151;background:#f8fafc;"
+            "border-radius:6px;padding:8px 10px;border:none;"
+        )
+        self._status_lbl.hide()
+        root.addWidget(self._status_lbl)
+
+        # ── Alt butonlar — Toplu İşle + İptal ──
+        foot = QHBoxLayout()
+        foot.setSpacing(10)
+
+        self._btn_toplu = QPushButton("⚡  Toplu İşle  (Bankalar + POS + PayTR)")
+        self._btn_toplu.setFixedHeight(42)
+        self._btn_toplu.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_toplu.setStyleSheet(
+            "QPushButton{background:#4f46e5;color:white;border:none;"
+            "border-radius:9px;font-size:13px;font-weight:700;padding:0 18px;}"
+            "QPushButton:hover{background:#4338ca;}"
+            "QPushButton:disabled{background:#cbd5e1;color:#94a3b8;}"
+        )
+        self._btn_toplu.clicked.connect(self._on_toplu_isle)
+        foot.addWidget(self._btn_toplu)
+
+        btn_iptal = QPushButton("İptal")
+        btn_iptal.setFixedHeight(42)
+        btn_iptal.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_iptal.setStyleSheet(
+            "QPushButton{background:#f1f5f9;color:#374151;border:1.5px solid #e2e8f0;"
+            "border-radius:9px;font-size:13px;font-weight:600;padding:0 18px;}"
+            "QPushButton:hover{background:#e2e8f0;}"
+        )
+        btn_iptal.clicked.connect(self.reject)
+        foot.addWidget(btn_iptal)
+        root.addLayout(foot)
+
+    # ── Yardımcılar ───────────────────────────────────────────────────────
+
+    def _get_dates(self) -> tuple[datetime.datetime, datetime.datetime]:
+        bas_q = self._bas_date.date()
+        bit_q = self._bit_date.date()
+        start = datetime.datetime(bas_q.year(), bas_q.month(), bas_q.day(), 0, 0, 0)
+        end   = datetime.datetime(bit_q.year(), bit_q.month(), bit_q.day(), 23, 59, 59)
+        return start, end
+
+    def _validate_dates(self) -> bool:
+        start, end = self._get_dates()
+        if start > end:
+            self._show_status(
+                "⚠️  Başlangıç tarihi bitiş tarihinden büyük olamaz.", "#92400e", ok=False
+            )
+            return False
+        return True
+
+    def _validate_api(self) -> bool:
+        if not self._api_base or not self._app_key or not self._app_secret:
+            self._show_status(
+                "⚠️  Lütfen önce Eklentiler sekmesinden VOMSİS API bilgilerini kaydedin.",
+                "#92400e", ok=False
+            )
+            return False
+        return True
+
+    def _set_buttons_enabled(self, enabled: bool):
+        for btn in (self._btn_bankalar, self._btn_wpos, self._btn_paytr,
+                    self._btn_gsheets, self._btn_toplu):
+            btn.setEnabled(enabled)
+
+    def _show_status(self, text: str, color: str = "#374151", ok: bool = True):
+        self._status_lbl.setText(text)
+        bg = "#dcfce7" if ok else "#fef3c7"
+        if "#dc2626" in color or "#92400e" in color:
+            bg = "#fee2e2"
+        self._status_lbl.setStyleSheet(
+            f"font-size:12px;color:{color};background:{bg};"
+            "border-radius:6px;padding:8px 10px;border:none;"
+        )
+        self._status_lbl.show()
+
+    def _start_progress(self, total: int = 0):
+        self._progress_bar.setMaximum(max(total, 1))
+        self._progress_bar.setValue(0)
+        self._progress_bar.show()
+
+    # ── Bankalar İşle ─────────────────────────────────────────────────────
+
+    def _on_bankalar_isle(self):
+        if not self._validate_dates():
+            return
+        if not self._validate_api():
+            return
+        start, end = self._get_dates()
+        self._set_buttons_enabled(False)
+        self._show_status("⏳  Banka hareketleri çekiliyor...", "#6366f1")
+        self._start_progress()
+
+        self._worker = TopluBankalarIsleWorker(
+            self._api_base, self._app_key, self._app_secret,
+            start, end, self._userid
+        )
+        self._worker.progress.connect(lambda m: self._show_status(m, "#6366f1"))
+        self._worker.batch_done.connect(
+            lambda done, total: self._progress_bar.setValue(
+                int(done / total * self._progress_bar.maximum())
+                if total else done
+            )
+        )
+        self._worker.finished.connect(self._on_done)
+        self._worker.start()
+
+    # ── Womsis Pos İşle ───────────────────────────────────────────────────
+
+    def _on_wpos_isle(self):
+        if not self._validate_dates():
+            return
+        if not self._validate_api():
+            return
+        start, end = self._get_dates()
+        self._set_buttons_enabled(False)
+        self._show_status("⏳  VOMSİS POS verileri çekiliyor...", "#1a3a5c")
+        self._start_progress()
+
+        self._worker = WomsisPosIsleWorker(
+            self._api_base, self._app_key, self._app_secret,
+            start, end, self._userid
+        )
+        self._worker.progress.connect(lambda m: self._show_status(m, "#1a3a5c"))
+        self._worker.finished.connect(self._on_done)
+        self._worker.start()
+
+    # ── Sanal Pos (PayTR) İşle ────────────────────────────────────────────
+
+    def _on_paytr_isle(self):
+        if not self._validate_dates():
+            return
+        start, end = self._get_dates()
+        self._set_buttons_enabled(False)
+        self._show_status("⏳  PayTR sanal POS verileri çekiliyor...", "#374151")
+        self._start_progress()
+
+        self._worker = PaytrTopluIsleWorker(start, end, self._userid)
+        self._worker.progress.connect(lambda m: self._show_status(m, "#374151"))
+        self._worker.batch_done.connect(
+            lambda done, total: self._progress_bar.setValue(
+                int(done / total * self._progress_bar.maximum())
+                if total else done
+            )
+        )
+        self._worker.finished.connect(self._on_done)
+        self._worker.start()
+
+    # ── Google Sheets İşle ────────────────────────────────────────────────
+
+    def _on_gsheets_isle(self):
+        """Google Sheets entegrasyonu web sürümüne özel olduğu için bilgi göster."""
+        self._show_status(
+            "ℹ️  Google Sheets entegrasyonu yalnızca web sürümünde kullanılabilir. "
+            "Bu masaüstü uygulamasında bu özellik desteklenmemektedir.",
+            "#0c4a6e", ok=True
+        )
+
+    # ── Toplu İşle (sırayla 3 işlem) ─────────────────────────────────────
+
+    def _on_toplu_isle(self):
+        """Bankalar + WomsisPos + PayTR sırayla çalıştırır."""
+        if not self._validate_dates():
+            return
+        if not self._validate_api():
+            return
+        # Sırayı belirle
+        self._queue = ["bankalar", "wpos", "paytr"]
+        self._set_buttons_enabled(False)
+        self._show_status("⏳  Toplu işlem başlatıldı...", "#4f46e5")
+        self._start_progress(3)
+        self._run_next_in_queue()
+
+    def _run_next_in_queue(self):
+        if not self._queue:
+            self._progress_bar.setValue(self._progress_bar.maximum())
+            self._set_buttons_enabled(True)
+            self._show_status(
+                "✅  Toplu işlem tamamlandı. Tüm kaynaklar aktarıldı.", "#059669", ok=True
+            )
+            return
+        next_op = self._queue.pop(0)
+        start, end = self._get_dates()
+        if next_op == "bankalar":
+            self._show_status("📡  (1/3) Bankalar İşleniyor...", "#6366f1")
+            self._worker = TopluBankalarIsleWorker(
+                self._api_base, self._app_key, self._app_secret,
+                start, end, self._userid
+            )
+            self._worker.progress.connect(lambda m: self._show_status(m, "#6366f1"))
+            self._worker.finished.connect(self._on_queue_step_done)
+            self._worker.start()
+        elif next_op == "wpos":
+            self._show_status("📟  (2/3) Womsis POS İşleniyor...", "#1a3a5c")
+            self._worker = WomsisPosIsleWorker(
+                self._api_base, self._app_key, self._app_secret,
+                start, end, self._userid
+            )
+            self._worker.progress.connect(lambda m: self._show_status(m, "#1a3a5c"))
+            self._worker.finished.connect(self._on_queue_step_done)
+            self._worker.start()
+        elif next_op == "paytr":
+            self._show_status("💳  (3/3) PayTR Sanal POS İşleniyor...", "#374151")
+            self._worker = PaytrTopluIsleWorker(start, end, self._userid)
+            self._worker.progress.connect(lambda m: self._show_status(m, "#374151"))
+            self._worker.finished.connect(self._on_queue_step_done)
+            self._worker.start()
+
+    def _on_queue_step_done(self, result: dict):
+        done = 3 - len(self._queue)
+        self._progress_bar.setValue(done)
+        self._run_next_in_queue()
+
+    # ── Tek işlem bitişi ──────────────────────────────────────────────────
+
+    def _on_done(self, result: dict):
+        self._progress_bar.hide()
+        self._set_buttons_enabled(True)
+        if result["success"]:
+            self._show_status(f"✅  {result['message']}", "#059669", ok=True)
+        else:
+            self._show_status(f"❌  {result['message']}", "#dc2626", ok=False)
+
+
 # ── VOMSİS API Kartı ──────────────────────────────────────────────────────────
 
 class VomsisCard(QFrame):
+
     """
     PHP ayarlar.php → Eklentiler → VOMSİS API bölümünün PyQt6 karşılığı.
     Alanlar: API URL, API KEY, API SECRET KEY
@@ -505,6 +1179,13 @@ class VomsisCard(QFrame):
         self._isle_btn.clicked.connect(self._on_isle)
         btn_row.addWidget(self._isle_btn)
 
+        self._manuel_toplu_btn = QPushButton("🗂️  Manuel Toplu İşle")
+        self._manuel_toplu_btn.setFixedHeight(38)
+        self._manuel_toplu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._manuel_toplu_btn.setStyleSheet(self._btn_style("#7c3aed"))
+        self._manuel_toplu_btn.clicked.connect(self._on_manuel_toplu_isle)
+        btn_row.addWidget(self._manuel_toplu_btn)
+
         btn_row.addStretch()
         root.addLayout(btn_row)
 
@@ -624,12 +1305,32 @@ class VomsisCard(QFrame):
         else:
             self._show_status(f"❌  {r['message']}", "#dc2626")
 
+    # ── Manuel Toplu İşle ───────────────────────────────────────────────────
+
+    def _on_manuel_toplu_isle(self):
+        """
+        PHP: #btnManuelTopluIsle click → showMtopluisle()
+        ManuelTopluIsleDialog'ı mevcut API bilgileriyle açar.
+        """
+        url    = self._url_inp.text().strip()
+        appkey = self._key_inp.text().strip()
+        seckey = self._sec_inp.text().strip()
+        dlg = ManuelTopluIsleDialog(
+            userid=self._userid,
+            api_base=url,
+            app_key=appkey,
+            app_secret=seckey,
+            parent=self
+        )
+        dlg.exec()
+
     # ── Yardımcı metotlar ────────────────────────────────────────────────────
 
     def _set_busy(self, busy: bool, msg: str = ""):
         self._kontrol_btn.setEnabled(not busy)
         self._kaydet_btn.setEnabled(not busy)
         self._isle_btn.setEnabled(not busy)
+        self._manuel_toplu_btn.setEnabled(not busy)
         if busy and msg:
             self._show_status(msg, "#6366f1")
 
@@ -2520,6 +3221,7 @@ class AyarlarScreen(QWidget):
         tabs = [
             ("hesap",     "👤  Hesap & Güvenlik"),
             ("eklentiler","🔌  Eklentiler"),
+            ("veritabani","🗄️  Veritabanı"),
         ]
 
         for key, label in tabs:
@@ -2577,6 +3279,10 @@ class AyarlarScreen(QWidget):
         self._kredi_kart_card = KrediKartCard(self._userid)
         self._content_layout.addWidget(self._kredi_kart_card)
 
+        # Veritabanı sekmesi
+        self._veritabani_card = VeriTabaniCard()
+        self._content_layout.addWidget(self._veritabani_card)
+
         self._content_layout.addStretch()
 
         # Aktif tab
@@ -2602,6 +3308,10 @@ class AyarlarScreen(QWidget):
         self._moy_card.setVisible(key == "eklentiler")
         self._vergi_muhtasar_card.setVisible(key == "eklentiler")
         self._kredi_kart_card.setVisible(key == "eklentiler")
+        self._veritabani_card.setVisible(key == "veritabani")
+
+        if key == "veritabani":
+            self._veritabani_card.refresh()
 
         if key == "eklentiler":
             if hasattr(self._efatura_card, "refresh"):
@@ -2632,6 +3342,720 @@ class AyarlarScreen(QWidget):
         )
         self._durum_lbl.show()
 
+# ── Kullanıcı Yönetimi Kartı ─────────────────────────────────────────────────
+
+class KullaniciYonetimCard(QFrame):
+    """
+    Hesap & Güvenlik sekmesinde alt kullanıcı yönetimi.
+    alt_kullanici tablosu üzerinden CRUD işlemleri yapar.
+
+    Yetki seviyeleri:
+      1 → Admin       (tüm ekranlar + veri girişi)
+      2 → Kullanıcı   (sadece görüntüleme)
+    """
+
+    YETKI_SECIMLERI = [("1", "Admin  —  Tüm yetkiler"), ("2", "Kullanıcı  —  Sadece görüntüleme")]
+    YETKI_BADGE = {
+        "1": ("#dbeafe", "#1d4ed8", "👑 Admin"),
+        "2": ("#dcfce7", "#15803d", "👁 Kullanıcı"),
+        "3": ("#fef9c3", "#a16207", "📊 Analist"),
+    }
+
+    def __init__(self, userid: int, parent=None):
+        super().__init__(parent)
+        self._userid = userid
+        self.setStyleSheet(
+            "QFrame{background:white;border:1.5px solid #bfdbfe;"
+            "border-radius:14px;}"
+        )
+        self._build()
+
+    # ── UI ───────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 20, 22, 20)
+        root.setSpacing(14)
+
+        # ── Başlık ──
+        h = QHBoxLayout()
+        ic = QLabel("👥")
+        ic.setStyleSheet("font-size:20px;")
+        h.addWidget(ic)
+        t = QLabel("Giriş Yetkileri & Kullanıcılar")
+        t.setStyleSheet("font-size:14px;font-weight:700;color:#000000;letter-spacing:.5px;")
+        h.addWidget(t)
+        h.addStretch()
+        root.addLayout(h)
+
+        # ── Banner (kota) ──
+        self._kota_banner = QLabel()
+        self._kota_banner.setWordWrap(True)
+        self._kota_banner.setStyleSheet(
+            "background:#dbeafe;color:#1e40af;border-radius:8px;"
+            "padding:10px 14px;font-size:12px;font-weight:600;border:none;"
+        )
+        root.addWidget(self._kota_banner)
+
+        # ── Bilgi bandı ──
+        bilgi = QLabel(
+            "💡  <b>Admin</b> rolündeki kullanıcılar ayarlar ve veri giriş ekranlarına "
+            "erişebilir.  <b>Kullanıcı</b> rolündekiler yalnızca raporları ve dashboard'ı görür."
+        )
+        bilgi.setWordWrap(True)
+        bilgi.setTextFormat(Qt.TextFormat.RichText)
+        bilgi.setStyleSheet(
+            "background:#f0fdf4;color:#166534;border-radius:6px;"
+            "padding:9px 12px;font-size:12px;border:none;"
+        )
+        root.addWidget(bilgi)
+
+        # ── Kullanıcı Listesi Tablosu ──
+        self._tbl = QTableWidget()
+        self._tbl.setColumnCount(5)  # Kullanıcı Adı | E-Posta | Yetki | Kayıt Tarihi | Sil
+        self._tbl.setHorizontalHeaderLabels(["Kullanıcı Adı", "E-Posta", "Yetki", "Kayıt Tarihi", ""])
+        self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.setAlternatingRowColors(True)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setSortingEnabled(False)
+        hdr = self._tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self._tbl.setColumnWidth(4, 70)
+        self._tbl.setMinimumHeight(200)
+        self._tbl.setStyleSheet("""
+            QTableWidget {
+                background: white;
+                gridline-color: #e2e8f0;
+                font-size: 12px;
+                color: #000000;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }
+            QTableWidget::item { color: #000000; padding: 4px 6px; background: white; }
+            QTableWidget::item:alternate { background: #f8fafc; color: #000000; }
+            QTableWidget::item:selected { background: #dbeafe; color: #1e40af; }
+            QHeaderView::section {
+                background: #1e293b; color: white;
+                font-weight: 700; font-size: 11px;
+                padding: 5px 6px; border: none;
+                border-right: 1px solid #334155;
+            }
+        """)
+        root.addWidget(self._tbl, 1)
+
+        # ── Yeni Kullanıcı Formu ──
+        form_frame = QFrame()
+        form_frame.setStyleSheet(
+            "QFrame{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;}"
+        )
+        form_lay = QVBoxLayout(form_frame)
+        form_lay.setContentsMargins(14, 12, 14, 12)
+        form_lay.setSpacing(10)
+
+        form_title = QLabel("➕  Yeni Kullanıcı Ekle")
+        form_title.setStyleSheet("font-size:12px;font-weight:700;color:#374151;")
+        form_lay.addWidget(form_title)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(10)
+
+        self._inp_adi = QLineEdit()
+        self._inp_adi.setPlaceholderText("Kullanıcı adı")
+        self._inp_adi.setFixedHeight(34)
+        self._inp_adi.setStyleSheet(self._inp_style())
+        row1.addWidget(self._inp_adi, 2)
+
+        self._inp_eposta = QLineEdit()
+        self._inp_eposta.setPlaceholderText("E-Posta (isteğe bağlı)")
+        self._inp_eposta.setFixedHeight(34)
+        self._inp_eposta.setStyleSheet(self._inp_style())
+        row1.addWidget(self._inp_eposta, 2)
+
+        self._inp_sifre = QLineEdit()
+        self._inp_sifre.setPlaceholderText("Şifre")
+        self._inp_sifre.setEchoMode(QLineEdit.EchoMode.Password)
+        self._inp_sifre.setFixedHeight(34)
+        self._inp_sifre.setStyleSheet(self._inp_style())
+        row1.addWidget(self._inp_sifre, 2)
+
+        self._inp_yetki = QComboBox()
+        self._inp_yetki.setFixedHeight(34)
+        self._inp_yetki.setFixedWidth(200)
+        for val, lbl in self.YETKI_SECIMLERI:
+            self._inp_yetki.addItem(lbl, val)
+        self._inp_yetki.setStyleSheet(self._combo_style())
+        row1.addWidget(self._inp_yetki)
+
+        self._ekle_btn = QPushButton("✔  Ekle")
+        self._ekle_btn.setFixedHeight(34)
+        self._ekle_btn.setFixedWidth(80)
+        self._ekle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ekle_btn.setStyleSheet(
+            "QPushButton{background:#1d4ed8;color:white;border:none;"
+            "border-radius:7px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{background:#1e40af;}"
+        )
+        self._ekle_btn.clicked.connect(self._on_ekle)
+        row1.addWidget(self._ekle_btn)
+
+        form_lay.addLayout(row1)
+        root.addWidget(form_frame)
+
+        # ── Durum mesajı ──
+        self._durum_lbl = QLabel("")
+        self._durum_lbl.setWordWrap(True)
+        self._durum_lbl.setStyleSheet("font-size:11px;color:#374151;padding:4px 0;")
+        root.addWidget(self._durum_lbl)
+
+    # ── Stiller ──────────────────────────────────────────────────────────────
+
+    def _inp_style(self) -> str:
+        return (
+            "QLineEdit{background:white;border:1.5px solid #cbd5e1;"
+            "border-radius:7px;font-size:12px;color:#000000;padding:0 10px;}"
+            "QLineEdit:focus{border-color:#3b82f6;}"
+        )
+
+    def _combo_style(self) -> str:
+        return (
+            "QComboBox{background:white;border:1.5px solid #cbd5e1;"
+            "border-radius:7px;font-size:12px;color:#000000;padding:0 10px;}"
+            "QComboBox::drop-down{border:none;}"
+        )
+
+    # ── Veri yükleme ─────────────────────────────────────────────────────────
+
+    def refresh(self):
+        from services.alt_hesap_service import get_alt_kullanicilar
+        from PyQt6.QtGui import QColor, QBrush
+        from PyQt6.QtCore import Qt as _Qt
+
+        BLACK = QBrush(QColor("#000000"))
+        sonuc = get_alt_kullanicilar(self._userid)
+        data  = sonuc.get("data", [])
+        kalan = sonuc.get("kalan_hak", 0)
+        toplam_hak = 10
+        kullanilanlar = toplam_hak - kalan
+
+        # Kota banner
+        bar = "█" * kullanilanlar + "░" * kalan
+        self._kota_banner.setText(
+            f"👤  Kullanıcı Kotası:  {bar}  {kullanilanlar} / {toplam_hak} kullanılıyor   "
+            f"—   {kalan} kullanıcı hakkı kaldı"
+        )
+        bg = "#dbeafe" if kalan > 2 else ("#fef9c3" if kalan > 0 else "#fee2e2")
+        fg = "#1e40af" if kalan > 2 else ("#92400e" if kalan > 0 else "#b91c1c")
+        self._kota_banner.setStyleSheet(
+            f"background:{bg};color:{fg};border-radius:8px;"
+            f"padding:10px 14px;font-size:12px;font-weight:600;border:none;"
+        )
+
+        # Tabloyu doldur
+        self._tbl.setSortingEnabled(False)
+        self._tbl.setRowCount(0)
+        for row in data:
+            ri = self._tbl.rowCount()
+            self._tbl.insertRow(ri)
+            self._tbl.setRowHeight(ri, 30)
+
+            yetki = str(row.get("yetki", "1"))
+            badge_bg, badge_fg, badge_txt = self.YETKI_BADGE.get(
+                yetki, ("#e2e8f0", "#374151", "Bilinmiyor")
+            )
+
+            it_adi   = QTableWidgetItem(row.get("kullanici_adi", ""))
+            it_email = QTableWidgetItem(row.get("eposta", ""))
+            it_yetki = QTableWidgetItem(badge_txt)
+            it_tarih = QTableWidgetItem(row.get("uyelik_tarihi", ""))
+
+            for it in (it_adi, it_email, it_tarih):
+                it.setForeground(BLACK)
+
+            # Yetki hücresi renkli
+            it_yetki.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_yetki.setForeground(QBrush(QColor(badge_fg)))
+            it_yetki.setBackground(QBrush(QColor(badge_bg)))
+
+            self._tbl.setItem(ri, 0, it_adi)
+            self._tbl.setItem(ri, 1, it_email)
+            self._tbl.setItem(ri, 2, it_yetki)
+            self._tbl.setItem(ri, 3, it_tarih)
+
+            sil_btn = QPushButton("🗑  Sil")
+            sil_btn.setFixedHeight(26)
+            sil_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            sil_btn.setStyleSheet(
+                "QPushButton{background:#fee2e2;color:#dc2626;border:none;"
+                "border-radius:5px;font-size:11px;font-weight:600;}"
+                "QPushButton:hover{background:#fca5a5;}"
+            )
+            sil_btn.clicked.connect(lambda _, rid=row.get("id"): self._on_sil(rid))
+            self._tbl.setCellWidget(ri, 4, sil_btn)
+
+        self._tbl.setSortingEnabled(True)
+        sayi = len(data)
+        self._durum_lbl.setText(
+            f"✅  {sayi} kullanıcı tanımlı." if sayi else
+            "ℹ️  Henüz alt kullanıcı tanımlanmamış."
+        )
+
+    # ── Ekle ─────────────────────────────────────────────────────────────────
+
+    def _on_ekle(self):
+        from services.alt_hesap_service import kaydet_alt_kullanici
+        adi    = self._inp_adi.text().strip()
+        eposta = self._inp_eposta.text().strip() or f"{adi}@local"
+        sifre  = self._inp_sifre.text().strip()
+        yetki  = self._inp_yetki.currentData()
+
+        if not adi or not sifre:
+            self._durum_lbl.setText("⚠️  Kullanıcı adı ve şifre zorunludur.")
+            self._durum_lbl.setStyleSheet("font-size:11px;color:#dc2626;padding:4px 0;")
+            return
+
+        sonuc = kaydet_alt_kullanici(self._userid, adi, eposta, sifre, yetki)
+        if sonuc.get("success"):
+            self._inp_adi.clear()
+            self._inp_eposta.clear()
+            self._inp_sifre.clear()
+            self._durum_lbl.setText(f"✅  '{adi}' kullanıcısı eklendi.")
+            self._durum_lbl.setStyleSheet("font-size:11px;color:#15803d;padding:4px 0;")
+            self.refresh()
+        else:
+            self._durum_lbl.setText(f"❌  {sonuc.get('message', 'Hata oluştu.')}")
+            self._durum_lbl.setStyleSheet("font-size:11px;color:#dc2626;padding:4px 0;")
+
+    # ── Sil ──────────────────────────────────────────────────────────────────
+
+    def _on_sil(self, kullanici_id: int):
+        from services.alt_hesap_service import sil_alt_kullanici
+        from PyQt6.QtWidgets import QMessageBox
+        cevap = QMessageBox.question(
+            self, "Kullanıcı Sil",
+            "Bu kullanıcıyı silmek istediğinizden emin misiniz?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if cevap != QMessageBox.StandardButton.Yes:
+            return
+        sonuc = sil_alt_kullanici(self._userid, kullanici_id)
+        if sonuc.get("success"):
+            self._durum_lbl.setText("✅  Kullanıcı silindi.")
+            self._durum_lbl.setStyleSheet("font-size:11px;color:#15803d;padding:4px 0;")
+            self.refresh()
+        else:
+            self._durum_lbl.setText(f"❌  {sonuc.get('message', 'Silinemedi.')}")
+            self._durum_lbl.setStyleSheet("font-size:11px;color:#dc2626;padding:4px 0;")
+
+
+# ── Hesap Tanımları Kartı ────────────────────────────────────────────────────
+
+class HesapTanimCard(QFrame):
+    """
+    althesapkodu tablosunu yönetir.
+      - Mevcut kayıtları tablo olarak listeler
+      - Yeni hesap kodu ekle (Kod | Açıklama | Gelir/Gider)
+      - Seçili satırı sil
+      - CSV ile toplu yükle
+      - Şema CSV'sini indir
+    """
+
+    def __init__(self, userid: int, parent=None):
+        super().__init__(parent)
+        self._userid = userid
+        self.setStyleSheet(
+            "QFrame{background:white;border:1.5px solid #d1fae5;"
+            "border-radius:14px;}"
+        )
+        self._build()
+        self.refresh()
+
+    # ── UI ───────────────────────────────────────────────────────────────
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 20, 22, 20)
+        root.setSpacing(14)
+
+        # Başlık
+        h = QHBoxLayout()
+        ic = QLabel("📒")
+        ic.setStyleSheet("font-size:20px;")
+        h.addWidget(ic)
+        t = QLabel("Hesap Tanımları")
+        t.setStyleSheet("font-size:14px;font-weight:700;color:#000000;letter-spacing:.5px;")
+        h.addWidget(t)
+        h.addStretch()
+        root.addLayout(h)
+
+        # Bilgi bandı
+        info = QLabel(
+            "💡  Hesap kodlarını burada tanımlayın. "
+            "Gelir/Gider hareketlerinde seçim listesinde görünürler."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(
+            "background:#d1fae5;color:#065f46;border-radius:6px;"
+            "padding:9px 12px;font-size:12px;border:none;"
+        )
+        root.addWidget(info)
+
+        # ── Yeni Kayıt Formu ──
+        form_frame = QFrame()
+        form_frame.setStyleSheet(
+            "QFrame{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;}"
+        )
+        form_lay = QVBoxLayout(form_frame)
+        form_lay.setContentsMargins(14, 12, 14, 12)
+        form_lay.setSpacing(10)
+
+        form_title = QLabel("Yeni Hesap Kodu Ekle")
+        form_title.setStyleSheet("font-size:12px;font-weight:700;color:#374151;")
+        form_lay.addWidget(form_title)
+
+        form_row = QHBoxLayout()
+        form_row.setSpacing(10)
+
+        self._inp_kod = QLineEdit()
+        self._inp_kod.setPlaceholderText("Hesap Kodu (örn: 100, 770.01)")
+        self._inp_kod.setFixedHeight(34)
+        self._inp_kod.setStyleSheet(self._inp_style())
+        form_row.addWidget(self._inp_kod, 2)
+
+        self._inp_ack = QLineEdit()
+        self._inp_ack.setPlaceholderText("Açıklama")
+        self._inp_ack.setFixedHeight(34)
+        self._inp_ack.setStyleSheet(self._inp_style())
+        form_row.addWidget(self._inp_ack, 3)
+
+        self._inp_gg = QComboBox()
+        self._inp_gg.setFixedHeight(34)
+        self._inp_gg.setFixedWidth(130)
+        self._inp_gg.addItem("Gelir", "gelir")
+        self._inp_gg.addItem("Gider", "gider")
+        self._inp_gg.setStyleSheet(self._combo_style())
+        form_row.addWidget(self._inp_gg)
+
+        self._ekle_btn = QPushButton("➕  Ekle")
+        self._ekle_btn.setFixedHeight(34)
+        self._ekle_btn.setFixedWidth(90)
+        self._ekle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ekle_btn.setStyleSheet(self._btn_style("#059669"))
+        self._ekle_btn.clicked.connect(self._on_ekle)
+        form_row.addWidget(self._ekle_btn)
+
+        form_lay.addLayout(form_row)
+        root.addWidget(form_frame)
+
+        # ── Arama / Filtre satırı ──
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+
+        self._filtre_inp = QLineEdit()
+        self._filtre_inp.setPlaceholderText("🔍  Kod veya açıklamada ara...")
+        self._filtre_inp.setFixedHeight(34)
+        self._filtre_inp.setStyleSheet(self._inp_style())
+        self._filtre_inp.textChanged.connect(self._filter_tablo)
+        filter_row.addWidget(self._filtre_inp, 3)
+
+        self._filtre_gg = QComboBox()
+        self._filtre_gg.setFixedHeight(34)
+        self._filtre_gg.setFixedWidth(120)
+        self._filtre_gg.addItem("Tümü", None)
+        self._filtre_gg.addItem("↑ Gelir", "gelir")
+        self._filtre_gg.addItem("↓ Gider", "gider")
+        self._filtre_gg.setStyleSheet(self._combo_style())
+        self._filtre_gg.currentIndexChanged.connect(self._filter_tablo)
+        filter_row.addWidget(self._filtre_gg)
+
+        self._filtre_sonuc_lbl = QLabel("")
+        self._filtre_sonuc_lbl.setStyleSheet("font-size:11px;color:#6b7280;")
+        filter_row.addWidget(self._filtre_sonuc_lbl)
+
+        filter_row.addStretch()
+        root.addLayout(filter_row)
+
+        # ── Tablo ──
+        self._tbl = QTableWidget()
+        self._tbl.setColumnCount(4)  # Kod | Açıklama | Tür | Sil
+        self._tbl.setHorizontalHeaderLabels(["Hesap Kodu", "Açıklama", "Tür", ""])
+        self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.setAlternatingRowColors(True)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setSortingEnabled(True)
+        hdr = self._tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self._tbl.setColumnWidth(3, 70)
+        self._tbl.setMinimumHeight(260)
+        self._tbl.setStyleSheet("""
+            QTableWidget {
+                background: white;
+                gridline-color: #e2e8f0;
+                font-size: 12px;
+                color: #000000;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+            }
+            QTableWidget::item {
+                color: #000000;
+                padding: 3px 6px;
+                background: white;
+            }
+            QTableWidget::item:alternate {
+                background: #f1f5f9;
+                color: #000000;
+            }
+            QTableWidget::item:selected {
+                background: #dbeafe;
+                color: #1e40af;
+            }
+            QHeaderView::section {
+                background: #1e293b;
+                color: white;
+                font-weight: 700;
+                font-size: 11px;
+                padding: 5px 6px;
+                border: none;
+                border-right: 1px solid #334155;
+            }
+        """)
+        root.addWidget(self._tbl, 1)
+
+        # ── Alt buton satırı ──
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self._csv_yukle_btn = QPushButton("📂  CSV Yükle")
+        self._csv_yukle_btn.setFixedHeight(34)
+        self._csv_yukle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._csv_yukle_btn.setStyleSheet(self._btn_style("#2563eb"))
+        self._csv_yukle_btn.clicked.connect(self._on_csv_yukle)
+        btn_row.addWidget(self._csv_yukle_btn)
+
+        self._sema_btn = QPushButton("⬇️  Şema İndir")
+        self._sema_btn.setFixedHeight(34)
+        self._sema_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sema_btn.setStyleSheet(self._btn_style("#6366f1"))
+        self._sema_btn.clicked.connect(self._on_sema_indir)
+        btn_row.addWidget(self._sema_btn)
+
+        btn_row.addStretch()
+
+        self._durum_lbl = QLabel("")
+        self._durum_lbl.setStyleSheet("font-size:12px;color:#374151;")
+        btn_row.addWidget(self._durum_lbl)
+
+        root.addLayout(btn_row)
+
+    # ── Yardımcı stiller ──
+
+    def _inp_style(self) -> str:
+        return (
+            "QLineEdit{background:#f8fafc;border:1.5px solid #e2e8f0;"
+            "border-radius:8px;padding:0 10px;font-size:13px;color:#1f2937;}"
+            "QLineEdit:focus{border-color:#059669;}"
+        )
+
+    def _combo_style(self) -> str:
+        return (
+            "QComboBox{background:#f8fafc;border:1.5px solid #e2e8f0;"
+            "border-radius:8px;padding:0 8px;font-size:13px;color:#1f2937;}"
+            "QComboBox::drop-down{border:none;}"
+            "QComboBox QAbstractItemView{background:white;color:#1f2937;"
+            "selection-background-color:#d1fae5;selection-color:#065f46;}"
+        )
+
+    def _btn_style(self, color: str) -> str:
+        return (
+            f"QPushButton{{background:{color};color:white;border:none;"
+            f"border-radius:9px;font-size:13px;font-weight:600;"
+            f"padding:0 14px;letter-spacing:.4px;}}"
+            f"QPushButton:hover{{background:{color}cc;}}"
+            f"QPushButton:disabled{{background:#cbd5e1;color:#94a3b8;}}"
+        )
+
+    # ── Veri yükleme ──
+
+    def refresh(self):
+        from services.alt_hesap_kodu_service import get_alt_hesap_kodlari
+        from PyQt6.QtGui import QColor, QBrush
+        BLACK = QBrush(QColor("#000000"))
+        sonuc = get_alt_hesap_kodlari(self._userid)
+        data = sonuc.get("data", [])
+        self._tbl.setSortingEnabled(False)
+        self._tbl.setRowCount(0)
+        for row in data:
+            ri = self._tbl.rowCount()
+            self._tbl.insertRow(ri)
+            self._tbl.setRowHeight(ri, 28)
+
+            # Hesap Kodu
+            it_kod = QTableWidgetItem(row.get("kod", ""))
+            it_kod.setData(Qt.ItemDataRole.UserRole, row.get("id"))
+            it_kod.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            it_kod.setForeground(BLACK)
+            self._tbl.setItem(ri, 0, it_kod)
+
+            # Açıklama
+            it_ack = QTableWidgetItem(row.get("aciklama", ""))
+            it_ack.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            it_ack.setForeground(BLACK)
+            self._tbl.setItem(ri, 1, it_ack)
+
+            # Tür (Gelir/Gider) — badge tarzı metin
+            gg = row.get("gelirGider", "gelir")
+            gg_txt = "↑ Gelir" if gg == "gelir" else "↓ Gider"
+            it_gg = QTableWidgetItem(gg_txt)
+            it_gg.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_gg.setForeground(
+                QBrush(QColor("#15803d")) if gg == "gelir" else QBrush(QColor("#dc2626"))
+            )
+            self._tbl.setItem(ri, 2, it_gg)
+
+            # Sil butonu
+            sil_btn = QPushButton("🗑  Sil")
+            sil_btn.setFixedHeight(24)
+            sil_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            sil_btn.setStyleSheet(
+                "QPushButton{background:#fee2e2;color:#dc2626;border:none;"
+                "border-radius:5px;font-size:11px;font-weight:600;}"
+                "QPushButton:hover{background:#fca5a5;}"
+            )
+            sil_btn.clicked.connect(lambda _, rid=row.get("id"): self._on_sil(rid))
+            self._tbl.setCellWidget(ri, 3, sil_btn)
+
+        self._tbl.setSortingEnabled(True)
+        self._durum_lbl.setText(
+            f"✅  {len(data)} hesap tanımı yüklendi." if data else "⚠️  Henüz hesap tanımı bulunmuyor."
+        )
+
+    # ── Filtre ──
+
+    def _filter_tablo(self):
+        metin = self._filtre_inp.text().strip().lower()
+        gg_filtre = self._filtre_gg.currentData()   # None | 'gelir' | 'gider'
+        gorünen = 0
+        toplam  = self._tbl.rowCount()
+        for row in range(toplam):
+            kod_item = self._tbl.item(row, 0)
+            ack_item = self._tbl.item(row, 1)
+            gg_item  = self._tbl.item(row, 2)
+            kod_txt  = (kod_item.text() if kod_item else "").lower()
+            ack_txt  = (ack_item.text() if ack_item else "").lower()
+            gg_txt   = (gg_item.text()  if gg_item  else "").lower()   # "↑ gelir" / "↓ gider"
+
+            metin_ok = (not metin) or (metin in kod_txt) or (metin in ack_txt)
+            gg_ok    = (gg_filtre is None) or (gg_filtre in gg_txt)
+
+            gizle = not (metin_ok and gg_ok)
+            self._tbl.setRowHidden(row, gizle)
+            if not gizle:
+                gorünen += 1
+
+        if metin or gg_filtre:
+            self._filtre_sonuc_lbl.setText(f"{gorünen} / {toplam} kayıt")
+        else:
+            self._filtre_sonuc_lbl.setText("")
+
+    # ── Ekle ──
+
+
+    def _on_ekle(self):
+        from services.alt_hesap_kodu_service import ekle_alt_hesap_kodu
+        kod = self._inp_kod.text().strip()
+        ack = self._inp_ack.text().strip()
+        gg  = self._inp_gg.currentData()
+        if not kod or not ack:
+            self._show_durum("⚠️  Hesap kodu ve açıklama alanları zorunludur.", "#92400e")
+            return
+        sonuc = ekle_alt_hesap_kodu(self._userid, kod, ack, gg)
+        if sonuc.get("success"):
+            self._inp_kod.clear()
+            self._inp_ack.clear()
+            self._show_durum(f"✅  '{kod}' hesap kodu başarıyla eklendi.", "#059669")
+            self.refresh()
+        else:
+            self._show_durum(f"❌  {sonuc.get('message', 'Bilinmeyen hata.')}", "#dc2626")
+
+    # ── Sil ──
+
+    def _on_sil(self, kayit_id: int):
+        from services.alt_hesap_kodu_service import sil_alt_hesap_kodu
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Hesap Tanımını Sil")
+        dlg.setIcon(QMessageBox.Icon.Warning)
+        dlg.setText(
+            "Bu hesap tanımını silmek istediğinizden emin misiniz?\n"
+            "Bu işlem geri alınamaz."
+        )
+        dlg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        dlg.button(QMessageBox.StandardButton.Yes).setText("Evet, Sil")
+        dlg.button(QMessageBox.StandardButton.Cancel).setText("Vazgeç")
+        if dlg.exec() != QMessageBox.StandardButton.Yes:
+            return
+        sonuc = sil_alt_hesap_kodu(self._userid, kayit_id)
+        if sonuc.get("success"):
+            self._show_durum("✅  Hesap tanımı silindi.", "#059669")
+            self.refresh()
+        else:
+            self._show_durum(f"❌  {sonuc.get('message', 'Silme hatası.')}", "#dc2626")
+
+    # ── CSV Toplu Yükle ──
+
+    def _on_csv_yukle(self):
+        from services.alt_hesap_kodu_service import toplu_yukle_csv
+        dosya, _ = QFileDialog.getOpenFileName(
+            self, "CSV Dosyası Seç", "", "CSV Dosyaları (*.csv)"
+        )
+        if not dosya:
+            return
+        sonuc = toplu_yukle_csv(self._userid, dosya)
+        if sonuc.get("success"):
+            self._show_durum(
+                f"✅  {sonuc.get('added', 0)} kayıt eklendi, "
+                f"{sonuc.get('skipped', 0)} atlandı.",
+                "#059669"
+            )
+            self.refresh()
+        else:
+            self._show_durum(f"❌  {sonuc.get('message', 'CSV yükleme hatası.')}", "#dc2626")
+
+    # ── Şema CSV İndir ──
+
+    def _on_sema_indir(self):
+        dosya, _ = QFileDialog.getSaveFileName(
+            self, "Şema CSV'yi Kaydet", "alt_hesap_kodlari_sema.csv", "CSV Dosyaları (*.csv)"
+        )
+        if not dosya:
+            return
+        try:
+            import csv
+            with open(dosya, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["kod", "aciklama", "gelirGider"])
+                w.writerow(["100", "Nakit Para", "gelir"])
+                w.writerow(["770.01", "Vergi Giderleri", "gider"])
+            self._show_durum("✅  Şema CSV dosyası kaydedildi.", "#059669")
+        except Exception as exc:
+            self._show_durum(f"❌  {exc}", "#dc2626")
+
+    # ── Durum etiketi ──
+
+    def _show_durum(self, msg: str, color: str = "#374151"):
+        self._durum_lbl.setText(msg)
+        self._durum_lbl.setStyleSheet(f"font-size:12px;color:{color};")
+
+
 # ── Ana Ayarlar Ekranı ────────────────────────────────────────────────────────
 
 class AyarlarScreen(QWidget):
@@ -2659,8 +4083,9 @@ class AyarlarScreen(QWidget):
         tab_row.setSpacing(8)
         self._tab_btns: dict[str, QPushButton] = {}
         tabs = [
-            ("hesap",     "👤  Hesap & Güvenlik"),
-            ("eklentiler","🔌  Eklentiler"),
+            ("hesap",      "👤  Hesap & Güvenlik"),
+            ("eklentiler", "🔌  Eklentiler"),
+            ("veritabani", "🗄️  Veritabanı"),
         ]
 
         for key, label in tabs:
@@ -2694,6 +4119,10 @@ class AyarlarScreen(QWidget):
         self._sirket_card = SirketProfilCard(self._userid)
         self._content_layout.addWidget(self._sirket_card)
 
+        # Kullanıcı Yetkileri kartı — Şirket Profili'nin altında
+        self._kullanici_yonetim_card = KullaniciYonetimCard(self._userid)
+        self._content_layout.addWidget(self._kullanici_yonetim_card)
+
         # Eklentiler kartı
         self._efatura_card = EFaturaCard(self._userid)
         self._content_layout.addWidget(self._efatura_card)
@@ -2718,6 +4147,14 @@ class AyarlarScreen(QWidget):
         self._kredi_kart_card = KrediKartCard(self._userid)
         self._content_layout.addWidget(self._kredi_kart_card)
 
+        # Hesap Tanımları kartı — Eklentiler sekmesinde
+        self._hesap_tanim_card = HesapTanimCard(self._userid)
+        self._content_layout.addWidget(self._hesap_tanim_card)
+
+        # Veritabanı sekmesi
+        self._veritabani_card = VeriTabaniCard()
+        self._content_layout.addWidget(self._veritabani_card)
+
         self._content_layout.addStretch()
 
         # Aktif tab
@@ -2737,12 +4174,21 @@ class AyarlarScreen(QWidget):
             btn.setChecked(k == key)
 
         self._sirket_card.setVisible(key == "hesap")
+        self._kullanici_yonetim_card.setVisible(key == "hesap")
         self._efatura_card.setVisible(key == "eklentiler")
         self._yonetim_card.setVisible(key == "eklentiler")
         self._vomsis_card.setVisible(key == "eklentiler")
         self._moy_card.setVisible(key == "eklentiler")
         self._vergi_muhtasar_card.setVisible(key == "eklentiler")
         self._kredi_kart_card.setVisible(key == "eklentiler")
+        self._hesap_tanim_card.setVisible(key == "eklentiler")
+        self._veritabani_card.setVisible(key == "veritabani")
+
+        if key == "hesap":
+            self._kullanici_yonetim_card.refresh()
+
+        if key == "veritabani":
+            self._veritabani_card.refresh()
 
         if key == "eklentiler":
             if hasattr(self._efatura_card, "refresh"):
@@ -2753,4 +4199,856 @@ class AyarlarScreen(QWidget):
                 self._moy_card.refresh()
             if hasattr(self._vergi_muhtasar_card, "refresh"):
                 self._vergi_muhtasar_card.refresh()
+            self._hesap_tanim_card.refresh()
 
+
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  VERİTABANI AYARLARI — SweetAlert tasarımı, batch migration, local/PG mod  ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+def _mk_lbl(text, style=""):
+    l = QLabel(text)
+    if style:
+        l.setStyleSheet(style)
+    return l
+
+
+class SweetConfirmDialog(QDialog):
+    """Minimal onay diyaloğu — SweetAlert tarzı, frameless."""
+
+    def __init__(self, parent=None, title="", text="",
+                 confirm_text="Evet", cancel_text="İptal", is_danger=False):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._build(title, text, confirm_text, cancel_text, is_danger)
+
+    def _build(self, title, text, confirm_text, cancel_text, is_danger):
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        from PyQt6.QtGui import QColor
+        master = QVBoxLayout(self)
+        master.setContentsMargins(12, 12, 12, 12)
+        box = QFrame()
+        box.setObjectName("scd_box")
+        box.setStyleSheet(
+            "QFrame#scd_box{background:#ffffff;border:1.5px solid #e2e8f0;border-radius:16px;}"
+        )
+        sh = QGraphicsDropShadowEffect(self)
+        sh.setBlurRadius(20)
+        sh.setColor(QColor(0, 0, 0, 40))
+        sh.setOffset(0, 4)
+        box.setGraphicsEffect(sh)
+        master.addWidget(box)
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setSpacing(12)
+        t = QLabel(title)
+        t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t.setStyleSheet(
+            "font-size:15px;font-weight:700;color:#1e293b;"
+            "background:transparent;border:none;"
+        )
+        lay.addWidget(t)
+        d = QLabel(text)
+        d.setWordWrap(True)
+        d.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        d.setStyleSheet(
+            "font-size:12px;color:#475569;background:transparent;border:none;"
+        )
+        lay.addWidget(d)
+        lay.addSpacing(4)
+        brow = QHBoxLayout()
+        brow.setSpacing(8)
+        if cancel_text:
+            cb = QPushButton(cancel_text)
+            cb.setFixedHeight(36)
+            cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            cb.setStyleSheet(
+                "QPushButton{background:#f1f5f9;color:#475569;border:none;"
+                "border-radius:8px;font-size:12px;font-weight:600;padding:0 16px;}"
+                "QPushButton:hover{background:#e2e8f0;}"
+            )
+            cb.clicked.connect(self.reject)
+            brow.addWidget(cb)
+        ok_bg = "#ef4444" if is_danger else "#6366f1"
+        ok_hv = "#dc2626" if is_danger else "#4f46e5"
+        ob = QPushButton(confirm_text)
+        ob.setFixedHeight(36)
+        ob.setCursor(Qt.CursorShape.PointingHandCursor)
+        ob.setStyleSheet(
+            f"QPushButton{{background:{ok_bg};color:white;border:none;"
+            f"border-radius:8px;font-size:12px;font-weight:700;padding:0 16px;}}"
+            f"QPushButton:hover{{background:{ok_hv};}}"
+        )
+        ob.clicked.connect(self.accept)
+        brow.addWidget(ob)
+        lay.addLayout(brow)
+
+    @classmethod
+    def confirm(cls, parent, title, text, confirm_text="Evet",
+                cancel_text="İptal", is_danger=False):
+        dlg = cls(parent, title, text, confirm_text, cancel_text, is_danger)
+        return dlg.exec() == QDialog.DialogCode.Accepted
+
+
+# ── PostgreSQL bağlantı test worker ──────────────────────────────────────────
+
+class VeriTabaniTestWorker(QThread):
+    islendi = pyqtSignal(dict)
+
+    def __init__(self, host, port, dbname, user, password, sslmode):
+        super().__init__()
+        self._host = host
+        self._port = port
+        self._db = dbname
+        self._user = user
+        self._pw = password
+        self._ssl = sslmode
+
+    def run(self):
+        try:
+            import psycopg2
+        except ImportError:
+            self.islendi.emit({
+                "success": False,
+                "message": "psycopg2 yüklü değil.\npip install psycopg2-binary",
+                "ver": ""
+            })
+            return
+        params = dict(
+            host=self._host, port=self._port, dbname=self._db,
+            user=self._user, sslmode=self._ssl, connect_timeout=8
+        )
+        if self._pw:
+            params["password"] = self._pw
+        try:
+            conn = psycopg2.connect(**params)
+            v = conn.server_version
+            conn.close()
+            self.islendi.emit({
+                "success": True,
+                "message": "Bağlantı başarılı!",
+                "ver": f"PostgreSQL {v//10000}.{(v % 10000)//100}"
+            })
+        except Exception as exc:
+            self.islendi.emit({"success": False, "message": str(exc), "ver": ""})
+
+
+# ── SQLite → PostgreSQL migrasyon worker ─────────────────────────────────────
+
+class MigrasyonWorker(QThread):
+    ilerleme = pyqtSignal(str, int, int, bool)  # tablo, aktarilan, toplam, ara
+    islendi  = pyqtSignal(bool, str)
+
+    def __init__(self, batch_size: int = 250):
+        super().__init__()
+        self._batch_size = batch_size
+
+    def run(self):
+        from db.sqlite_to_pg import migrate_all
+        toplam_aktarilan = 0
+        hatalar: list[str] = []
+        try:
+            for s in migrate_all(batch_size=self._batch_size):
+                if s.bitti:
+                    break
+                if s.hata:
+                    hatalar.append(f"{s.tablo}: {s.hata}")
+                if not s.ara:
+                    toplam_aktarilan += s.aktarilan
+                self.ilerleme.emit(s.tablo, s.aktarilan, s.toplam, s.ara)
+            if hatalar:
+                ozet = (
+                    f"Tamamlandı — {toplam_aktarilan:,} kayıt aktarıldı.\n"
+                    "Hatalar:\n" + "\n".join(hatalar[:5])
+                )
+                self.islendi.emit(False, ozet)
+            else:
+                self.islendi.emit(
+                    True,
+                    f"✅  Tüm veriler aktarıldı!\n{toplam_aktarilan:,} kayıt PostgreSQL'e taşındı."
+                )
+        except Exception as exc:
+            self.islendi.emit(False, f"Hata: {exc}")
+
+
+# ── Migrasyon ilerleme diyaloğu ───────────────────────────────────────────────
+
+class MigrasyonDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMinimumWidth(640)
+        self.setModal(True)
+        self._worker: MigrasyonWorker | None = None
+        self._tablo_sayisi = 0
+        self._satir_map: dict[str, bool] = {}
+        self._satir_lbl_map: dict[str, tuple] = {}
+        self._toplam_aktarilan = 0
+        self._build()
+
+    def _build(self):
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QScrollArea
+        from PyQt6.QtGui import QColor
+
+        master = QVBoxLayout(self)
+        master.setContentsMargins(16, 16, 16, 16)
+
+        box = QFrame()
+        box.setObjectName("mgr_box")
+        box.setStyleSheet(
+            "QFrame#mgr_box{background:#ffffff;border:1.5px solid #e2e8f0;border-radius:18px;}"
+        )
+        sh = QGraphicsDropShadowEffect(self)
+        sh.setBlurRadius(28)
+        sh.setColor(QColor(0, 0, 0, 45))
+        sh.setOffset(0, 6)
+        box.setGraphicsEffect(sh)
+        master.addWidget(box)
+
+        root = QVBoxLayout(box)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Mor gradient başlık
+        hdr = QFrame()
+        hdr.setFixedHeight(64)
+        hdr.setStyleSheet(
+            "QFrame{"
+            "  background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #6366f1,stop:1 #8b5cf6);"
+            "  border-top-left-radius:17px;border-top-right-radius:17px;"
+            "}"
+        )
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(22, 0, 22, 0)
+        hl.addWidget(_mk_lbl("🚚", "font-size:24px;background:transparent;border:none;"))
+        hl.addWidget(_mk_lbl(
+            "Veri Taşıma  —  SQLite → PostgreSQL",
+            "font-size:15px;font-weight:700;color:#ffffff;"
+            "background:transparent;border:none;letter-spacing:.4px;"
+        ))
+        hl.addStretch()
+        root.addWidget(hdr)
+
+        # Gövde
+        body = QFrame()
+        body.setStyleSheet("QFrame{background:transparent;border:none;}")
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(22, 18, 22, 18)
+        bl.setSpacing(14)
+
+        bl.addWidget(_mk_lbl(
+            "SQLite veritabanındaki tüm kayıtlar PostgreSQL'e aktarılıyor.\n"
+            "İnternet bağlantı hızınıza göre birkaç dakika sürebilir.",
+            "font-size:12px;color:#000000;background:transparent;border:none;"
+        ))
+
+        sr = QHBoxLayout()
+        self._durum_lbl = _mk_lbl(
+            "⏳  Başlatılıyor...",
+            "font-size:12px;font-weight:700;color:#6366f1;"
+            "background:transparent;border:none;"
+        )
+        sr.addWidget(self._durum_lbl)
+        sr.addStretch()
+        self._sayac_lbl = _mk_lbl(
+            "0 kayıt aktarıldı",
+            "font-size:12px;font-weight:600;color:#000000;"
+            "background:transparent;border:none;"
+        )
+        sr.addWidget(self._sayac_lbl)
+        bl.addLayout(sr)
+
+        self._prog = QProgressBar()
+        self._prog.setRange(0, 1000)
+        self._prog.setValue(0)
+        self._prog.setFixedHeight(10)
+        self._prog.setTextVisible(False)
+        self._prog.setStyleSheet(
+            "QProgressBar{background:#e2e8f0;border-radius:5px;border:none;}"
+            "QProgressBar::chunk{"
+            "  background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #6366f1,stop:1 #8b5cf6);"
+            "  border-radius:5px;"
+            "}"
+        )
+        bl.addWidget(self._prog)
+
+        # Tablo başlık şeridi
+        hf = QFrame()
+        hf.setFixedHeight(30)
+        hf.setStyleSheet("QFrame{background:#f1f5f9;border-radius:8px 8px 0 0;border:none;}")
+        hfl = QHBoxLayout(hf)
+        hfl.setContentsMargins(10, 0, 10, 0)
+        for col_txt, col_stretch in [("Tablo", 3), ("Aktarılan", 2), ("Toplam", 2), ("Durum", 1)]:
+            hfl.addWidget(_mk_lbl(
+                col_txt,
+                "font-size:11px;font-weight:700;color:#000000;background:transparent;border:none;"
+            ), col_stretch)
+        bl.addWidget(hf)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollArea{background:white;border:1px solid #e2e8f0;"
+            "border-top:none;border-radius:0 0 8px 8px;}"
+        )
+        scroll.setMinimumHeight(240)
+        scroll.setMaximumHeight(320)
+        self._tablo_widget = QWidget()
+        self._tablo_widget.setStyleSheet("background:white;")
+        self._tablo_lay = QVBoxLayout(self._tablo_widget)
+        self._tablo_lay.setContentsMargins(0, 0, 0, 0)
+        self._tablo_lay.setSpacing(0)
+        self._tablo_lay.addStretch()
+        scroll.setWidget(self._tablo_widget)
+        bl.addWidget(scroll)
+        self._scroll = scroll
+
+        self._sonuc_frame = QFrame()
+        self._sonuc_frame.setStyleSheet(
+            "QFrame{background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:10px;}"
+        )
+        sfl = QHBoxLayout(self._sonuc_frame)
+        sfl.setContentsMargins(14, 10, 14, 10)
+        self._sonuc_ic = _mk_lbl("✅", "font-size:20px;background:transparent;border:none;")
+        sfl.addWidget(self._sonuc_ic)
+        self._sonuc_lbl = QLabel("")
+        self._sonuc_lbl.setWordWrap(True)
+        self._sonuc_lbl.setStyleSheet(
+            "font-size:12px;color:#000000;background:transparent;border:none;"
+        )
+        sfl.addWidget(self._sonuc_lbl, 1)
+        self._sonuc_frame.hide()
+        bl.addWidget(self._sonuc_frame)
+
+        br = QHBoxLayout()
+        br.addStretch()
+        self._kapat_btn = QPushButton("  Kapat  ")
+        self._kapat_btn.setEnabled(False)
+        self._kapat_btn.setFixedHeight(38)
+        self._kapat_btn.setMinimumWidth(120)
+        self._kapat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._kapat_btn.setStyleSheet(
+            "QPushButton{background:#6366f1;color:#ffffff;border:none;"
+            "border-radius:9px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{background:#4f46e5;}"
+            "QPushButton:disabled{background:#e2e8f0;color:#94a3b8;}"
+        )
+        self._kapat_btn.clicked.connect(self.accept)
+        br.addWidget(self._kapat_btn)
+        bl.addLayout(br)
+        root.addWidget(body)
+
+    def _add_row(self, tablo):
+        idx = len(self._satir_map)
+        satir = QFrame()
+        bg = "#f8fafc" if idx % 2 == 0 else "#ffffff"
+        satir.setStyleSheet(
+            f"QFrame{{background:{bg};border:none;border-bottom:1px solid #f1f5f9;}}"
+        )
+        satir.setFixedHeight(36)
+        lay = QHBoxLayout(satir)
+        lay.setContentsMargins(10, 0, 10, 0)
+        lay.setSpacing(0)
+        nm = _mk_lbl(tablo, "font-size:12px;color:#000000;background:transparent;border:none;")
+        ak = _mk_lbl("0", "font-size:12px;font-weight:600;color:#000000;background:transparent;border:none;")
+        tp = _mk_lbl("0", "font-size:12px;color:#000000;background:transparent;border:none;")
+        du = _mk_lbl("⏳", "font-size:12px;color:#6366f1;background:transparent;border:none;")
+        lay.addWidget(nm, 3)
+        lay.addWidget(ak, 2)
+        lay.addWidget(tp, 2)
+        lay.addWidget(du, 1)
+        self._tablo_lay.insertWidget(self._tablo_lay.count() - 1, satir)
+        return ak, tp, du
+
+    def start(self, batch_size: int = 250):
+        self._worker = MigrasyonWorker(batch_size)
+        self._worker.ilerleme.connect(self._on_ilerleme)
+        self._worker.islendi.connect(self._on_islendi)
+        self._worker.start()
+
+    def _on_ilerleme(self, tablo, aktarilan, toplam, ara):
+        self._durum_lbl.setText(f"⏳  {tablo} aktarılıyor...")
+        if tablo not in self._satir_map:
+            lbls = self._add_row(tablo)
+            self._satir_map[tablo] = True
+            self._satir_lbl_map[tablo] = lbls
+        a_lbl, t_lbl, d_lbl = self._satir_lbl_map[tablo]
+        a_lbl.setText(f"{aktarilan:,}")
+        t_lbl.setText(f"{toplam:,}")
+        if ara:
+            d_lbl.setText("⏳")
+            d_lbl.setStyleSheet(
+                "font-size:12px;color:#6366f1;background:transparent;border:none;"
+            )
+        else:
+            self._tablo_sayisi += 1
+            if aktarilan >= toplam:
+                d_lbl.setText("✅")
+                d_lbl.setStyleSheet(
+                    "font-size:12px;color:#059669;background:transparent;border:none;"
+                )
+                self._toplam_aktarilan += aktarilan
+            else:
+                d_lbl.setText("⚠️")
+                d_lbl.setStyleSheet(
+                    "font-size:12px;color:#d97706;background:transparent;border:none;"
+                )
+        self._sayac_lbl.setText(f"{self._toplam_aktarilan:,} kayıt aktarıldı")
+        vb = self._scroll.verticalScrollBar()
+        vb.setValue(vb.maximum())
+        tp_val = int(self._tablo_sayisi * (960 / 24))
+        ic_val = int(aktarilan / toplam * (960 / 24)) if toplam > 0 else 0
+        self._prog.setValue(min(990, tp_val + ic_val))
+
+    def _on_islendi(self, ok, msg):
+        self._prog.setValue(1000)
+        self._durum_lbl.setText("✅  Tamamlandı!" if ok else "❌  Hatalar oluştu")
+        self._durum_lbl.setStyleSheet(
+            f"font-size:12px;font-weight:700;"
+            f"color:{'#059669' if ok else '#dc2626'};"
+            "background:transparent;border:none;"
+        )
+        self._sonuc_lbl.setText(msg)
+        if not ok:
+            self._sonuc_ic.setText("❌")
+            self._sonuc_frame.setStyleSheet(
+                "QFrame{background:#fef2f2;border:1.5px solid #fecaca;border-radius:10px;}"
+            )
+        self._sonuc_frame.show()
+        self._kapat_btn.setEnabled(True)
+
+
+# ── Veritabanı Ayarları Kartı ─────────────────────────────────────────────────
+
+class VeriTabaniCard(QFrame):
+    """
+    Ayarlar → 🗄️ Veritabanı sekmesi.
+    Mod: SQLite (lokal) veya PostgreSQL (sunucu / Supabase).
+    Migration: SQLite → PostgreSQL, paket boyutu seçilebilir.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._test_worker: VeriTabaniTestWorker | None = None
+        self._current_mod = "sqlite"
+        self.setStyleSheet(
+            "QFrame{background:white;border:1.5px solid #c7d2fe;border-radius:14px;}"
+        )
+        self._build()
+        self._load()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 22)
+        root.setSpacing(18)
+
+        # ── Başlık ──────────────────────────────────────────────────────────
+        h = QHBoxLayout()
+        h.addWidget(_mk_lbl("🗄️", "font-size:22px;"))
+        h.addWidget(_mk_lbl(
+            "Veritabanı Bağlantısı",
+            "font-size:14px;font-weight:700;color:#000000;letter-spacing:.5px;"
+        ))
+        h.addStretch()
+        root.addLayout(h)
+
+        root.addWidget(_mk_lbl(
+            "💡  Lokal mod tek kullanıcı içindir. Birden fazla kişi aynı verileri "
+            "kullanacaksa PostgreSQL sunucu modunu seçin. "
+            "Mod değiştirdikten sonra uygulamayı yeniden başlatın.",
+            "background:#eef2ff;color:#3730a3;border-radius:8px;"
+            "padding:10px 14px;font-size:12px;border:none;"
+        ))
+
+        # ── Mod Seçimi ──────────────────────────────────────────────────────
+        mf = QFrame()
+        mf.setStyleSheet(
+            "QFrame{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;}"
+        )
+        ml = QVBoxLayout(mf)
+        ml.setContentsMargins(16, 14, 16, 14)
+        ml.setSpacing(10)
+        ml.addWidget(_mk_lbl(
+            "Bağlantı Modu",
+            "font-size:12px;font-weight:600;color:#64748b;"
+        ))
+        br2 = QHBoxLayout()
+        br2.setSpacing(10)
+        self._sqlite_btn = QPushButton("💻  Lokal (SQLite)")
+        self._sqlite_btn.setCheckable(True)
+        self._sqlite_btn.setFixedHeight(44)
+        self._sqlite_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sqlite_btn.clicked.connect(lambda: self._on_mod("sqlite"))
+        br2.addWidget(self._sqlite_btn)
+        self._pg_btn = QPushButton("🌐  Sunucu (PostgreSQL)")
+        self._pg_btn.setCheckable(True)
+        self._pg_btn.setFixedHeight(44)
+        self._pg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pg_btn.clicked.connect(lambda: self._on_mod("postgres"))
+        br2.addWidget(self._pg_btn)
+        ml.addLayout(br2)
+        self._mod_hint = QLabel("Mevcut mod: Lokal (SQLite)")
+        self._mod_hint.setStyleSheet("font-size:11px;color:#94a3b8;")
+        ml.addWidget(self._mod_hint)
+        root.addWidget(mf)
+
+        # ── PostgreSQL Alanları ─────────────────────────────────────────────
+        self._pg_frame = QFrame()
+        self._pg_frame.setStyleSheet(
+            "QFrame{background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;}"
+        )
+        pgl = QVBoxLayout(self._pg_frame)
+        pgl.setContentsMargins(18, 16, 18, 16)
+        pgl.setSpacing(12)
+
+        pgl.addWidget(_mk_lbl(
+            "🌐  PostgreSQL Sunucu Bilgileri",
+            "font-size:13px;font-weight:700;color:#0c4a6e;"
+        ))
+        pgl.addWidget(_mk_lbl(
+            "Supabase kullanıyorsanız: Settings → Database → Connection pooling → Session mode\n"
+            "Host: aws-0-eu-central-1.pooler.supabase.com  |  Port: 5432  "
+            "|  User: postgres.[proje-id]",
+            "font-size:11px;color:#0369a1;"
+        ))
+
+        _INP = (
+            "QLineEdit{background:white;border:1.5px solid #bae6fd;border-radius:8px;"
+            "padding:0 10px;font-size:13px;color:#000000;}"
+            "QLineEdit:focus{border-color:#0ea5e9;}"
+        )
+        _LBL = "font-size:11px;font-weight:600;color:#000000;"
+
+        # Host + Port
+        r1 = QHBoxLayout()
+        r1.setSpacing(10)
+        hc = QVBoxLayout()
+        hc.addWidget(_mk_lbl("Sunucu (Host)", _LBL))
+        self._host_inp = QLineEdit()
+        self._host_inp.setFixedHeight(36)
+        self._host_inp.setPlaceholderText("aws-0-eu-central-1.pooler.supabase.com")
+        self._host_inp.setStyleSheet(_INP)
+        hc.addWidget(self._host_inp)
+        r1.addLayout(hc, 3)
+        pc = QVBoxLayout()
+        pc.addWidget(_mk_lbl("Port", _LBL))
+        self._port_inp = QLineEdit()
+        self._port_inp.setFixedHeight(36)
+        self._port_inp.setPlaceholderText("5432")
+        self._port_inp.setStyleSheet(_INP)
+        pc.addWidget(self._port_inp)
+        r1.addLayout(pc, 1)
+        pgl.addLayout(r1)
+
+        # DB + User
+        r2 = QHBoxLayout()
+        r2.setSpacing(10)
+        dc = QVBoxLayout()
+        dc.addWidget(_mk_lbl("Veritabanı Adı", _LBL))
+        self._db_inp = QLineEdit()
+        self._db_inp.setFixedHeight(36)
+        self._db_inp.setPlaceholderText("postgres")
+        self._db_inp.setStyleSheet(_INP)
+        dc.addWidget(self._db_inp)
+        r2.addLayout(dc)
+        uc = QVBoxLayout()
+        uc.addWidget(_mk_lbl("Kullanıcı Adı", _LBL))
+        self._user_inp = QLineEdit()
+        self._user_inp.setFixedHeight(36)
+        self._user_inp.setPlaceholderText("postgres.proje-id")
+        self._user_inp.setStyleSheet(_INP)
+        uc.addWidget(self._user_inp)
+        r2.addLayout(uc)
+        pgl.addLayout(r2)
+
+        # Şifre + SSL
+        r3 = QHBoxLayout()
+        r3.setSpacing(10)
+        pasc = QVBoxLayout()
+        pasc.addWidget(_mk_lbl("Şifre", _LBL))
+        self._pass_inp = QLineEdit()
+        self._pass_inp.setFixedHeight(36)
+        self._pass_inp.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pass_inp.setPlaceholderText("••••••••••••")
+        self._pass_inp.setStyleSheet(_INP)
+        pasc.addWidget(self._pass_inp)
+        r3.addLayout(pasc, 3)
+        sslc = QVBoxLayout()
+        sslc.addWidget(_mk_lbl("SSL Modu", _LBL))
+        self._ssl_combo = QComboBox()
+        self._ssl_combo.addItems(["require", "prefer", "disable"])
+        self._ssl_combo.setFixedHeight(36)
+        self._ssl_combo.setStyleSheet(
+            "QComboBox{background:white;border:1.5px solid #bae6fd;"
+            "border-radius:8px;padding:0 8px;font-size:13px;color:#000000;}"
+            "QComboBox:focus{border-color:#0ea5e9;}"
+        )
+        sslc.addWidget(self._ssl_combo)
+        r3.addLayout(sslc, 1)
+        pgl.addLayout(r3)
+
+        # Test butonu + sonuç
+        tr = QHBoxLayout()
+        tr.setSpacing(10)
+        self._test_btn = QPushButton("🔌  Bağlantıyı Test Et")
+        self._test_btn.setFixedHeight(36)
+        self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._test_btn.setStyleSheet(
+            "QPushButton{background:#0ea5e9;color:white;border:none;"
+            "border-radius:8px;font-size:13px;font-weight:600;padding:0 16px;}"
+            "QPushButton:hover{background:#0284c7;}"
+            "QPushButton:disabled{background:#cbd5e1;color:#94a3b8;}"
+        )
+        self._test_btn.clicked.connect(self._on_test)
+        tr.addWidget(self._test_btn)
+        self._test_result = QLabel("")
+        self._test_result.setWordWrap(True)
+        self._test_result.setStyleSheet("font-size:12px;color:#000000;")
+        tr.addWidget(self._test_result, 1)
+        pgl.addLayout(tr)
+
+        root.addWidget(self._pg_frame)
+
+        # ── Kaydet ──────────────────────────────────────────────────────────
+        kr = QHBoxLayout()
+        kr.setSpacing(10)
+        self._kaydet_btn = QPushButton("💾  Kaydet")
+        self._kaydet_btn.setFixedHeight(40)
+        self._kaydet_btn.setMinimumWidth(140)
+        self._kaydet_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._kaydet_btn.setStyleSheet(
+            "QPushButton{background:#6366f1;color:white;border:none;"
+            "border-radius:10px;font-size:13px;font-weight:700;letter-spacing:.5px;}"
+            "QPushButton:hover{background:#4f46e5;}"
+        )
+        self._kaydet_btn.clicked.connect(self._on_kaydet)
+        kr.addWidget(self._kaydet_btn)
+        self._kaydet_durum = QLabel("")
+        self._kaydet_durum.setStyleSheet("font-size:12px;color:#000000;")
+        kr.addWidget(self._kaydet_durum, 1)
+        root.addLayout(kr)
+
+        # Ayırıcı çizgi
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#e2e8f0;")
+        root.addWidget(sep)
+
+        # ── Migrasyon Bölümü ────────────────────────────────────────────────
+        tf = QFrame()
+        tf.setStyleSheet(
+            "QFrame{background:#fefce8;border:1px solid #fde68a;border-radius:10px;}"
+        )
+        tl = QVBoxLayout(tf)
+        tl.setContentsMargins(18, 14, 18, 14)
+        tl.setSpacing(10)
+        tl.addWidget(_mk_lbl(
+            "🚚  Mevcut Veriyi PostgreSQL'e Taşı",
+            "font-size:13px;font-weight:700;color:#92400e;"
+        ))
+        tl.addWidget(_mk_lbl(
+            "SQLite'daki tüm kayıtları PostgreSQL'e kopyalar.  Önce bağlantıyı "
+            "kaydedin ve test edin.  Mevcut veriler kaybolmaz — sadece kopyalanır.  "
+            "Yeniden taşıma yapılsa bile duplicate oluşmaz (ON CONFLICT DO NOTHING).",
+            "font-size:11px;color:#78350f;"
+        ))
+
+        pr = QHBoxLayout()
+        pr.setSpacing(8)
+        pr.addWidget(_mk_lbl(
+            "📦  Paket boyutu:",
+            "font-size:12px;font-weight:600;color:#92400e;"
+        ))
+        self._batch_combo = QComboBox()
+        self._batch_combo.addItems([
+            "50  (Çok yavaş bağlantı / Supabase free)",
+            "100  (Yavaş bağlantı)",
+            "250  (Normal — varsayılan)",
+            "500  (Hızlı bağlantı)",
+            "1000  (Çok hızlı / LAN)"
+        ])
+        self._batch_combo.setCurrentIndex(2)
+        self._batch_combo.setFixedHeight(32)
+        self._batch_combo.setStyleSheet(
+            "QComboBox{background:white;border:1.5px solid #fde68a;"
+            "border-radius:7px;padding:0 8px;font-size:12px;color:#000000;}"
+            "QComboBox:focus{border-color:#d97706;}"
+        )
+        pr.addWidget(self._batch_combo)
+        pr.addStretch()
+        tl.addLayout(pr)
+
+        self._tasima_btn = QPushButton("🚀  Veriyi PostgreSQL'e Taşı")
+        self._tasima_btn.setFixedHeight(40)
+        self._tasima_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tasima_btn.setStyleSheet(
+            "QPushButton{background:#d97706;color:white;border:none;"
+            "border-radius:9px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{background:#b45309;}"
+        )
+        self._tasima_btn.clicked.connect(self._on_tasima)
+        tl.addWidget(self._tasima_btn)
+        root.addWidget(tf)
+
+        self._update_mod_ui("sqlite")
+
+    # ── Yardımcı metodlar ────────────────────────────────────────────────────
+
+    def _update_mod_ui(self, mod):
+        self._current_mod = mod
+        ACT = (
+            "QPushButton{background:#6366f1;color:white;border:none;"
+            "border-radius:9px;font-size:13px;font-weight:700;}"
+        )
+        IDL = (
+            "QPushButton{background:#f1f5f9;color:#475569;"
+            "border:1.5px solid #e2e8f0;border-radius:9px;"
+            "font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:#e2e8f0;}"
+        )
+        if mod == "sqlite":
+            self._sqlite_btn.setStyleSheet(ACT)
+            self._sqlite_btn.setChecked(True)
+            self._pg_btn.setStyleSheet(IDL)
+            self._pg_btn.setChecked(False)
+            self._mod_hint.setText("Mevcut mod: Lokal (SQLite) — yalnızca bu bilgisayar")
+        else:
+            self._pg_btn.setStyleSheet(ACT)
+            self._pg_btn.setChecked(True)
+            self._sqlite_btn.setStyleSheet(IDL)
+            self._sqlite_btn.setChecked(False)
+            self._mod_hint.setText("Mevcut mod: Sunucu (PostgreSQL) — çok kullanıcılı")
+        if hasattr(self, "_pg_frame"):
+            self._pg_frame.setVisible(mod == "postgres")
+
+    def _load(self):
+        from db.db_config import load_config
+        cfg = load_config()
+        self._update_mod_ui(cfg.get("mode", "sqlite"))
+        self._host_inp.setText(cfg.get("pg_host", ""))
+        self._port_inp.setText(str(cfg.get("pg_port", 5432)))
+        self._db_inp.setText(cfg.get("pg_db", "postgres"))
+        self._user_inp.setText(cfg.get("pg_user", "postgres"))
+        self._pass_inp.setText(cfg.get("pg_pass", ""))
+        idx = self._ssl_combo.findText(cfg.get("pg_sslmode", "require"))
+        if idx >= 0:
+            self._ssl_combo.setCurrentIndex(idx)
+
+    def _on_mod(self, mod):
+        self._update_mod_ui(mod)
+
+    def _on_test(self):
+        h = self._host_inp.text().strip()
+        db = self._db_inp.text().strip()
+        u = self._user_inp.text().strip()
+        if not h or not db or not u:
+            self._test_result.setText("❌  Host, DB Adı ve Kullanıcı zorunludur.")
+            self._test_result.setStyleSheet("font-size:12px;color:#dc2626;")
+            return
+        try:
+            port = int(self._port_inp.text().strip() or "5432")
+        except ValueError:
+            self._test_result.setText("❌  Port sayı olmalıdır.")
+            self._test_result.setStyleSheet("font-size:12px;color:#dc2626;")
+            return
+        self._test_btn.setEnabled(False)
+        self._test_result.setText("⏳  Bağlanılıyor...")
+        self._test_result.setStyleSheet("font-size:12px;color:#6366f1;")
+        self._test_worker = VeriTabaniTestWorker(
+            h, port, db, u, self._pass_inp.text(), self._ssl_combo.currentText()
+        )
+        self._test_worker.islendi.connect(self._on_test_done)
+        self._test_worker.start()
+
+    def _on_test_done(self, res):
+        self._test_btn.setEnabled(True)
+        if res.get("success"):
+            msg = f"✅  {res['message']}  ({res['ver']})"
+            self._test_result.setText(msg)
+            self._test_result.setStyleSheet(
+                "font-size:12px;color:#059669;font-weight:600;"
+            )
+        else:
+            self._test_result.setText(f"❌  {res['message']}")
+            self._test_result.setStyleSheet("font-size:12px;color:#dc2626;")
+
+    def _on_kaydet(self):
+        from db.db_config import load_config, save_config
+        mod = self._current_mod
+        cfg = load_config()
+        old_mod = cfg.get("mode", "sqlite")
+        try:
+            port = int(self._port_inp.text().strip() or "5432")
+        except ValueError:
+            port = 5432
+        cfg.update({
+            "mode":       mod,
+            "pg_host":    self._host_inp.text().strip(),
+            "pg_port":    port,
+            "pg_db":      self._db_inp.text().strip(),
+            "pg_user":    self._user_inp.text().strip(),
+            "pg_pass":    self._pass_inp.text(),
+            "pg_sslmode": self._ssl_combo.currentText(),
+        })
+        save_config(cfg)
+        if old_mod != mod:
+            restart = SweetConfirmDialog.confirm(
+                self,
+                "Mod Değiştirildi",
+                f"Veritabanı modu değiştirildi:\n  {old_mod.upper()} → {mod.upper()}\n\n"
+                "Değişikliğin geçerli olması için uygulama yeniden başlatılmalı.\n"
+                "Şimdi kapatılsın mı?",
+                confirm_text="Evet, Kapat",
+                cancel_text="Sonra",
+                is_danger=False
+            )
+            if restart:
+                from PyQt6.QtWidgets import QApplication
+                QApplication.quit()
+            else:
+                self._kaydet_durum.setText("✅  Kaydedildi — yeniden başlatınca aktif olur.")
+                self._kaydet_durum.setStyleSheet("font-size:12px;color:#d97706;font-weight:600;")
+        else:
+            self._kaydet_durum.setText("✅  Kaydedildi.")
+            self._kaydet_durum.setStyleSheet("font-size:12px;color:#059669;font-weight:600;")
+
+    def _on_tasima(self):
+        from db.db_config import load_config
+        cfg = load_config()
+        if cfg.get("mode") != "postgres" or not cfg.get("pg_host"):
+            SweetConfirmDialog.confirm(
+                self,
+                "Önce Bağlantı Gerekli",
+                "PostgreSQL bağlantı bilgilerini girin,\n"
+                "bağlantıyı test edin ve kaydedin.",
+                confirm_text="Tamam",
+                cancel_text="",
+                is_danger=False
+            )
+            return
+        _MAP = {0: 50, 1: 100, 2: 250, 3: 500, 4: 1000}
+        bs = _MAP.get(self._batch_combo.currentIndex(), 250)
+        if not SweetConfirmDialog.confirm(
+            self,
+            "Veri Taşıma",
+            f"SQLite'daki tüm kayıtlar PostgreSQL'e kopyalanacak.\n\n"
+            f"📦  Paket boyutu: {bs} satır\n"
+            "Bu işlem birkaç dakika sürebilir.",
+            confirm_text="Evet, Taşı",
+            cancel_text="Vazgeç",
+            is_danger=False
+        ):
+            return
+        dlg = MigrasyonDialog(self)
+        dlg.show()
+        dlg.start(batch_size=bs)
+
+    def refresh(self):
+        self._load()

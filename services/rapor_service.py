@@ -1,10 +1,12 @@
 """
 Rapor servis katmanı — nakitGuncelTablo.php mantığının Python karşılığı.
 Gelir / Gider / Gelir-Gider / Finansal Öngörüler sekmeleri için veri hazırlar.
+SQLite ve PostgreSQL uyumlu sorgular kullanır.
 """
 from datetime import datetime
 from typing import Optional
 from db.database import get_connection
+from db.db_config import get_mode
 
 AYLAR = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
          "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
@@ -14,26 +16,42 @@ def _year():
     return datetime.now().year
 
 
+def _month_expr(col: str) -> str:
+    """Ay ifadesi: SQLite strftime vs PostgreSQL EXTRACT."""
+    if get_mode() == "postgres":
+        return f"EXTRACT(MONTH FROM CAST({col} AS DATE))::INTEGER"
+    return f"CAST(strftime('%m', {col}) AS INTEGER)"
+
+
+def _year_expr(col: str) -> str:
+    """Yıl ifadesi: SQLite strftime vs PostgreSQL EXTRACT."""
+    if get_mode() == "postgres":
+        return f"EXTRACT(YEAR FROM CAST({col} AS DATE))::TEXT"
+    return f"strftime('%Y', {col})"
+
+
 # ─── GELİR SEKME ──────────────────────────────────────────────────────────────
 
 def get_gelir_urun_hizmet_tablo(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """Ürün/Hizmet bazlı aylık gelir tablosu."""
     yil = yil or _year()
+    ay_ex  = _month_expr("tarih_date")
+    yil_ex = _year_expr("tarih_date")
     conn = get_connection()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 teslim_sekli AS kategori,
-                CAST(strftime('%m', tarih_date) AS INTEGER) AS ay,
+                {ay_ex} AS ay,
                 COALESCE(SUM(gelir), 0) AS tutar
             FROM genel_hesap_hareketleri
             WHERE userid = ?
               AND musteri_no = ?
               AND nerden_geliyor = 'genelHesap'
-              AND strftime('%Y', tarih_date) = ?
+              AND {yil_ex} = ?
               AND gelir > 0
-            GROUP BY teslim_sekli, ay
-            ORDER BY teslim_sekli, ay
+            GROUP BY teslim_sekli, {ay_ex}
+            ORDER BY teslim_sekli, {ay_ex}
         """, (userid, musterino, str(yil))).fetchall()
 
         return _pivot_to_monthly_table(rows)
@@ -44,21 +62,23 @@ def get_gelir_urun_hizmet_tablo(userid: int, musterino: int, yil: Optional[int] 
 def get_gelir_tahsilat_turu_tablo(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """Tahsilat türü (Havale/Nakit/Kart...) bazlı aylık gelir tablosu."""
     yil = yil or _year()
+    ay_ex  = _month_expr("tarih_date")
+    yil_ex = _year_expr("tarih_date")
     conn = get_connection()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 odeme_sekli AS kategori,
-                CAST(strftime('%m', tarih_date) AS INTEGER) AS ay,
+                {ay_ex} AS ay,
                 COALESCE(SUM(gelir), 0) AS tutar
             FROM genel_hesap_hareketleri
             WHERE userid = ?
               AND musteri_no = ?
               AND nerden_geliyor = 'kasa'
-              AND strftime('%Y', tarih_date) = ?
+              AND {yil_ex} = ?
               AND gelir > 0
-            GROUP BY odeme_sekli, ay
-            ORDER BY odeme_sekli, ay
+            GROUP BY odeme_sekli, {ay_ex}
+            ORDER BY odeme_sekli, {ay_ex}
         """, (userid, musterino, str(yil))).fetchall()
 
         return _pivot_to_monthly_table(rows)
@@ -69,20 +89,22 @@ def get_gelir_tahsilat_turu_tablo(userid: int, musterino: int, yil: Optional[int
 def get_gelir_sube_bazli_tablo(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """Şube bazlı aylık gelir tablosu."""
     yil = yil or _year()
+    ay_ex  = _month_expr("tarih_date")
+    yil_ex = _year_expr("tarih_date")
     conn = get_connection()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 COALESCE(sube, 'Merkez') AS kategori,
-                CAST(strftime('%m', tarih_date) AS INTEGER) AS ay,
+                {ay_ex} AS ay,
                 COALESCE(SUM(gelir), 0) AS tutar
             FROM genel_hesap_hareketleri
             WHERE userid = ?
               AND musteri_no = ?
-              AND strftime('%Y', tarih_date) = ?
+              AND {yil_ex} = ?
               AND gelir > 0
-            GROUP BY sube, ay
-            ORDER BY sube, ay
+            GROUP BY sube, {ay_ex}
+            ORDER BY sube, {ay_ex}
         """, (userid, musterino, str(yil))).fetchall()
 
         return _pivot_to_monthly_table(rows)
@@ -93,22 +115,28 @@ def get_gelir_sube_bazli_tablo(userid: int, musterino: int, yil: Optional[int] =
 def get_gelir_aylik_tutar_tablo(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """Aylık toplam gelir tablosu."""
     yil = yil or _year()
+    ay_ex  = _month_expr("tarih_date")
+    yil_ex = _year_expr("tarih_date")
     conn = get_connection()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
-                CAST(strftime('%m', tarih_date) AS INTEGER) AS ay,
+                {ay_ex} AS ay,
                 COALESCE(SUM(gelir), 0) AS tutar
             FROM genel_hesap_hareketleri
             WHERE userid = ?
               AND musteri_no = ?
-              AND strftime('%Y', tarih_date) = ?
+              AND {yil_ex} = ?
               AND gelir > 0
-            GROUP BY ay
-            ORDER BY ay
+            GROUP BY {ay_ex}
+            ORDER BY {ay_ex}
         """, (userid, musterino, str(yil))).fetchall()
 
-        monthly = {r["ay"]: float(r["tutar"]) for r in rows}
+        monthly = {}
+        for r in rows:
+            r_d = dict(r)
+            monthly[int(r_d["ay"])] = float(r_d["tutar"])
+
         return {
             "aylar": AYLAR,
             "satirlar": [{"kategori": "Gelir Toplamı",
@@ -125,21 +153,23 @@ def get_gelir_aylik_tutar_tablo(userid: int, musterino: int, yil: Optional[int] 
 def get_gider_dagilim_tablo(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """Gider dağılımı (teslim_sekli bazlı) aylık tablo."""
     yil = yil or _year()
+    ay_ex  = _month_expr("tarih_date")
+    yil_ex = _year_expr("tarih_date")
     conn = get_connection()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 COALESCE(teslim_sekli, 'Diğer') AS kategori,
-                CAST(strftime('%m', tarih_date) AS INTEGER) AS ay,
+                {ay_ex} AS ay,
                 COALESCE(SUM(gider), 0) AS tutar
             FROM genel_hesap_hareketleri
             WHERE userid = ?
               AND musteri_no = ?
               AND nerden_geliyor IN ('gider', 'genelHesap')
-              AND strftime('%Y', tarih_date) = ?
+              AND {yil_ex} = ?
               AND gider > 0
-            GROUP BY teslim_sekli, ay
-            ORDER BY teslim_sekli, ay
+            GROUP BY teslim_sekli, {ay_ex}
+            ORDER BY teslim_sekli, {ay_ex}
         """, (userid, musterino, str(yil))).fetchall()
 
         return _pivot_to_monthly_table(rows)
@@ -150,20 +180,22 @@ def get_gider_dagilim_tablo(userid: int, musterino: int, yil: Optional[int] = No
 def get_gider_odeme_turu_tablo(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """Ödeme türü bazlı aylık gider tablosu."""
     yil = yil or _year()
+    ay_ex  = _month_expr("tarih_date")
+    yil_ex = _year_expr("tarih_date")
     conn = get_connection()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 COALESCE(odeme_sekli, 'Diğer') AS kategori,
-                CAST(strftime('%m', tarih_date) AS INTEGER) AS ay,
+                {ay_ex} AS ay,
                 COALESCE(SUM(gider), 0) AS tutar
             FROM genel_hesap_hareketleri
             WHERE userid = ?
               AND musteri_no = ?
-              AND strftime('%Y', tarih_date) = ?
+              AND {yil_ex} = ?
               AND gider > 0
-            GROUP BY odeme_sekli, ay
-            ORDER BY odeme_sekli, ay
+            GROUP BY odeme_sekli, {ay_ex}
+            ORDER BY odeme_sekli, {ay_ex}
         """, (userid, musterino, str(yil))).fetchall()
 
         return _pivot_to_monthly_table(rows)
@@ -176,9 +208,11 @@ def get_gider_odeme_turu_tablo(userid: int, musterino: int, yil: Optional[int] =
 def get_gunluk_mali_durum(userid: int, musterino: int, ay: int, yil: Optional[int] = None) -> list:
     """Seçili ay için günlük mali durum tablosu."""
     yil = yil or _year()
+    ay_ex  = _month_expr("tarih_date")
+    yil_ex = _year_expr("tarih_date")
     conn = get_connection()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 tarih_date AS tarih,
                 COALESCE(SUM(gelir), 0) AS gunluk_gelir,
@@ -186,8 +220,8 @@ def get_gunluk_mali_durum(userid: int, musterino: int, ay: int, yil: Optional[in
             FROM genel_hesap_hareketleri
             WHERE userid = ?
               AND musteri_no = ?
-              AND strftime('%Y', tarih_date) = ?
-              AND CAST(strftime('%m', tarih_date) AS INTEGER) = ?
+              AND {yil_ex} = ?
+              AND {ay_ex} = ?
             GROUP BY tarih_date
             ORDER BY tarih_date
         """, (userid, musterino, str(yil), ay)).fetchall()
@@ -225,18 +259,29 @@ def get_vadesi_gecen_tahsilatlar(userid: int, musterino: int) -> list:
 def get_ongoru_gelir_tablo(userid: int, yil: Optional[int] = None) -> dict:
     """Nakit akış parametrelerinden öngörü gelir tablosu."""
     yil = yil or _year()
+    # nakitakis_hareket.sonTarih TEXT formatı: YYYY-MM-DD veya YYYYMMDD
+    # PostgreSQL uyumlu sorgu — tarih_date yerine sonTarih kullanıyoruz
+    if get_mode() == "postgres":
+        ay_ex  = "EXTRACT(MONTH FROM CAST(\"sonTarih\" AS DATE))::INTEGER"
+        yil_ex = "EXTRACT(YEAR  FROM CAST(\"sonTarih\" AS DATE))::TEXT"
+        col_mno = 'musterino'
+    else:
+        ay_ex  = "CAST(strftime('%m', sonTarih) AS INTEGER)"
+        yil_ex = "strftime('%Y', sonTarih)"
+        col_mno = musterino
+
     conn = get_connection()
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 hesapadi AS kategori,
-                CAST(strftime('%m', sonTarih) AS INTEGER) AS ay,
+                {ay_ex} AS ay,
                 COALESCE(SUM(plan), 0) AS tutar
-            FROM nakitakis_Hareket
-            WHERE musteriNo = ?
-              AND strftime('%Y', sonTarih) = ?
-            GROUP BY hesapadi, ay
-            ORDER BY hesapadi, ay
+            FROM nakitakis_hareket
+            WHERE {col_mno} = ?
+              AND {yil_ex} = ?
+            GROUP BY hesapadi, {ay_ex}
+            ORDER BY hesapadi, {ay_ex}
         """, (str(userid), str(yil))).fetchall()
 
         return _pivot_to_monthly_table(rows)
@@ -256,10 +301,14 @@ def _pivot_to_monthly_table(rows) -> dict:
     pivot: dict[str, list] = defaultdict(lambda: [0.0] * 12)
 
     for row in rows:
-        kat = row["kategori"] or "Diğer"
-        ay  = int(row["ay"]) - 1  # 0-indexed
+        r_d = dict(row)
+        kat = r_d.get("kategori") or "Diğer"
+        try:
+            ay = int(r_d.get("ay") or 0) - 1  # 0-indexed
+        except (ValueError, TypeError):
+            ay = -1
         if 0 <= ay < 12:
-            pivot[kat][ay] += float(row["tutar"])
+            pivot[kat][ay] += float(r_d.get("tutar") or 0)
 
     satirlar = []
     genel_toplam = 0.0

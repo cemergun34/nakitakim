@@ -26,6 +26,17 @@ MOY_VN      = "3881403207"   # Vergi numarası (PHP'deki $vn sabit değeri)
 MOY_CHARSET = "utf8"         # PHP moykaydet.php ile aynı — eski MySQL utf8mb4 desteklemez
 
 
+# ── SQLite / PostgreSQL Uyumlu Kolon Adları Tanımları ─────────────────────────
+musterino = "musteriNo"
+hesapkodu = "hesapKodu"
+vergino = "vergiNo"
+ilktarih = "ilkTarih"
+sontarih = "sonTarih"
+gelirgider = "gelirGider"
+iqmod = "iQmod"
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Yardımcı: mysql-connector geç yükleme
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,20 +60,29 @@ def get_moy_bilgileri(musteri_no: int) -> dict:
     """
     moy_bilgileri tablosundan kullanıcıya ait kayıtları döndürür.
     PHP: ajax/moy/moyAktifMi.php → getMoyBilgileriByMusteriNo()
+    SQLite: musteriNo / moyKayitNo (camelCase)
+    PostgreSQL: musterino / moykayitno (küçük harf — tırnaksız tanım)
     """
+    from db.db_config import get_mode
+    _pg = get_mode() == "postgres"
+    col_mno  = "musterino"  if _pg else musterino
+    col_mkno = "moykayitno" if _pg else "moyKayitNo"
+
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT url, username, sifre, moyKayitNo FROM moy_bilgileri WHERE musteriNo=? LIMIT 1",
+            f'SELECT url, username, sifre, "{col_mkno}" AS moykayitno '
+            f'FROM moy_bilgileri WHERE "{col_mno}"=? LIMIT 1',
             (musteri_no,)
         ).fetchone()
         if row:
+            row_d = dict(row)
             return {
                 "success":    True,
-                "url":        row["url"]        or "",
-                "username":   row["username"]   or "",
-                "sifre":      row["sifre"]      or "",
-                "moyKayitNo": row["moyKayitNo"] or "",
+                "url":        row_d.get("url")        or "",
+                "username":   row_d.get("username")   or "",
+                "sifre":      row_d.get("sifre")      or "",
+                "moyKayitNo": row_d.get("moykayitno") or "",
             }
         return {"success": False, "message": "Kayıt bulunamadı."}
     except Exception as e:
@@ -72,35 +92,43 @@ def get_moy_bilgileri(musteri_no: int) -> dict:
         conn.close()
 
 
+
 def save_moy_bilgileri(musteri_no: int, url: str, username: str,
                         sifre: str, moy_kayit_no: str = "") -> dict:
     """
     moy_bilgileri tablosuna kayıt ekler/günceller (upsert).
     PHP: moyapi.php → INSERT INTO moy_bilgileri ON DUPLICATE KEY UPDATE
+    SQLite: musteriNo / moyKayitNo (camelCase)
+    PostgreSQL: musterino / moykayitno (küçük harf — tırnaksız tanım)
     """
     if not url or not username or not sifre:
         return {"success": False, "message": "Tüm alanları doldurunuz."}
+
+    from db.db_config import get_mode
+    _pg = get_mode() == "postgres"
+    col_mno    = "musterino"    if _pg else musterino
+    col_mkno   = "moykayitno"   if _pg else "moyKayitNo"
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
     try:
         existing = conn.execute(
-            "SELECT id FROM moy_bilgileri WHERE musteriNo=? LIMIT 1",
+            f'SELECT id FROM moy_bilgileri WHERE "{col_mno}"=? LIMIT 1',
             (musteri_no,)
         ).fetchone()
 
         if existing:
             conn.execute(
-                """UPDATE moy_bilgileri
-                   SET url=?, username=?, sifre=?, moyKayitNo=?, tarih=?
-                   WHERE musteriNo=?""",
+                f'UPDATE moy_bilgileri '
+                f'SET url=?, username=?, sifre=?, "{col_mkno}"=?, tarih=? '
+                f'WHERE "{col_mno}"=?',
                 (url, username, sifre, moy_kayit_no, now, musteri_no)
             )
             msg = "Moy bilgileri güncellendi."
         else:
             conn.execute(
-                """INSERT INTO moy_bilgileri (musteriNo, url, username, sifre, moyKayitNo, tarih)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                f'INSERT INTO moy_bilgileri ("{col_mno}", url, username, sifre, "{col_mkno}", tarih) '
+                f'VALUES (?, ?, ?, ?, ?, ?)',
                 (musteri_no, url, username, sifre, moy_kayit_no, now)
             )
             msg = "Moy bilgileri kaydedildi."
@@ -236,17 +264,17 @@ def moy_test_connection(host: str, user: str, password: str,
 
 def _kayit_var_mi(conn, check: dict) -> bool:
     """
-    nakitakis_Parametre'de duplicate kontrolü.
+    nakitakis_parametre'de duplicate kontrolü.
     PHP: kayitVarMi() fonksiyonu ile birebir.
     """
     row = conn.execute(
-        """SELECT COUNT(*) FROM nakitakis_Parametre
+        """SELECT COUNT(*) FROM nakitakis_parametre
            WHERE musteriNo=? AND hesapKodu=? AND ilkTarih=?
            AND ABS(tutar - ?) < 1.5 AND aciklama=?""",
         (
-            check["musteriNo"],
-            check["hesapKodu"],
-            check["ilkTarih"],
+            check[musterino],
+            check[hesapkodu],
+            check[ilktarih],
             check["tutar"],
             check["aciklama"],
         )
@@ -257,7 +285,7 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                         progress_cb=None) -> dict:
     """
     Seçilen yıla ait 360 ve 361 hesap kodlu hareketleri Moy'dan çekip
-    nakitakis_Parametre tablosuna aktarır.
+    nakitakis_parametre tablosuna aktarır.
     PHP: ajax/moy/moykaydet.php'nin tam karşılığı.
 
     progress_cb: opsiyonel callable(str) — ilerleme mesajı için
@@ -339,34 +367,34 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
             tarih_fmt = _fmt_tarih(row["islem_Tarihi"])
             tutar_val = round(float(row["toplam"] or 0), 2)
             insert_data = {
-                "musteriNo":  musteri_no,
-                "hesapKodu":  "770.01",
+                musterino:  musteri_no,
+                hesapkodu:  "770.01",
                 "unvan":      "-",
-                "vergiNo":    "",
-                "ilkTarih":   tarih_fmt,
-                "sonTarih":   "",
+                vergino:    "",
+                ilktarih:   tarih_fmt,
+                sontarih:   "",
                 "tutar":      tutar_val,
-                "gelirGider": "gider",
+                gelirgider: "gider",
                 "aciklama":   "vergi",
-                "iQmod":      "hareket",
+                iqmod:      "hareket",
             }
             if not _kayit_var_mi(local, insert_data):
                 local.execute(
-                    """INSERT INTO nakitakis_Parametre
+                    """INSERT INTO nakitakis_parametre
                        (musteriNo, hesapKodu, unvan, vergiNo,
                         ilkTarih, sonTarih, tutar, gelirGider, aciklama, iQmod)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        insert_data["musteriNo"],
-                        insert_data["hesapKodu"],
+                        insert_data[musterino],
+                        insert_data[hesapkodu],
                         insert_data["unvan"],
-                        insert_data["vergiNo"],
-                        insert_data["ilkTarih"],
-                        insert_data["sonTarih"],
+                        insert_data[vergino],
+                        insert_data[ilktarih],
+                        insert_data[sontarih],
                         insert_data["tutar"],
-                        insert_data["gelirGider"],
+                        insert_data[gelirgider],
                         insert_data["aciklama"],
-                        insert_data["iQmod"],
+                        insert_data[iqmod],
                     )
                 )
                 basari += 1
@@ -378,34 +406,34 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
             tarih_fmt = _fmt_tarih(row["islem_Tarihi"])
             tutar_val = round(float(row["toplam"] or 0), 2)
             insert_data = {
-                "musteriNo":  musteri_no,
-                "hesapKodu":  "730.08",
+                musterino:  musteri_no,
+                hesapkodu:  "730.08",
                 "unvan":      "-",
-                "vergiNo":    "",
-                "ilkTarih":   tarih_fmt,
-                "sonTarih":   "",
+                vergino:    "",
+                ilktarih:   tarih_fmt,
+                sontarih:   "",
                 "tutar":      tutar_val,
-                "gelirGider": "gider",
+                gelirgider: "gider",
                 "aciklama":   "vergi",
-                "iQmod":      "hareket",
+                iqmod:      "hareket",
             }
             if not _kayit_var_mi(local, insert_data):
                 local.execute(
-                    """INSERT INTO nakitakis_Parametre
+                    """INSERT INTO nakitakis_parametre
                        (musteriNo, hesapKodu, unvan, vergiNo,
                         ilkTarih, sonTarih, tutar, gelirGider, aciklama, iQmod)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        insert_data["musteriNo"],
-                        insert_data["hesapKodu"],
+                        insert_data[musterino],
+                        insert_data[hesapkodu],
                         insert_data["unvan"],
-                        insert_data["vergiNo"],
-                        insert_data["ilkTarih"],
-                        insert_data["sonTarih"],
+                        insert_data[vergino],
+                        insert_data[ilktarih],
+                        insert_data[sontarih],
                         insert_data["tutar"],
-                        insert_data["gelirGider"],
+                        insert_data[gelirgider],
                         insert_data["aciklama"],
-                        insert_data["iQmod"],
+                        insert_data[iqmod],
                     )
                 )
                 basari += 1
@@ -466,7 +494,7 @@ def _fmt_tarih(tarih_obj) -> str:
 def get_beyanname_listesi(musteri_no: int,
                            ilk_tarih_yyyymmdd: str) -> list[dict]:
     """
-    nakitakis_Parametre satırının tarihine göre ilgili beyannameleri bulur.
+    nakitakis_parametre satırının tarihine göre ilgili beyannameleri bulur.
     Moy beyanname_listeleri: Beyan_Tarih_1 <= ilkTarih <= Beyan_Tarih_2
 
     ilk_tarih_yyyymmdd: '20260126' gibi YYYYMMDD formatı

@@ -33,24 +33,24 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 def _ensure_cari_hesap(conn, unvan: str, vergi_no: str, vergi_daire: str,
                         tc: str, userid: int) -> int:
     """
-    cariHesaplar tablosunu kontrol eder, yoksa ekler, id döndürür.
+    carihesaplar tablosunu kontrol eder, yoksa ekler, id döndürür.
     PHP efatura.php'deki dinamik SELECT + INSERT bloğunun karşılığı.
     """
     logtarih = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if vergi_no:
         row = conn.execute(
-            "SELECT id FROM cariHesaplar WHERE userid=? AND vergiNo=? LIMIT 1",
+            "SELECT id FROM carihesaplar WHERE userid=? AND vergiNo=? LIMIT 1",
             (userid, vergi_no)
         ).fetchone()
     elif tc:
         row = conn.execute(
-            "SELECT id FROM cariHesaplar WHERE userid=? AND tcno=? LIMIT 1",
+            "SELECT id FROM carihesaplar WHERE userid=? AND tcno=? LIMIT 1",
             (userid, tc)
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT id FROM cariHesaplar WHERE userid=? AND unvan=? LIMIT 1",
+            "SELECT id FROM carihesaplar WHERE userid=? AND unvan=? LIMIT 1",
             (userid, unvan)
         ).fetchone()
 
@@ -58,7 +58,7 @@ def _ensure_cari_hesap(conn, unvan: str, vergi_no: str, vergi_daire: str,
         return row[0]
 
     cur = conn.execute(
-        """INSERT INTO cariHesaplar (unvan, vergiDaire, vergiNo, tcno, userid, logtarih)
+        """INSERT INTO carihesaplar (unvan, vergiDaire, vergiNo, tcno, userid, logtarih)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (unvan, vergi_daire, vergi_no, tc, userid, logtarih)
     )
@@ -158,7 +158,7 @@ def import_xml(xml_path: str, userid: int, mod: str = None) -> dict:
         )
         fatura_id = cur.lastrowid
 
-        # 8 - cariHesaplar
+        # 8 - carihesaplar
         _ensure_cari_hesap(conn, unvan, vergi_no, vergi_daire, tc, userid)
 
         conn.commit()
@@ -186,7 +186,7 @@ def toplu_isle(fatura_ids: list[int], hesap_kodu_id: int,
 
     Args:
         fatura_ids:     İşlenecek fatura ID listesi
-        hesap_kodu_id:  altHesapKodu tablosundaki ID
+        hesap_kodu_id:  althesapkodu tablosundaki ID
         cari_str:       *-* ile ayrılmış cari hesap bilgisi
         mod:            'gelir' | 'gider'
         userid:         Kullanıcı ID
@@ -205,20 +205,20 @@ def toplu_isle(fatura_ids: list[int], hesap_kodu_id: int,
 
     conn = get_connection()
     try:
-        # 1 — cariHesaplar'dan cari_id bul
+        # 1 — carihesaplar'dan cari_id bul
         if cari_vergi_no:
             cari_row = conn.execute(
-                "SELECT id FROM cariHesaplar WHERE userid=? AND vergiNo=? LIMIT 1",
+                "SELECT id FROM carihesaplar WHERE userid=? AND vergiNo=? LIMIT 1",
                 (userid, cari_vergi_no)
             ).fetchone()
         elif cari_tc:
             cari_row = conn.execute(
-                "SELECT id FROM cariHesaplar WHERE userid=? AND tcno=? LIMIT 1",
+                "SELECT id FROM carihesaplar WHERE userid=? AND tcno=? LIMIT 1",
                 (userid, cari_tc)
             ).fetchone()
         else:
             cari_row = conn.execute(
-                "SELECT id FROM cariHesaplar WHERE userid=? AND unvan=? LIMIT 1",
+                "SELECT id FROM carihesaplar WHERE userid=? AND unvan=? LIMIT 1",
                 (userid, cari_unvan)
             ).fetchone()
 
@@ -226,9 +226,9 @@ def toplu_isle(fatura_ids: list[int], hesap_kodu_id: int,
             return {"success": False, "message": "Cari hesap bulunamadı."}
         cari_id = cari_row[0]
 
-        # 2 — altHesapKodu'ndan hesap kodu al
+        # 2 — althesapkodu'ndan hesap kodu al
         hesap_row = conn.execute(
-            "SELECT kod, gelirGider FROM altHesapKodu WHERE id=? AND userid=? LIMIT 1",
+            "SELECT kod, gelirGider FROM althesapkodu WHERE id=? AND userid=? LIMIT 1",
             (hesap_kodu_id, userid)
         ).fetchone()
         if not hesap_row:
@@ -358,11 +358,11 @@ def get_faturalar(userid: int, mod: Optional[str] = None) -> list[dict]:
 
 
 def get_alt_hesap_kodlari(userid: int) -> list[dict]:
-    """Açılır liste için altHesapKodu tablosunu döndürür."""
+    """Açılır liste için althesapkodu tablosunu döndürür."""
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT id, kod, aciklama, gelirGider FROM altHesapKodu WHERE userid=? ORDER BY kod",
+            "SELECT id, kod, aciklama, gelirGider FROM althesapkodu WHERE userid=? ORDER BY kod",
             (userid,)
         ).fetchall()
         return [{"id": r[0], "kod": r[1], "aciklama": r[2], "gelirGider": r[3]} for r in rows]
@@ -371,12 +371,12 @@ def get_alt_hesap_kodlari(userid: int) -> list[dict]:
 
 
 def get_cari_hesaplar(userid: int) -> list[dict]:
-    """Açılır liste için cariHesaplar tablosunu döndürür."""
+    """Açılır liste için carihesaplar tablosunu döndürür."""
     conn = get_connection()
     try:
         rows = conn.execute(
             """SELECT id, unvan, vergiNo, tcno, vergiDaire
-               FROM cariHesaplar WHERE userid=? ORDER BY unvan""",
+               FROM carihesaplar WHERE userid=? ORDER BY unvan""",
             (userid,)
         ).fetchall()
         result = []

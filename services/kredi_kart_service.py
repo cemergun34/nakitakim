@@ -11,7 +11,7 @@ PHP kaynaklar:
 
 DB Tabloları:
   key_kartlari   — kart tanımları (kullanıcıya ait kayıtlı kartlar)
-  kredikartiData — aktarılan banka ekstreleri
+  kredikartidata — aktarılan banka ekstreleri
 """
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def yukle_csv_yapıkredi(
 ) -> dict:
     """
     YapıKredi CSV formatındaki banka ekstresini parse ederek
-    kredikartiData tablosuna kaydeder.
+    kredikartidata tablosuna kaydeder.
 
     CSV sütun sırası (PHP ile birebir):
         İşlem Tarihi(0) | İşlemler(1) | Sektör(2) | Tutar(3) | Kart No(4) | ...
@@ -132,12 +132,12 @@ def yukle_csv_yapıkredi(
     conn = get_connection()
     try:
         insert_sql = (
-            "INSERT INTO kredikartiData "
+            "INSERT INTO kredikartidata "
             "(userid, musterino, tarih, aciklama, Tutar, hesapKodu, alinan_tutar1, Banka) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         check_sql = (
-            "SELECT COUNT(*) FROM kredikartiData "
+            "SELECT COUNT(*) FROM kredikartidata "
             "WHERE userid=? AND tarih=? AND aciklama=? AND alinan_tutar1=?"
         )
 
@@ -306,12 +306,12 @@ def _yukle_pdf_ortak(
     conn = get_connection()
     try:
         insert_sql = (
-            "INSERT INTO kredikartiData "
+            "INSERT INTO kredikartidata "
             "(userid, musterino, tarih, aciklama, Tutar, alinan_tutar1, hesapKodu, womsiskey, Banka) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         check_sql = (
-            "SELECT COUNT(*) FROM kredikartiData "
+            "SELECT COUNT(*) FROM kredikartidata "
             "WHERE userid=? AND tarih=? AND alinan_tutar1=? AND aciklama LIKE ?"
         )
 
@@ -467,3 +467,95 @@ def yukle_dosyalar(
 
     else:
         return {"success": False, "errors": f"Desteklenmeyen dosya türü: {dosya_turu}", "added": 0, "skipped": 0}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Yeni Kart Tanımlama ve Silme
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ekle_kredi_kart(
+    userid: int,
+    banka: str,
+    no: str,
+    hesap_kodu: str,
+    banka_adi: str,
+    iban: str
+) -> dict:
+    """Yeni bir kredi kartını key_kartlari tablosuna ekler."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO key_kartlari (banka, no, userid, hesapKodu, bankaAdi, iban) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (banka, no, userid, hesap_kodu, banka_adi, iban)
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as exc:
+        conn.rollback()
+        return {"success": False, "message": str(exc)}
+    finally:
+        conn.close()
+
+
+def sil_kredi_kart(userid: int, card_id: int) -> dict:
+    """Kredi kartını key_kartlari tablosundan siler."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "DELETE FROM key_kartlari WHERE id = ? AND userid = ?",
+            (card_id, userid)
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as exc:
+        conn.rollback()
+        return {"success": False, "message": str(exc)}
+    finally:
+        conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Yeni Kart Tanımlama ve Silme
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ekle_kredi_kart(
+    userid: int,
+    banka: str,
+    no: str,
+    hesap_kodu: str,
+    banka_adi: str,
+    iban: str
+) -> dict:
+    """Yeni bir kredi kartını key_kartlari tablosuna ekler."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO key_kartlari (banka, no, userid, hesapKodu, bankaAdi, iban) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (banka, no, userid, hesap_kodu, banka_adi, iban)
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as exc:
+        conn.rollback()
+        return {"success": False, "message": str(exc)}
+    finally:
+        conn.close()
+
+
+def sil_kredi_kart(userid: int, card_id: int) -> dict:
+    """Kredi kartını key_kartlari tablosundan siler."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "DELETE FROM key_kartlari WHERE id = ? AND userid = ?",
+            (card_id, userid)
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as exc:
+        conn.rollback()
+        return {"success": False, "message": str(exc)}
+    finally:
+        conn.close()

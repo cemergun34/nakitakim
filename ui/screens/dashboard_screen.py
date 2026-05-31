@@ -21,6 +21,181 @@ from services import detay_service
 from utils.format import fmt_para, fmt_signed
 
 
+class PaytrKPICard(KPICard):
+    """
+    PHP admin.php #btnSanalPosHareketleri kartının PyQt6 karşılığı.
+
+    Layout (PHP HTML birebir):
+      H3  : 'Sanal Pos Paytr'  (üst sol)
+      div : Fark değeri  (balance — yeşil badge)
+      row : [İşlem  |  Ödeme]  (iki sütun)
+      son : 'Son güncelleme: DD.MM.YYYY'  (alt sağ opak)
+    """
+
+    def __init__(self, click_cb=None, parent=None):
+        super().__init__(
+            title="Sanal Pos Paytr",
+            value="Yükleniyor...",
+            color="#212121",
+            color2="#000000",
+            click_cb=click_cb,
+            parent=parent,
+        )
+        # setFixedHeight üst sınıftan geliyor; biraz daha yüksek yap
+        self.setFixedHeight(160)
+
+        # Üst sınıfın 'value_lbl' Fark değerini gösterir (yeşil renk)
+        self.value_lbl.setStyleSheet(
+            "color: rgb(170,255,204); font-size: 20px; font-weight: 700;"
+            " background: transparent; letter-spacing: -0.5px;"
+        )
+        # Title rengi beyaz
+        self.title_lbl.setStyleSheet(
+            "color: #ffffff; font-size: 12px; font-weight: 600;"
+            " background: transparent;"
+        )
+
+        # Ekstra satır: [İşlem | Ödeme]
+        from PyQt6.QtWidgets import QHBoxLayout, QVBoxLayout, QLabel
+        row_w = QHBoxLayout()
+        row_w.setSpacing(4)
+
+        def _blok(key: str, lbl: str, clr: str) -> QLabel:
+            col = QVBoxLayout()
+            col.setSpacing(0)
+            hdr = QLabel(lbl)
+            hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hdr.setStyleSheet(
+                "color:rgba(255,255,255,.70);font-size:11px;background:transparent;"
+            )
+            val = QLabel("-")
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            val.setStyleSheet(
+                f"color:{clr};font-size:12px;font-weight:600;background:transparent;"
+            )
+            col.addWidget(hdr)
+            col.addWidget(val)
+            setattr(self, key, val)
+            row_w.addLayout(col)
+            return val
+
+        _blok("_islem_lbl", "İşlem",  "#ffe0a0")
+        _blok("_odeme_lbl", "Ödeme",  "#d0ffd0")
+
+        # Son güncelleme etiketi
+        self._son_guncelleme_lbl = QLabel("")
+        self._son_guncelleme_lbl.setStyleSheet(
+            "color:rgba(255,255,255,.80);font-size:10px;background:transparent;"
+        )
+
+        # Mevcut layout'a ekle
+        lay = self.layout()
+        lay.addLayout(row_w)
+        lay.addWidget(self._son_guncelleme_lbl)
+
+    def set_paytr(
+        self,
+        fark_fmt: str,
+        islem_fmt: str,
+        odeme_fmt: str,
+        son_guncelleme: str = "",
+    ):
+        """
+        PHP'deki:
+          #paytrToplamBadge   → fark_fmt
+          #paytrDashIslem     → islem_fmt
+          #paytrDashOdeme     → odeme_fmt
+          #paytrSonGuncelleme → son_guncelleme
+        """
+        self.value_lbl.setText(fark_fmt)
+        self._islem_lbl.setText(islem_fmt)
+        self._odeme_lbl.setText(odeme_fmt)
+        self._son_guncelleme_lbl.setText(son_guncelleme)
+
+
+class FizikselPosKPICard(KPICard):
+    """
+    PHP admin.php #btnFizikselPosHareketleri kartının PyQt6 karşılığı.
+
+    Layout:
+      H3  : 'Fiziksel Pos Womsis'
+      div : Net Tutar  (balance — mint yeşil)
+      row : [İşlem Tutarı | Net Tutar]  (sarı / yeşil)
+      son : 'Yerel tablodan anlık veriler'
+
+    Renk: #1a3a5c → #0d2137 (PHP: linear-gradient(135deg, #1a3a5c, #0d2137))
+    """
+
+    def __init__(self, click_cb=None, parent=None):
+        super().__init__(
+            title="Fiziksel Pos Womsis",
+            value="₺0,00",
+            color="#1a3a5c",
+            color2="#0d2137",
+            click_cb=click_cb,
+            parent=parent,
+        )
+        self.setFixedHeight(160)
+
+        # Net Tutar badge — PHP: #womsisToplamBadge  color: rgb(170,255,204)
+        self.value_lbl.setStyleSheet(
+            "color: rgb(170,255,204); font-size:20px; font-weight:700;"
+            " background:transparent; letter-spacing:-0.5px;"
+        )
+        self.title_lbl.setStyleSheet(
+            "color:#ffffff; font-size:12px; font-weight:600; background:transparent;"
+        )
+
+        from PyQt6.QtWidgets import QHBoxLayout as _HBL, QVBoxLayout as _VBL, QLabel as _LBL
+        row_w = _HBL()
+        row_w.setSpacing(4)
+
+        def _blok(key: str, lbl: str, clr: str):
+            col = _VBL()
+            col.setSpacing(0)
+            hdr = _LBL(lbl)
+            hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hdr.setStyleSheet("color:rgba(255,255,255,.70);font-size:11px;background:transparent;")
+            val = _LBL("-")
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            val.setStyleSheet(f"color:{clr};font-size:12px;font-weight:600;background:transparent;")
+            col.addWidget(hdr)
+            col.addWidget(val)
+            setattr(self, key, val)
+            row_w.addLayout(col)
+
+        _blok("_islem_lbl", "İşlem",  "#ffe0a0")   # PHP: #womsisDashIslem
+        _blok("_odeme_lbl", "Net",    "#d0ffd0")   # PHP: #womsisDashOdeme
+
+        self._son_lbl = _LBL("Yerel tablodan anlık veriler")
+        self._son_lbl.setStyleSheet(
+            "color:rgba(255,255,255,.80);font-size:10px;background:transparent;"
+        )
+
+        lay = self.layout()
+        lay.addLayout(row_w)
+        lay.addWidget(self._son_lbl)
+
+    def set_fiziksel_pos(
+        self,
+        net_fmt: str,
+        islem_fmt: str,
+        odeme_fmt: str,
+        alt_yazi: str = "Yerel tablodan anlık veriler",
+    ):
+        """
+        PHP:
+          #womsisToplamBadge  → net_fmt
+          #womsisDashIslem    → islem_fmt
+          #womsisDashOdeme    → odeme_fmt
+          #womsisSonGuncelleme→ alt_yazi
+        """
+        self.value_lbl.setText(net_fmt)
+        self._islem_lbl.setText(islem_fmt)
+        self._odeme_lbl.setText(odeme_fmt)
+        self._son_lbl.setText(alt_yazi)
+
+
 class DashboardLoader(QThread):
     """Arka planda veri yükler — UI donmaması için."""
     data_ready = pyqtSignal(dict)
@@ -151,7 +326,7 @@ class DashboardScreen(QWidget):
             ("gelen_fatura",     "Gelen Fatura",       COLORS["pink"],       "#DB2777",    0, 3),
             ("gider_pusulasi",   "Gider Pusulası",     "#16A34A",            "#15803D",    0, 4),
             ("kurum_odemeleri",  "Kurum Ödemeleri",    COLORS["dark_blue"],  "#162C47",    0, 5),
-            ("maas_kira_smm",    "Maaş Kira SMM",      "#374151",            "#1F2937",    1, 0),
+            ("maas_kira_smm",    "Maaş Kira SMM",      "#1a3a5c",            "#0d2137",    1, 0),
             ("bankalar_bakiye",  "Bankalar Bakiye",    COLORS["grey"],       "#4B5563",    1, 1),
             ("sanal_pos",        "Sanal Pos",          "#111827",            "#030712",    1, 2),
             ("fiziksel_pos",     "Fiziksel Pos",       "#1F2937",            "#111827",    1, 3),
@@ -160,13 +335,23 @@ class DashboardScreen(QWidget):
         ]
 
         for key, title, c1, c2, row, col in KPI_DEFS:
-            card = KPICard(
-                title=title,
-                value="Yükleniyor...",
-                color=c1,
-                color2=c2,
-                click_cb=lambda k=key: self._on_card_click(k),
-            )
+            if key == "sanal_pos":
+                card = PaytrKPICard(
+                    click_cb=lambda k=key: self._on_card_click(k),
+                )
+            elif key == "fiziksel_pos":
+                # PHP: #btnFizikselPosHareketleri (koyu mavi gradient)
+                card = FizikselPosKPICard(
+                    click_cb=lambda k=key: self._on_card_click(k),
+                )
+            else:
+                card = KPICard(
+                    title=title,
+                    value="Yükleniyor...",
+                    color=c1,
+                    color2=c2,
+                    click_cb=lambda k=key: self._on_card_click(k),
+                )
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             self._cards[key] = card
             grid.addWidget(card, row, col)
@@ -302,25 +487,65 @@ class DashboardScreen(QWidget):
             kurum_alt
         )
 
-        # Maaş Kira SMM
-        mks = data.get("maas_kira_smm", {})
+        # Maaş Kira SMM — PHP: #dashMaasKiraSmmmToplam
+        # Formül: SUM(ABS(gaytutar - vergkestutar))  her satır için
+        from services.vergi_muhtasar_service import get_dashboard_toplam as _mks_toplam
+        mks_r = _mks_toplam(self._userid, musterino=str(self._musterino))
+        if mks_r.get("success") and mks_r["fark_toplam"] > 0:
+            mks_val_str = mks_r["fark_toplam_fmt"]   # '10.853.717,00 ₺'
+        else:
+            mks = data.get("maas_kira_smm", {})
+            mks_val_str = fmt_para(mks.get("toplam", 0))
         c["maas_kira_smm"].set_value(
-            fmt_para(mks.get("toplam", 0)),
+            mks_val_str,
             "Personel, Kira ve Müşavirlik Giderleri"
         )
 
         # Bankalar Bakiye
         c["bankalar_bakiye"].set_value("₺0,00", "Detaylar için tıklayın...")
 
-        # Sanal Pos
+        # Sanal Pos (PayTR) — PHP: #paytrToplamBadge / #paytrDashIslem / #paytrDashOdeme / #paytrSonGuncelleme
         pos = data.get("sanal_pos", {})
-        c["sanal_pos"].set_value(
-            fmt_para(pos.get("islem", 0)),
-            f"İşlem: {fmt_para(pos.get('islem', 0))}  Ödeme: {fmt_para(pos.get('odeme', 0))}"
-        )
+        pos_card = self._cards.get("sanal_pos")
+        if isinstance(pos_card, PaytrKPICard):
+            # Fark = odeme - islem
+            islem_val = pos.get("islem", 0)
+            odeme_val = pos.get("odeme", 0)
+            try:
+                fark_val = float(odeme_val) - float(islem_val)
+            except (TypeError, ValueError):
+                fark_val = 0.0
+            fark_sign = "+" if fark_val >= 0 else "-"
+            fark_abs = abs(fark_val)
+            fark_fmt = (
+                f"{fark_sign}₺"
+                + f"{fark_abs:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            )
+            islem_fmt = fmt_para(islem_val)
+            odeme_fmt = fmt_para(odeme_val)
+            son = pos.get("son_guncelleme", "")
+            pos_card.set_paytr(fark_fmt, islem_fmt, odeme_fmt, son)
+        else:
+            pos_card.set_value(
+                fmt_para(pos.get("islem", 0)),
+                f"İşlem: {fmt_para(pos.get('islem', 0))}  Ödeme: {fmt_para(pos.get('odeme', 0))}"
+            )
 
-        # Fiziksel Pos
-        c["fiziksel_pos"].set_value("₺0,00", "Yerel tablodan anlık veriler")
+        # Fiziksel Pos (Womsis) — PHP: #womsisToplamBadge / #womsisDashIslem / #womsisDashOdeme
+        fp_card = self._cards.get("fiziksel_pos")
+        if isinstance(fp_card, FizikselPosKPICard):
+            from services.fiziksel_pos_service import get_dashboard_ozet
+            fp = get_dashboard_ozet(self._userid)
+            fp_card.set_fiziksel_pos(
+                net_fmt=fp.get("toplam_net_fmt",   "₺0,00"),
+                islem_fmt=fp.get("toplam_islem_fmt", "₺0,00"),
+                odeme_fmt=fp.get("toplam_net_fmt",   "₺0,00"),
+                alt_yazi="Yerel tablodan anlık veriler",
+            )
+        else:
+            if fp_card:
+                fp_card.set_value("₺0,00", "Yerel tablodan anlık veriler")
+
 
         # Kredi Kartları
         kk = data.get("kredi_karti", {})
@@ -419,6 +644,21 @@ class DashboardScreen(QWidget):
 
         elif key == "kredi_karti":
             dlg = KrediKartiDialog(uid, yil, parent=self)
+            dlg.exec()
+            return
+
+        elif key == "maas_kira_smm":
+            dlg = MaasKiraSmmDialog(self._userid, str(self._musterino), parent=self)
+            dlg.exec()
+            return
+
+        elif key == "fiziksel_pos":
+            dlg = FizikselPosDialog(self._userid, parent=self)
+            dlg.exec()
+            return
+
+        elif key == "sanal_pos":
+            dlg = SanalPosDialog(self._userid, str(self._musterino), self._yil, parent=self)
             dlg.exec()
             return
 
@@ -1077,11 +1317,14 @@ class BeyannamePreviewDialog(QDialog):
             )
             return
 
-        # Geçici PDF dosyasına yaz
+        # Geçici PDF dosyasına yaz (Workspace İçi)
         import tempfile, os
+        workspace_tmp = os.path.expanduser("~/NakitAkim/data/tmp")
+        os.makedirs(workspace_tmp, exist_ok=True)
         tmp = tempfile.NamedTemporaryFile(
             suffix=".pdf",
             prefix=f"beyanname_{b['belge_turu']}_{b['donem_no']}_",
+            dir=workspace_tmp,
             delete=False
         )
         tmp.write(pdf_bytes)
@@ -1562,11 +1805,16 @@ class KrediKartiDialog(QDialog):
     def _on_kart_sec(self, row: int, _col: int):
         if row < 0 or row >= len(self._ozet_rows):
             return
-        self._secili_banka = self._ozet_rows[row].get("Banka", "")
-        banka_kisa = self._secili_banka[:40] + ("…" if len(self._secili_banka) > 40 else "")
-        self._sag_baslik.setText(f"💳  {banka_kisa}")
-        self._filtre_btn.setEnabled(True)
-        self._load_ekstre()
+        row_data = self._ozet_rows[row]
+        if row_data.get("Banka") == "sanal_pos":
+            dlg = SanalPosDialog(self._userid, self._musterino, self._yil, self)
+            dlg.exec()
+        else:
+            self._secili_banka = row_data.get("Banka", "")
+            banka_kisa = self._secili_banka[:40] + ("…" if len(self._secili_banka) > 40 else "")
+            self._sag_baslik.setText(f"💳  {banka_kisa}")
+            self._filtre_btn.setEnabled(True)
+            self._load_ekstre()
 
     # ── Ekstre Yükleme ─────────────────────────────────────────
 
@@ -1656,3 +1904,1192 @@ class KrediKartiDialog(QDialog):
             f"Ödeme: <b style='color:#dc2626'>{abs(toplam_odeme):,.2f} ₺</b>  "
             f"Net: <b>{net:,.2f} ₺</b>"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sanal Pos Hareketleri Dialog
+# PHP: lib/panelparcalari/admin/admin.php  → #sanalPosModal
+#      sabit/js/admin_dashboard.js         → spHareketleriYukle()
+# 14 sütunlu DataTable + İşlem/Ödeme/Fark özet bantları
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SanalPosDialog(QDialog):
+    """
+    PHP admin.php #sanalPosModal + admin_dashboard.js spHareketleriYukle()
+    → PyQt6 karşılığı.
+
+    Üst bölüm : Başlık + '📦 PayTR Veritabanı' badge + Tarih filtresi
+               + İşlem / Ödeme / Fark toplam bantları
+    Alt bölüm : 14 sütunlu hareket tablosu (paytr SQLite tablosu)
+    """
+
+    SUTUNLAR = [
+        ("İşlem Tarihi",    "islemtarihi",    120, Qt.AlignmentFlag.AlignCenter),
+        ("Sipariş No",      "siparisno",      140, Qt.AlignmentFlag.AlignLeft),
+        ("İşlem Tutarı",   "islemtutari",    110, Qt.AlignmentFlag.AlignRight),
+        ("Ödeme Tutarı",   "odemetutari",    110, Qt.AlignmentFlag.AlignRight),
+        ("Kur",            "kur",             55,  Qt.AlignmentFlag.AlignCenter),
+        ("Mağaza No",      "magazano",        90,  Qt.AlignmentFlag.AlignCenter),
+        ("Net Tutar",      "nettutar",        100, Qt.AlignmentFlag.AlignRight),
+        ("Kesinti Tutarı", "kesintitutari",   110, Qt.AlignmentFlag.AlignRight),
+        ("Kesinti Oranı",  "kesintiorani",     90, Qt.AlignmentFlag.AlignCenter),
+        ("Kart Markası",   "kartmarkasi",     100, Qt.AlignmentFlag.AlignCenter),
+        ("Kart No",        "kartno",          110, Qt.AlignmentFlag.AlignCenter),
+        ("Ödeme Tipi",     "odemetipi",       100, Qt.AlignmentFlag.AlignCenter),
+        ("Kart Tipi",      "karttipi",         90, Qt.AlignmentFlag.AlignCenter),
+        ("Taksit Sayısı", "taksitsayisi",      80, Qt.AlignmentFlag.AlignCenter),
+    ]
+
+    def __init__(self, userid: int, musterino: str, yil: int, parent=None):
+        super().__init__(parent)
+        self._userid    = userid
+        self._musterino = str(musterino)
+        self._yil       = yil
+        self._rows: list[dict] = []
+        self._toplam_islem = 0.0
+        self._toplam_odeme = 0.0
+
+        self.setWindowTitle("💳  Sanal Pos Hareketleri — PayTR")
+        self.setMinimumSize(1280, 740)
+        self.resize(1380, 800)
+        self._setup_ui()
+        self._load()
+
+    # ── UI İnşası ──────────────────────────────────────────────────────────
+
+    def _setup_ui(self):
+        from datetime import date
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Üst bant (gri arka plan — PHP'deki #f8f9fa) ──────────────────
+        top = QFrame()
+        top.setStyleSheet("background:#f8f9fa;border-bottom:1px solid #dee2e6;")
+        top_lay = QVBoxLayout(top)
+        top_lay.setContentsMargins(16, 12, 16, 12)
+        top_lay.setSpacing(8)
+
+        # Başlık satırı
+        baslik_row = QHBoxLayout()
+        baslik_lbl = QLabel("Sanal Pos Hareketleri")
+        baslik_lbl.setStyleSheet(
+            "font-size:16px;font-weight:700;color:#212529;"
+        )
+        baslik_row.addWidget(baslik_lbl)
+
+        # Kaynak badge — PHP: #spKaynakBadge = '📦 PayTR Veritabanı'
+        self._badge_lbl = QLabel("📦 PayTR Veritabanı")
+        self._badge_lbl.setStyleSheet(
+            "background:#212121;color:#fff;font-size:11px;font-weight:600;"
+            "border-radius:10px;padding:2px 10px;"
+        )
+        self._badge_lbl.setFixedHeight(22)
+        baslik_row.addWidget(self._badge_lbl)
+        baslik_row.addStretch()
+        top_lay.addLayout(baslik_row)
+
+        # Filtre satırı
+        filtre_row = QHBoxLayout()
+        filtre_row.setSpacing(10)
+
+        _DE = (
+            "QDateEdit{background:white;border:1px solid #ced4da;"
+            "border-radius:4px;padding:3px 6px;font-size:12px;color:#212529;}"
+            "QDateEdit::drop-down{border:none;}"
+        )
+        today = date.today()
+        jan1  = date(today.year, 1, 1)
+
+        filtre_row.addWidget(self._lbl("İlk Tarih:"))
+        self._ilk_de = QDateEdit()
+        self._ilk_de.setCalendarPopup(True)
+        self._ilk_de.setDisplayFormat("dd.MM.yyyy")
+        self._ilk_de.setFixedHeight(30)
+        self._ilk_de.setFixedWidth(120)
+        self._ilk_de.setDate(QDate(jan1.year, jan1.month, jan1.day))
+        self._ilk_de.setStyleSheet(_DE)
+        filtre_row.addWidget(self._ilk_de)
+
+        filtre_row.addWidget(self._lbl("Son Tarih:"))
+        self._son_de = QDateEdit()
+        self._son_de.setCalendarPopup(True)
+        self._son_de.setDisplayFormat("dd.MM.yyyy")
+        self._son_de.setFixedHeight(30)
+        self._son_de.setFixedWidth(120)
+        self._son_de.setDate(QDate(today.year, today.month, today.day))
+        self._son_de.setStyleSheet(_DE)
+        filtre_row.addWidget(self._son_de)
+
+        self._listele_btn = QPushButton("Listele")
+        self._listele_btn.setFixedHeight(30)
+        self._listele_btn.setFixedWidth(80)
+        self._listele_btn.setStyleSheet(
+            "QPushButton{background:#212121;color:white;border:none;"
+            "border-radius:4px;font-size:12px;font-weight:700;}"
+            "QPushButton:hover{background:#343a40;}"
+        )
+        self._listele_btn.clicked.connect(self._load)
+        filtre_row.addWidget(self._listele_btn)
+
+        self._excel_btn = QPushButton("📥 Excel İndir")
+        self._excel_btn.setFixedHeight(30)
+        self._excel_btn.setFixedWidth(110)
+        self._excel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._excel_btn.setStyleSheet(
+            "QPushButton{background:#10b981;color:white;border:none;"
+            "border-radius:4px;font-size:12px;font-weight:700;}"
+            "QPushButton:hover{background:#059669;}"
+        )
+        self._excel_btn.clicked.connect(self._export_excel)
+        filtre_row.addWidget(self._excel_btn)
+
+        filtre_row.addStretch()
+        top_lay.addLayout(filtre_row)
+        root.addWidget(top)
+
+        # ── Özet bant (İşlem / Ödeme / Fark) ─────────────────────────────
+        # PHP: #spIslemToplam / #spOdemeToplam / #spFarkToplam
+        ozet = QFrame()
+        ozet.setFixedHeight(64)
+        ozet.setStyleSheet(
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #1a1a2e,stop:0.5 #16213e,stop:1 #0f3460);"
+        )
+        oz_lay = QHBoxLayout(ozet)
+        oz_lay.setContentsMargins(20, 0, 20, 0)
+        oz_lay.setSpacing(40)
+
+        def _blok(label: str, attr: str, clr: str):
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            lbl_top = QLabel(label)
+            lbl_top.setStyleSheet(
+                "font-size:10px;color:rgba(255,255,255,.65);background:transparent;"
+            )
+            lbl_val = QLabel("-")
+            lbl_val.setStyleSheet(
+                f"font-size:18px;font-weight:700;color:{clr};background:transparent;"
+            )
+            col.addWidget(lbl_top)
+            col.addWidget(lbl_val)
+            setattr(self, attr, lbl_val)
+            return col
+
+        oz_lay.addLayout(_blok("İşlem Toplamı",  "_islem_lbl", "#dc3545"))
+        oz_lay.addLayout(_blok("Ödeme Toplamı",  "_odeme_lbl", "#28a745"))
+        oz_lay.addLayout(_blok("Fark",            "_fark_lbl",  "#ffffff"))
+        oz_lay.addStretch()
+
+        self._kayit_chip = QLabel("")
+        self._kayit_chip.setStyleSheet(
+            "background:rgba(255,255,255,.12);color:white;font-size:11px;"
+            "font-weight:600;border-radius:10px;padding:2px 10px;"
+        )
+        oz_lay.addWidget(self._kayit_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(ozet)
+
+        # ── Tablo ─────────────────────────────────────────────────────────
+        self._tbl = QTableWidget()
+        self._tbl.setColumnCount(len(self.SUTUNLAR))
+        self._tbl.setHorizontalHeaderLabels([s[0] for s in self.SUTUNLAR])
+        self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.setAlternatingRowColors(True)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setSortingEnabled(True)
+        hdr = self._tbl.horizontalHeader()
+        hdr.setStretchLastSection(False)
+        for i, (_, _, w, _) in enumerate(self.SUTUNLAR):
+            self._tbl.setColumnWidth(i, w)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._tbl.setStyleSheet("""
+            QTableWidget {
+                background: white;
+                gridline-color: #e2e8f0;
+                font-size: 12px;
+                color: #1e293b;
+                border: none;
+            }
+            QTableWidget::item {
+                color: #1e293b;
+                padding: 3px 6px;
+            }
+            QTableWidget::item:hover {
+                background: #f0f9ff;
+                color: #1e293b;
+            }
+            QTableWidget::item:selected {
+                background: #dbeafe;
+                color: #1e293b;
+            }
+            QTableWidget::item:alternate {
+                background: #f8fafc;
+            }
+            QHeaderView::section {
+                background: #212121;
+                color: white;
+                font-weight: 700;
+                font-size: 11px;
+                padding: 6px 4px;
+                border: none;
+                border-right: 1px solid #374151;
+            }
+        """)
+        root.addWidget(self._tbl, 1)
+
+        # ── Alt bar ───────────────────────────────────────────────────────
+        alt = QFrame()
+        alt.setFixedHeight(48)
+        alt.setStyleSheet(
+            "background:#f8f9fa;border-top:1px solid #dee2e6;"
+        )
+        a = QHBoxLayout(alt)
+        a.setContentsMargins(16, 0, 16, 0)
+        self._durum_lbl = QLabel("")
+        self._durum_lbl.setStyleSheet("font-size:11px;color:#6c757d;")
+        a.addWidget(self._durum_lbl)
+        a.addStretch()
+        kapat = QPushButton("Kapat")
+        kapat.setFixedSize(110, 32)
+        kapat.setStyleSheet(
+            "QPushButton{background:#dc3545;color:white;border:none;"
+            "border-radius:5px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{background:#c82333;}"
+        )
+        kapat.clicked.connect(self.accept)
+        a.addWidget(kapat)
+        root.addWidget(alt)
+
+    # ── Yardımcılar ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _lbl(txt: str) -> QLabel:
+        l = QLabel(txt)
+        l.setStyleSheet("font-size:12px;color:#495057;font-weight:600;")
+        return l
+
+    # ── Veri Yükleme ──────────────────────────────────────────────────────
+
+    def _load(self):
+        """Tarih aralığına göre paytr tablosundan satırları çeker."""
+        from services.paytr_service import get_sanal_pos_hareketleri_db
+
+        self._listele_btn.setEnabled(False)
+        self._durum_lbl.setText("⏳  Yükleniyor...")
+        self._islem_lbl.setText("Yükleniyor...")
+        self._odeme_lbl.setText("...")
+        self._fark_lbl.setText("...")
+
+        ilk_qd = self._ilk_de.date()
+        son_qd = self._son_de.date()
+        ilk_str = f"{ilk_qd.year():04d}-{ilk_qd.month():02d}-{ilk_qd.day():02d}"
+        son_str = f"{son_qd.year():04d}-{son_qd.month():02d}-{son_qd.day():02d}"
+
+        result = get_sanal_pos_hareketleri_db(
+            self._userid, self._musterino, ilk_str, son_str
+        )
+
+        self._listele_btn.setEnabled(True)
+
+        if not result.get("success"):
+            self._islem_lbl.setText("Hata")
+            self._odeme_lbl.setText("-")
+            self._fark_lbl.setText("-")
+            self._durum_lbl.setText(f"❌  {result.get('message', 'Bilinmeyen hata')}")
+            return
+
+        self._rows = result.get("data", [])
+        self._toplam_islem = result.get("toplam_islem", 0.0)
+        self._toplam_odeme = result.get("toplam_odeme", 0.0)
+        self._doldur(result)
+
+    def _doldur(self, result: dict):
+        from PyQt6.QtGui import QColor, QFont as QF
+        import re
+
+        # Özet bantları
+        toplam_islem = self._toplam_islem
+        toplam_odeme = self._toplam_odeme
+        fark         = toplam_odeme - toplam_islem
+
+        self._islem_lbl.setText(result.get("toplam_islem_fmt", "-"))
+        self._odeme_lbl.setText(result.get("toplam_odeme_fmt", "-"))
+        fark_fmt = result.get("toplam_fark_fmt", "-")
+        self._fark_lbl.setText(fark_fmt)
+        self._fark_lbl.setStyleSheet(
+            f"font-size:18px;font-weight:700;background:transparent;"
+            f"color:{'#28a745' if fark >= 0 else '#dc3545'};"
+        )
+
+        kayit_sayisi = result.get("kayit_sayisi", len(self._rows))
+        self._kayit_chip.setText(f"📅 {kayit_sayisi:,} kayıt")
+
+        ilk_qd = self._ilk_de.date()
+        son_qd = self._son_de.date()
+        self._durum_lbl.setText(
+            f"📅 {ilk_qd.toString('dd.MM.yyyy')} — {son_qd.toString('dd.MM.yyyy')}"
+            f"   │   {kayit_sayisi:,} kayıt   │   "
+            f"İşlem: {result.get('toplam_islem_fmt','-')}  "
+            f"Ödeme: {result.get('toplam_odeme_fmt','-')}  "
+            f"Fark: {fark_fmt}"
+        )
+
+        # Tarih formatlama (DD.MM.YYYY)
+        def _tarih_fmt(v) -> str:
+            if not v:
+                return ""
+            s = str(v).strip()
+            m = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})', s)
+            if m:
+                return f"{m.group(1).zfill(2)}.{m.group(2).zfill(2)}.{m.group(3)}"
+            m2 = re.match(r'^(\d{4})-(\d{2})-(\d{2})', s)
+            if m2:
+                return f"{m2.group(3)}.{m2.group(2)}.{m2.group(1)}"
+            return s
+
+        # Tabloyu doldur
+        self._tbl.setSortingEnabled(False)
+        self._tbl.setRowCount(0)
+
+        for row in self._rows:
+            ri = self._tbl.rowCount()
+            self._tbl.insertRow(ri)
+            self._tbl.setRowHeight(ri, 24)
+
+            for ci, (_, field, _, align) in enumerate(self.SUTUNLAR):
+                raw = row.get(field, "")
+
+                # Sayısal sütunlar — kırmızı/yeşil renklendirme (PHP DataTable render)
+                if field in ("islemtutari", "odemetutari", "nettutar", "kesintitutari"):
+                    try:
+                        val_f = float(raw or 0)
+                    except (ValueError, TypeError):
+                        val_f = 0.0
+                    txt = f"{val_f:,.2f}"
+                    clr = (
+                        "#dc3545" if field in ("islemtutari", "kesintitutari")
+                        else "#28a745"
+                    )
+                    it = QTableWidgetItem(txt)
+                    it.setForeground(QColor(clr))
+                    it.setFont(QF("", -1, QF.Weight.Bold))
+                    it.setData(Qt.ItemDataRole.UserRole, val_f)  # sayısal sıralama
+
+                elif field == "islemtarihi":
+                    txt = _tarih_fmt(raw)
+                    it  = QTableWidgetItem(txt)
+                    it.setForeground(QColor("#374151"))
+
+                else:
+                    txt = str(raw) if raw is not None else ""
+                    it  = QTableWidgetItem(txt)
+                    it.setForeground(QColor("#374151"))
+
+                it.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+                self._tbl.setItem(ri, ci, it)
+
+        self._tbl.setSortingEnabled(True)
+
+    def _export_excel(self):
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        import re
+        import datetime
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Excel Olarak Kaydet", "sanal_pos_hareketleri.xlsx", "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Sanal Pos"
+
+            # Excel Stylings
+            font_title = Font(name="Segoe UI", size=14, bold=True, color="212121")
+            font_subtitle = Font(name="Segoe UI", size=9, italic=True, color="4B5563")
+            font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+            font_data = Font(name="Segoe UI", size=10, color="1F2937")
+            font_total = Font(name="Segoe UI", size=11, bold=True, color="212121")
+
+            fill_header = PatternFill(start_color="212121", end_color="212121", fill_type="solid") # Dark
+            fill_total = PatternFill(start_color="F3F4F6", end_color="F3F4F6", fill_type="solid")  # Light Gray
+
+            border_thin = Border(
+                left=Side(style="thin", color="E5E7EB"),
+                right=Side(style="thin", color="E5E7EB"),
+                top=Side(style="thin", color="E5E7EB"),
+                bottom=Side(style="thin", color="E5E7EB")
+            )
+            border_total = Border(
+                top=Side(style="thin", color="D1D5DB"),
+                bottom=Side(style="double", color="212121")
+            )
+
+            # 1. Rapor Başlık Bloğu
+            ws.append(["Sanal Pos Hareketleri Raporu (PayTR)"])
+            ws.cell(row=1, column=1).font = font_title
+
+            ilk_qd = self._ilk_de.date()
+            son_qd = self._son_de.date()
+            tarih_araligi = f"Tarih Aralığı: {ilk_qd.toString('dd.MM.yyyy')} — {son_qd.toString('dd.MM.yyyy')}"
+            ws.append([tarih_araligi])
+            ws.cell(row=2, column=1).font = font_subtitle
+
+            ws.append([]) # Boşluk
+
+            # Headers
+            headers = [col[0] for col in self.SUTUNLAR]
+            ws.append(headers)
+
+            header_row_idx = 4
+            for col_idx in range(len(headers)):
+                cell = ws.cell(row=header_row_idx, column=col_idx+1)
+                cell.font = font_header
+                cell.fill = fill_header
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border_thin
+
+            # Sum tracker for columns
+            column_sums = {col: 0.0 for col in range(len(self.SUTUNLAR))}
+
+            # Rows writing
+            current_row_idx = 5
+            for row in range(self._tbl.rowCount()):
+                if self._tbl.isRowHidden(row):
+                    continue
+
+                row_data = []
+                for col in range(self._tbl.columnCount()):
+                    item = self._tbl.item(row, col)
+                    cell_text = item.text() if item else ""
+                    field_name = self.SUTUNLAR[col][1]
+
+                    # Check if it is an amount column
+                    if field_name in ("islemtutari", "odemetutari", "nettutar", "kesintitutari"):
+                        val_num = 0.0
+                        if item:
+                            val_data = item.data(Qt.ItemDataRole.UserRole)
+                            if val_data is not None:
+                                try:
+                                    val_num = float(val_data)
+                                except (ValueError, TypeError):
+                                    val_num = 0.0
+                            else:
+                                # Fallback parse
+                                s = cell_text.replace("₺", "").replace("TL", "").replace("$", "").replace("€", "").replace("+", "").strip()
+                                s = s.replace(".", "").replace(",", ".")
+                                try:
+                                    val_num = float(s)
+                                except ValueError:
+                                    val_num = 0.0
+                        row_data.append(val_num)
+                        column_sums[col] += val_num
+                    else:
+                        row_data.append(cell_text)
+
+                ws.append(row_data)
+
+                # Style active data row
+                for col in range(len(row_data)):
+                    cell = ws.cell(row=current_row_idx, column=col+1)
+                    cell.font = font_data
+                    cell.border = border_thin
+                    field_name = self.SUTUNLAR[col][1]
+
+                    if field_name in ("islemtutari", "odemetutari", "nettutar", "kesintitutari"):
+                        cell.alignment = Alignment(horizontal="right", vertical="center")
+                        # Format is exactly 0.00 with dot decimal separator, no currency symbol, no thousands separator
+                        cell.number_format = '0.00'
+                    elif field_name == "islemtarihi":
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                    else:
+                        cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                current_row_idx += 1
+
+            # 2. Dynamic GENEL TOPLAM Row
+            summary_row = []
+            for col in range(self._tbl.columnCount()):
+                field_name = self.SUTUNLAR[col][1]
+                if col == 0:
+                    summary_row.append("GENEL TOPLAM")
+                elif field_name in ("islemtutari", "odemetutari", "nettutar", "kesintitutari"):
+                    summary_row.append(column_sums[col])
+                else:
+                    summary_row.append("")
+
+            ws.append(summary_row)
+
+            # Style summary row
+            for col in range(len(summary_row)):
+                cell = ws.cell(row=current_row_idx, column=col+1)
+                cell.font = font_total
+                cell.fill = fill_total
+                cell.border = border_total
+                field_name = self.SUTUNLAR[col][1]
+
+                if col == 0:
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+                elif field_name in ("islemtutari", "odemetutari", "nettutar", "kesintitutari"):
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    # Amount columns use '.' decimal separator, no currency symbol, no thousands separator
+                    cell.number_format = '0.00'
+
+            # 3. Auto Width Adjustment
+            for col in ws.columns:
+                max_len = 0
+                col_letter = get_column_letter(col[0].column)
+                for cell in col:
+                    if cell.row in (1, 2, 3): # Skip title headers for width
+                        continue
+                    if cell.value is not None:
+                        if isinstance(cell.value, float):
+                            val_str = f"{cell.value:.2f}"
+                        else:
+                            val_str = str(cell.value)
+                        max_len = max(max_len, len(val_str))
+                ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+
+            # Set gridlines visible
+            ws.views.sheetView[0].showGridLines = True
+
+            wb.save(path)
+
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Başarılı")
+            msg.setText("Sanal Pos Hareketleri Excel raporu başarıyla kaydedildi!")
+            msg.setStyleSheet("""
+                QMessageBox { background-color: white; }
+                QLabel { color: #1F2937; font-size: 13px; font-weight: 600; min-width: 280px; min-height: 40px; }
+                QPushButton { background-color: #212121; color: white; border: none; border-radius: 6px; padding: 6px 18px; font-size: 11px; font-weight: bold; }
+                QPushButton:hover { background-color: #343a40; }
+            """)
+            msg.exec()
+
+        except Exception as e:
+            import traceback
+            err_msg = f"Excel kaydedilirken hata oluştu:\n{e}\n\nDetay:\n{traceback.format_exc()}"
+            print(err_msg)
+
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Critical)
+            msg.setWindowTitle("Hata")
+            msg.setText(f"Excel raporu oluşturulurken beklenmedik hata oluştu:\n{e}")
+            msg.setStyleSheet("""
+                QMessageBox { background-color: white; }
+                QLabel { color: #DC2626; font-size: 12px; font-weight: 600; min-width: 240px; }
+                QPushButton { background-color: #DC2626; color: white; border: none; border-radius: 6px; padding: 6px 16px; }
+            """)
+            msg.exec()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fiziksel Pos Hareketleri Dialog
+# PHP: lib/panelparcalari/admin/admin.php  → #fizikselPosModal
+#      sabit/js/admin_dashboard.js         → fpHareketleriYukle()
+# 9 sütunlu DataTable + İşlem/İşyeri Ücreti/Net Tutar özet bantları
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FizikselPosDialog(QDialog):
+    """
+    PHP admin.php #fizikselPosModal + admin_dashboard.js fpHareketleriYukle()
+    → PyQt6 karşılığı.
+
+    Üst bölüm : Başlık + '🏪 Womsis Yerel DB' badge + Tarih filtresi
+    Özet bant : İşlem Toplamı (kırmızı) | İşyeri Ücreti (turuncu) | Net Tutar (yeşil)
+    Alt bölüm : 9 sütunlu hareket tablosu (womsi_pos SQLite tablosu)
+    """
+
+    SUTUNLAR = [
+        ("İşyeri No",           "isyerino",          100, Qt.AlignmentFlag.AlignLeft),
+        ("Cari Hesap",          "carihesap",          140, Qt.AlignmentFlag.AlignLeft),
+        ("Hesaba Geçiş Tarihi", "hesabagecistarihi",  130, Qt.AlignmentFlag.AlignCenter),
+        ("İşlem Tutarı",        "islemtutari",        110, Qt.AlignmentFlag.AlignRight),
+        ("İşlem Tarihi",        "islemtarihi",        110, Qt.AlignmentFlag.AlignCenter),
+        ("POS No",              "posno",               90, Qt.AlignmentFlag.AlignCenter),
+        ("İşyeri Ücreti",       "isyeritutar",        120, Qt.AlignmentFlag.AlignRight),
+        ("Net Tutar",           "nettutar",           100, Qt.AlignmentFlag.AlignRight),
+        ("Brand",               "brand",               90, Qt.AlignmentFlag.AlignCenter),
+    ]
+
+    def __init__(self, userid: int, parent=None):
+        super().__init__(parent)
+        self._userid = userid
+        self._rows: list[dict] = []
+        self.setWindowTitle("🏪  Fiziksel Pos Hareketleri — Womsis")
+        self.setMinimumSize(1200, 720)
+        self.resize(1340, 780)
+        self._setup_ui()
+        self._load()
+
+    def _setup_ui(self):
+        from datetime import date
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Üst bant
+        top = QFrame()
+        top.setStyleSheet("background:#f8f9fa;border-bottom:1px solid #dee2e6;")
+        tl = QVBoxLayout(top)
+        tl.setContentsMargins(16, 12, 16, 12)
+        tl.setSpacing(8)
+
+        br = QHBoxLayout()
+        bl = QLabel("Fiziksel Pos Hareketleri")
+        bl.setStyleSheet("font-size:16px;font-weight:700;color:#212529;")
+        br.addWidget(bl)
+        badge = QLabel("🏪 Womsis Yerel DB")
+        badge.setStyleSheet(
+            "background:#1a3a5c;color:#fff;font-size:11px;font-weight:600;"
+            "border-radius:10px;padding:2px 10px;"
+        )
+        badge.setFixedHeight(22)
+        br.addWidget(badge)
+        br.addStretch()
+        tl.addLayout(br)
+
+        fr = QHBoxLayout()
+        fr.setSpacing(10)
+        _DE = (
+            "QDateEdit{background:white;border:1px solid #ced4da;"
+            "border-radius:4px;padding:3px 6px;font-size:12px;color:#212529;}"
+            "QDateEdit::drop-down{border:none;}"
+        )
+        today = date.today()
+        jan1 = date(today.year, 1, 1)
+
+        fr.addWidget(self._lbl("İlk Tarih:"))
+        self._ilk_de = QDateEdit()
+        self._ilk_de.setCalendarPopup(True)
+        self._ilk_de.setDisplayFormat("dd.MM.yyyy")
+        self._ilk_de.setFixedHeight(30)
+        self._ilk_de.setFixedWidth(120)
+        self._ilk_de.setDate(QDate(jan1.year, jan1.month, jan1.day))
+        self._ilk_de.setStyleSheet(_DE)
+        fr.addWidget(self._ilk_de)
+
+        fr.addWidget(self._lbl("Son Tarih:"))
+        self._son_de = QDateEdit()
+        self._son_de.setCalendarPopup(True)
+        self._son_de.setDisplayFormat("dd.MM.yyyy")
+        self._son_de.setFixedHeight(30)
+        self._son_de.setFixedWidth(120)
+        self._son_de.setDate(QDate(today.year, today.month, today.day))
+        self._son_de.setStyleSheet(_DE)
+        fr.addWidget(self._son_de)
+
+        self._listele_btn = QPushButton("Listele")
+        self._listele_btn.setFixedHeight(30)
+        self._listele_btn.setFixedWidth(80)
+        self._listele_btn.setStyleSheet(
+            "QPushButton{background:#1a3a5c;color:white;border:none;"
+            "border-radius:4px;font-size:12px;font-weight:700;}"
+            "QPushButton:hover{background:#0d2137;}"
+        )
+        self._listele_btn.clicked.connect(self._load)
+        fr.addWidget(self._listele_btn)
+        fr.addStretch()
+        tl.addLayout(fr)
+        root.addWidget(top)
+
+        # Özet bant — PHP: #fpIslemToplam / #fpIsyeriToplam / #fpNetToplam
+        ozet = QFrame()
+        ozet.setFixedHeight(64)
+        ozet.setStyleSheet(
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #1a3a5c,stop:0.5 #0d2137,stop:1 #061422);"
+        )
+        oz = QHBoxLayout(ozet)
+        oz.setContentsMargins(20, 0, 20, 0)
+        oz.setSpacing(40)
+
+        def _blok(lbl: str, attr: str, clr: str):
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            h = QLabel(lbl)
+            h.setStyleSheet("font-size:10px;color:rgba(255,255,255,.65);background:transparent;")
+            v = QLabel("-")
+            v.setStyleSheet(f"font-size:18px;font-weight:700;color:{clr};background:transparent;")
+            col.addWidget(h)
+            col.addWidget(v)
+            setattr(self, attr, v)
+            return col
+
+        oz.addLayout(_blok("İşlem Toplamı",  "_islem_lbl",  "#dc3545"))
+        oz.addLayout(_blok("İşyeri Ücreti",  "_isyeri_lbl", "#e67e22"))
+        oz.addLayout(_blok("Net Tutar",      "_net_lbl",    "#28a745"))
+        oz.addStretch()
+
+        self._kayit_chip = QLabel("")
+        self._kayit_chip.setStyleSheet(
+            "background:rgba(255,255,255,.12);color:white;font-size:11px;"
+            "font-weight:600;border-radius:10px;padding:2px 10px;"
+        )
+        oz.addWidget(self._kayit_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(ozet)
+
+        # Tablo
+        self._tbl = QTableWidget()
+        self._tbl.setColumnCount(len(self.SUTUNLAR))
+        self._tbl.setHorizontalHeaderLabels([s[0] for s in self.SUTUNLAR])
+        self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.setAlternatingRowColors(True)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setSortingEnabled(True)
+        hdr = self._tbl.horizontalHeader()
+        hdr.setStretchLastSection(False)
+        for i, (_, _, w, _) in enumerate(self.SUTUNLAR):
+            self._tbl.setColumnWidth(i, w)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._tbl.setStyleSheet("""
+            QTableWidget { background:white; gridline-color:#e2e8f0;
+                font-size:12px; color:#1e293b; border:none; }
+            QTableWidget::item { color:#1e293b; padding:3px 6px; }
+            QTableWidget::item:hover { background:#f0f9ff; color:#1e293b; }
+            QTableWidget::item:selected { background:#dbeafe; color:#1e293b; }
+            QTableWidget::item:alternate { background:#f8fafc; }
+            QHeaderView::section { background:#1a3a5c; color:white;
+                font-weight:700; font-size:11px; padding:6px 4px;
+                border:none; border-right:1px solid #0d2137; }
+        """)
+        root.addWidget(self._tbl, 1)
+
+        # Alt bar
+        alt = QFrame()
+        alt.setFixedHeight(48)
+        alt.setStyleSheet("background:#f8f9fa;border-top:1px solid #dee2e6;")
+        a = QHBoxLayout(alt)
+        a.setContentsMargins(16, 0, 16, 0)
+        self._durum_lbl = QLabel("")
+        self._durum_lbl.setStyleSheet("font-size:11px;color:#6c757d;")
+        a.addWidget(self._durum_lbl)
+        a.addStretch()
+        kapat = QPushButton("Kapat")
+        kapat.setFixedSize(110, 32)
+        kapat.setStyleSheet(
+            "QPushButton{background:#dc3545;color:white;border:none;"
+            "border-radius:5px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{background:#c82333;}"
+        )
+        kapat.clicked.connect(self.accept)
+        a.addWidget(kapat)
+        root.addWidget(alt)
+
+    @staticmethod
+    def _lbl(txt: str) -> QLabel:
+        l = QLabel(txt)
+        l.setStyleSheet("font-size:12px;color:#495057;font-weight:600;")
+        return l
+
+    def _load(self):
+        """PHP: fpHareketleriYukle() — womsi_pos tablosundan tarih filtreli sorgu."""
+        from services.fiziksel_pos_service import get_hareketler
+        self._listele_btn.setEnabled(False)
+        self._durum_lbl.setText("⏳  Yükleniyor...")
+        self._islem_lbl.setText("Yükleniyor...")
+        self._isyeri_lbl.setText("...")
+        self._net_lbl.setText("...")
+
+        ilk_qd = self._ilk_de.date()
+        son_qd = self._son_de.date()
+        ilk_str = f"{ilk_qd.year():04d}-{ilk_qd.month():02d}-{ilk_qd.day():02d}"
+        son_str = f"{son_qd.year():04d}-{son_qd.month():02d}-{son_qd.day():02d}"
+
+        result = get_hareketler(self._userid, ilk_str, son_str)
+        self._listele_btn.setEnabled(True)
+
+        if not result.get("success"):
+            self._islem_lbl.setText("Hata")
+            self._isyeri_lbl.setText("-")
+            self._net_lbl.setText("-")
+            self._durum_lbl.setText(f"❌  {result.get('message', 'Bilinmeyen hata')}")
+            return
+
+        self._rows = result.get("data", [])
+        self._doldur(result)
+
+    def _doldur(self, result: dict):
+        from PyQt6.QtGui import QColor, QFont as QF
+        # PHP: #fpIslemToplam / #fpIsyeriToplam / #fpNetToplam
+        self._islem_lbl.setText(result.get("toplam_islem_fmt",  "-"))
+        self._isyeri_lbl.setText(result.get("toplam_isyeri_fmt", "-"))
+        self._net_lbl.setText(result.get("toplam_net_fmt",    "-"))
+
+        kayit = result.get("kayit_sayisi", len(self._rows))
+        self._kayit_chip.setText(f"📅 {kayit:,} kayıt")
+
+        ilk_qd = self._ilk_de.date()
+        son_qd = self._son_de.date()
+        self._durum_lbl.setText(
+            f"📅 {ilk_qd.toString('dd.MM.yyyy')} — {son_qd.toString('dd.MM.yyyy')}"
+            f"   │   {kayit:,} kayıt   │   "
+            f"İşlem: {result.get('toplam_islem_fmt','-')}  "
+            f"İşyeri: {result.get('toplam_isyeri_fmt','-')}  "
+            f"Net: {result.get('toplam_net_fmt','-')}"
+        )
+
+        self._tbl.setSortingEnabled(False)
+        self._tbl.setRowCount(0)
+
+        for row in self._rows:
+            ri = self._tbl.rowCount()
+            self._tbl.insertRow(ri)
+            self._tbl.setRowHeight(ri, 24)
+            for ci, (_, field, _, align) in enumerate(self.SUTUNLAR):
+                raw = row.get(field, "")
+                if field == "islemtutari":
+                    clr, bold = "#dc3545", True
+                elif field == "isyeritutar":
+                    clr, bold = "#e67e22", True
+                elif field == "nettutar":
+                    clr, bold = "#28a745", True
+                else:
+                    clr, bold = "#374151", False
+
+                if field in ("islemtutari", "isyeritutar", "nettutar"):
+                    try:
+                        val_f = float(raw or 0)
+                    except (ValueError, TypeError):
+                        val_f = 0.0
+                    it = QTableWidgetItem(f"{val_f:,.2f}")
+                    it.setData(Qt.ItemDataRole.UserRole, val_f)
+                else:
+                    it = QTableWidgetItem(str(raw) if raw is not None else "")
+
+                it.setForeground(QColor(clr))
+                if bold:
+                    it.setFont(QF("", -1, QF.Weight.Bold))
+                it.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+                self._tbl.setItem(ri, ci, it)
+
+        self._tbl.setSortingEnabled(True)
+
+        if not self._rows:
+            self._tbl.insertRow(0)
+            self._tbl.setRowHeight(0, 48)
+            empty = QTableWidgetItem(
+                "Bu tarih aralığında fiziksel POS hareketi bulunamadı."
+            )
+            empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            empty.setForeground(QColor("#6c757d"))
+            self._tbl.setItem(0, 0, empty)
+            self._tbl.setSpan(0, 0, 1, len(self.SUTUNLAR))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Maaş Kira Smm Dialog
+# PHP: admin_dashboard.js → vmModalAc('Maaş Kira Smm') + vmBuildTable()
+#      ajax/ayarlar/vergiMuhtasarGetir.php
+# 5 sütunlu DataTable:
+#   Dönem | Açıklama | Gayri Resmi Tutar (turuncu) |
+#   Vergi Kesinti Tutarı (kırmızı) | Fark (yeşil)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MaasKiraSmmDialog(QDialog):
+    """
+    PHP admin.php #vergilerModal (maas_kira_smmm modu) + vmBuildTable()
+    → PyQt6 karşılığı.
+
+    Üst bölüm : Başlık + Dönem filtresi
+    Özet bant : Gayri Resmi (turuncu) | Kesintiler (kırmızı) | Fark (yeşil)
+    Alt bölüm : 5 sütunlu hareket tablosu (VergiMuhtasar SQLite)
+    """
+
+    SUTUNLAR = [
+        # (başlık, alan_adı, genişlik, hizalama, renk)
+        ("Dönem",                "donem",        100, Qt.AlignmentFlag.AlignLeft,    None),
+        ("Açıklama",             "ack",          200, Qt.AlignmentFlag.AlignLeft,    None),
+        ("Gayri Resmi Tutar",    "gaytutar",     140, Qt.AlignmentFlag.AlignRight, "#ff9800"),
+        ("Vergi Kesinti Tutarı", "vergkestutar", 140, Qt.AlignmentFlag.AlignRight, "#dc3545"),
+        ("Fark",                 "fark",         130, Qt.AlignmentFlag.AlignRight, "#28a745"),
+    ]
+
+    def __init__(self, userid: int, musterino: str = None, parent=None):
+        super().__init__(parent)
+        self._userid    = userid
+        self._musterino = musterino
+        self._rows: list[dict] = []
+        self._all_rows: list[dict] = []
+
+        self.setWindowTitle("💼  Maaş Kira Smm — Vergi Muhtasar")
+        self.setMinimumSize(1000, 660)
+        self.resize(1160, 720)
+        self._setup_ui()
+        self._load()
+
+    def _setup_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Üst bant ─────────────────────────────────────────────────────────
+        top = QFrame()
+        top.setStyleSheet("background:#f8f9fa;border-bottom:1px solid #dee2e6;")
+        tl = QVBoxLayout(top)
+        tl.setContentsMargins(16, 12, 16, 12)
+        tl.setSpacing(8)
+
+        br = QHBoxLayout()
+        bl = QLabel("Maaş Kira Smm — Vergi Muhtasar")
+        bl.setStyleSheet("font-size:16px;font-weight:700;color:#212529;")
+        br.addWidget(bl)
+        badge = QLabel("💼 Personel · Kira · Müşavirlik")
+        badge.setStyleSheet(
+            "background:#1a3a5c;color:#fff;font-size:11px;font-weight:600;"
+            "border-radius:10px;padding:2px 12px;"
+        )
+        badge.setFixedHeight(22)
+        br.addWidget(badge)
+        br.addStretch()
+        tl.addLayout(br)
+
+        # Dönem + Açıklama filtresi
+        fr = QHBoxLayout()
+        fr.setSpacing(10)
+        _CB = (
+            "QComboBox{background:white;border:1px solid #ced4da;border-radius:4px;"
+            "padding:3px 8px;font-size:12px;color:#212529;min-height:28px;}"
+        )
+        fr.addWidget(self._lbl("Dönem:"))
+        self._donem_cb = QComboBox()
+        self._donem_cb.setFixedWidth(120)
+        self._donem_cb.setStyleSheet(_CB)
+        self._donem_cb.addItem("Tümü", "")
+        fr.addWidget(self._donem_cb)
+
+        fr.addWidget(self._lbl("Açıklama:"))
+        self._ack_cb = QComboBox()
+        self._ack_cb.setFixedWidth(180)
+        self._ack_cb.setStyleSheet(_CB)
+        self._ack_cb.addItem("Tümü", "")
+        fr.addWidget(self._ack_cb)
+
+        self._donem_cb.currentIndexChanged.connect(self._on_filter_change)
+        self._ack_cb.currentIndexChanged.connect(self._on_ack_filter)
+        fr.addStretch()
+        tl.addLayout(fr)
+        root.addWidget(top)
+
+        # ── Özet bant — PHP: #vGayriResmiToplam / #vKesintilerToplam / #vFarkToplam
+        ozet = QFrame()
+        ozet.setFixedHeight(64)
+        ozet.setStyleSheet(
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #1a3a5c,stop:0.5 #0d2137,stop:1 #061422);"
+        )
+        oz = QHBoxLayout(ozet)
+        oz.setContentsMargins(20, 0, 20, 0)
+        oz.setSpacing(40)
+
+        def _blok(lbl: str, attr: str, clr: str):
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            h = QLabel(lbl)
+            h.setStyleSheet("font-size:10px;color:rgba(255,255,255,.65);background:transparent;")
+            v = QLabel("-")
+            v.setStyleSheet(f"font-size:18px;font-weight:700;color:{clr};background:transparent;")
+            col.addWidget(h)
+            col.addWidget(v)
+            setattr(self, attr, v)
+            return col
+
+        oz.addLayout(_blok("Gayri Resmi Toplam", "_gay_lbl",  "#ff9800"))   # PHP: #vGayriResmiToplam
+        oz.addLayout(_blok("Kesintiler Toplam",  "_verg_lbl", "#dc3545"))   # PHP: #vKesintilerToplam
+        oz.addLayout(_blok("Fark",               "_fark_lbl", "#28a745"))   # PHP: #vFarkToplam
+        oz.addStretch()
+
+        self._kayit_chip = QLabel("")
+        self._kayit_chip.setStyleSheet(
+            "background:rgba(255,255,255,.12);color:white;font-size:11px;"
+            "font-weight:600;border-radius:10px;padding:2px 10px;"
+        )
+        oz.addWidget(self._kayit_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(ozet)
+
+        # ── Tablo ────────────────────────────────────────────────────────────
+        self._tbl = QTableWidget()
+        self._tbl.setColumnCount(len(self.SUTUNLAR))
+        self._tbl.setHorizontalHeaderLabels([s[0] for s in self.SUTUNLAR])
+        self._tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._tbl.setAlternatingRowColors(True)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.setSortingEnabled(True)
+        hdr = self._tbl.horizontalHeader()
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for i, (_, _, w, _, _) in enumerate(self.SUTUNLAR):
+            if i != 1:
+                self._tbl.setColumnWidth(i, w)
+        self._tbl.setStyleSheet("""
+            QTableWidget { background:white; gridline-color:#e2e8f0;
+                font-size:12px; color:#1e293b; border:none; }
+            QTableWidget::item { color:#1e293b; padding:3px 6px; }
+            QTableWidget::item:hover { background:#fef9f0; color:#1e293b; }
+            QTableWidget::item:selected { background:#fef3c7; color:#1e293b; }
+            QTableWidget::item:alternate { background:#f8fafc; }
+            QHeaderView::section { background:#1a3a5c; color:white;
+                font-weight:700; font-size:11px; padding:6px 4px;
+                border:none; border-right:1px solid #0d2137; }
+        """)
+        root.addWidget(self._tbl, 1)
+
+        # ── Alt bar ───────────────────────────────────────────────────────────
+        alt = QFrame()
+        alt.setFixedHeight(48)
+        alt.setStyleSheet("background:#f8f9fa;border-top:1px solid #dee2e6;")
+        a = QHBoxLayout(alt)
+        a.setContentsMargins(16, 0, 16, 0)
+        self._durum_lbl = QLabel("")
+        self._durum_lbl.setStyleSheet("font-size:11px;color:#6c757d;")
+        a.addWidget(self._durum_lbl)
+        a.addStretch()
+        kapat = QPushButton("Kapat")
+        kapat.setFixedSize(110, 32)
+        kapat.setStyleSheet(
+            "QPushButton{background:#dc3545;color:white;border:none;"
+            "border-radius:5px;font-size:13px;font-weight:700;}"
+            "QPushButton:hover{background:#c82333;}"
+        )
+        kapat.clicked.connect(self.accept)
+        a.addWidget(kapat)
+        root.addWidget(alt)
+
+    @staticmethod
+    def _lbl(txt: str) -> QLabel:
+        l = QLabel(txt)
+        l.setStyleSheet("font-size:12px;color:#495057;font-weight:600;")
+        return l
+
+    # ── Veri yükleme ─────────────────────────────────────────────────────────
+
+    def _load(self):
+        """PHP: loadVergilerData() → vergiMuhtasarGetir.php"""
+        from services.vergi_muhtasar_service import get_vergi_muhtasar
+        donem = self._donem_cb.currentData() or ""
+        result = get_vergi_muhtasar(self._userid, musterino=self._musterino, donem=donem)
+        if not result.get("success"):
+            self._durum_lbl.setText(f"❌ {result.get('message', 'Hata')}")
+            return
+        self._all_rows = result.get("data", [])
+        self._doldur_filtreler(result.get("donemler", []),
+                               list({r["ack"] for r in self._all_rows if r.get("ack")}))
+        self._rows = self._all_rows
+        self._doldur(result)
+
+    def _doldur_filtreler(self, donemler: list[str], acklar: list[str]):
+        """PHP: vmDoldurFiltreler() — combobox'ları doldur"""
+        self._donem_cb.blockSignals(True)
+        self._ack_cb.blockSignals(True)
+        cur_don = self._donem_cb.currentData()
+        cur_ack = self._ack_cb.currentData()
+        self._donem_cb.clear()
+        self._donem_cb.addItem("Tümü", "")
+        for d in sorted(donemler):
+            self._donem_cb.addItem(d, d)
+        idx = self._donem_cb.findData(cur_don)
+        if idx >= 0:
+            self._donem_cb.setCurrentIndex(idx)
+        self._ack_cb.clear()
+        self._ack_cb.addItem("Tümü", "")
+        for a in sorted(acklar):
+            self._ack_cb.addItem(a, a)
+        idx = self._ack_cb.findData(cur_ack)
+        if idx >= 0:
+            self._ack_cb.setCurrentIndex(idx)
+        self._donem_cb.blockSignals(False)
+        self._ack_cb.blockSignals(False)
+
+    def _on_filter_change(self):
+        """PHP: $('#vDonemFilter').on('change', loadVergilerData)"""
+        self._load()
+
+    def _on_ack_filter(self):
+        """PHP: $('#vAckFilter').on('change', ...) — client-side filtre"""
+        ack_val = self._ack_cb.currentData() or ""
+        if ack_val:
+            self._rows = [r for r in self._all_rows if r.get("ack") == ack_val]
+        else:
+            self._rows = self._all_rows
+        self._doldur_from_rows()
+
+    def _doldur(self, result: dict):
+        """Servis sonucundan tabloyu doldur."""
+        self._rows = result.get("data", [])
+        self._doldur_from_rows()
+
+    def _doldur_from_rows(self):
+        """PHP: vmBuildTable() + vmToplamGuncelle()"""
+        from PyQt6.QtGui import QColor, QFont as QF
+
+        gay_top = verg_top = fark_top = 0.0
+        for r in self._rows:
+            gay  = float(r.get("gaytutar")     or 0)
+            verg = float(r.get("vergkestutar") or 0)
+            fark = gay - verg
+            gay_top  += gay
+            verg_top += verg
+            fark_top += abs(fark)
+
+        def _fmt(v): return f"{abs(v):,.2f} ₺".replace(",", "X").replace(".", ",").replace("X", ".")
+
+        # PHP: #vGayriResmiToplam / #vKesintilerToplam / #vFarkToplam
+        self._gay_lbl.setText(_fmt(gay_top))
+        self._verg_lbl.setText(_fmt(verg_top))
+        self._fark_lbl.setText(f"+{_fmt(fark_top)}")
+
+        kayit = len(self._rows)
+        self._kayit_chip.setText(f"📊 {kayit} kayıt")
+        self._durum_lbl.setText(
+            f"{kayit} kayıt  │  "
+            f"Gayri Resmi: {_fmt(gay_top)}  "
+            f"Kesinti: {_fmt(verg_top)}  "
+            f"Fark: +{_fmt(fark_top)}"
+        )
+
+        self._tbl.setSortingEnabled(False)
+        self._tbl.setRowCount(0)
+
+        for row in self._rows:
+            ri = self._tbl.rowCount()
+            self._tbl.insertRow(ri)
+            self._tbl.setRowHeight(ri, 28)
+
+            for ci, (_, field, _, align, clr) in enumerate(self.SUTUNLAR):
+                raw = row.get(field, "")
+
+                if field in ("gaytutar", "vergkestutar", "fark"):
+                    try:
+                        val_f = float(raw or 0)
+                    except (ValueError, TypeError):
+                        val_f = 0.0
+                    # Fark: abs değer + yeşil (PHP: Math.abs(d))
+                    if field == "fark":
+                        it = QTableWidgetItem(f"+{_fmt(abs(val_f))}")
+                    else:
+                        it = QTableWidgetItem(_fmt(val_f))
+                    it.setData(Qt.ItemDataRole.UserRole, val_f)
+                    it.setFont(QF("", -1, QF.Weight.Bold))
+                    it.setForeground(QColor(clr or "#374151"))
+                else:
+                    it = QTableWidgetItem(str(raw) if raw is not None else "")
+                    it.setForeground(QColor("#374151"))
+
+                it.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+                self._tbl.setItem(ri, ci, it)
+
+        self._tbl.setSortingEnabled(True)
+
+        if not self._rows:
+            self._tbl.insertRow(0)
+            self._tbl.setRowHeight(0, 48)
+            empty = QTableWidgetItem("Bu filtrede Vergi Muhtasar kaydı bulunamadı.")
+            empty.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            empty.setForeground(QColor("#6c757d"))
+            self._tbl.setItem(0, 0, empty)
+            self._tbl.setSpan(0, 0, 1, len(self.SUTUNLAR))

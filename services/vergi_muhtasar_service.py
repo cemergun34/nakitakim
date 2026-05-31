@@ -16,7 +16,7 @@ from db.database import get_connection
 
 
 # ── Tablo adı (PHP ile birebir) ───────────────────────────────────────────────
-TABLE = "VergiMuhtasar"
+TABLE = "vergimuhtasar"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -45,19 +45,24 @@ def _parse_decimal(val: str) -> Optional[float]:
 # Okuma  (PHP vergiMuhtasarGetir.php karşılığı)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_vergi_muhtasar(userid: int, donem: str = "") -> dict:
+def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "") -> dict:
     """
     Kullanıcıya ait Vergi Muhtasar kayıtlarını döndürür.
 
     PHP'deki davranışla birebir:
     - donem parametresi varsa filtrelenir
     - Distinct dönem listesi de döndürülür
+    - Her satır için fark = gaytutar - vergkestutar hesaplanır
     - Döndürülen sözlük: { 'success': bool, 'data': [...], 'donemler': [...] }
     """
     conn = get_connection()
     try:
         where  = "WHERE userid = ?"
         params: list = [userid]
+
+        if musterino is not None:
+            where += " AND musterino = ?"
+            params.append(str(musterino))
 
         if donem:
             where  += " AND donem = ?"
@@ -66,7 +71,21 @@ def get_vergi_muhtasar(userid: int, donem: str = "") -> dict:
         sql  = (f"SELECT id, hesapkodu, ack, donem, gaytutar, vergkestutar "
                 f"FROM {TABLE} {where} ORDER BY donem, hesapkodu")
         rows = conn.execute(sql, params).fetchall()
-        data = [dict(r) for r in rows]
+
+        gay_toplam  = 0.0
+        verg_toplam = 0.0
+        fark_toplam = 0.0
+        data = []
+        for r in rows:
+            gay  = float(r["gaytutar"]     or 0)
+            verg = float(r["vergkestutar"] or 0)
+            fark = gay - verg
+            gay_toplam  += gay
+            verg_toplam += verg
+            fark_toplam += abs(fark)   # PHP: Math.abs(gay - verg)
+            d = dict(r)
+            d["fark"] = fark
+            data.append(d)
 
         # Distinct dönem listesi
         donemler = [
@@ -76,11 +95,51 @@ def get_vergi_muhtasar(userid: int, donem: str = "") -> dict:
             ).fetchall()
         ]
 
-        return {"success": True, "data": data, "donemler": donemler}
+        def _fmt(v: float, sign=False) -> str:
+            s = f"{abs(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return (f"+{s} ₺" if sign else f"₺{s}")
+
+        return {
+            "success": True,
+            "data": data,
+            "donemler": donemler,
+            "gay_toplam":      gay_toplam,
+            "gay_toplam_fmt":  _fmt(gay_toplam),
+            "verg_toplam":     verg_toplam,
+            "verg_toplam_fmt": _fmt(verg_toplam),
+            "fark_toplam":     fark_toplam,
+            "fark_toplam_fmt": _fmt(fark_toplam, sign=True),
+            "kayit_sayisi":    len(data),
+        }
     except Exception as exc:
         return {"success": False, "message": str(exc), "data": [], "donemler": []}
     finally:
         conn.close()
+
+
+def get_dashboard_toplam(userid: int, musterino: str = None) -> dict:
+    """
+    PHP: initMaasKiraSmmmCard() → #dashMaasKiraSmmmToplam
+    Formül: farkToplam += Math.abs(gay - verg)  (her satır için, NULL→0)
+    """
+    r = get_vergi_muhtasar(userid, musterino=musterino)
+    if not r.get("success"):
+        return {"success": False, "fark_toplam": 0.0, "fark_toplam_fmt": "₺0,00"}
+
+    def _fmt_kart(v: float) -> str:
+        """PHP: farkToplam.toLocaleString('tr-TR') + ' ₺'  (kart stili)"""
+        s = f"{abs(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"{s} ₺"
+
+    return {
+        "success":      True,
+        "fark_toplam":      r["fark_toplam"],
+        "fark_toplam_fmt":  _fmt_kart(r["fark_toplam"]),   # '10.853.717,00 ₺'
+        "gay_toplam":       r["gay_toplam"],
+        "verg_toplam":      r["verg_toplam"],
+        "kayit_sayisi":     r["kayit_sayisi"],
+    }
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -146,7 +205,7 @@ def toplu_yukle_csv(
     musteri_no: Optional[int] = None,
 ) -> dict:
     """
-    CSV dosyasını okur, parse eder ve VergiMuhtasar tablosuna UPSERT yapar.
+    CSV dosyasını okur, parse eder ve vergimuhtasar tablosuna UPSERT yapar.
 
     CSV formatı (noktalı virgül ayrımlı, opsiyonel BOM):
         hesapkodu;ack;donem;gaytutar;vergkestutar[;gaytutar_temiz;vergkestutar_temiz]

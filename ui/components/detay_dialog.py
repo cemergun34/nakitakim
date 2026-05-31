@@ -50,7 +50,9 @@ class DetayGlobalServer:
     @classmethod
     def get_server_url(cls, filename: str) -> tuple[str, str]:
         if cls._server_thread is None:
-            cls._temp_dir = tempfile.mkdtemp(prefix="efatura_global_")
+            workspace_tmp = os.path.expanduser("~/NakitAkim/data/tmp")
+            os.makedirs(workspace_tmp, exist_ok=True)
+            cls._temp_dir = tempfile.mkdtemp(prefix="efatura_global_", dir=workspace_tmp)
             
             import socket
             s = socket.socket()
@@ -273,17 +275,25 @@ class IslemTablosu(QTableWidget):
                     elif key == "gider" and val and float(val) > 0:
                         item.setForeground(QBrush(QColor("#DC2626")))
                 
-                # Fatura No link özelliği
+                # Fatura No link özelliği — yalnızca xml_dosya dolu ise tıklanabilir
                 if key in ("faturano", "faturaNo") and val and val != "-":
-                    item.setForeground(QBrush(QColor("#2563EB")))
-                    font = item.font()
-                    font.setUnderline(True)
-                    item.setFont(font)
-                    item.setToolTip("E-Fatura Ön İzlemesini Görmek İçin Tıklayın")
+                    xml_var = bool(row.get("xml_dosya"))
+                    if xml_var:
+                        item.setForeground(QBrush(QColor("#2563EB")))
+                        font = item.font()
+                        font.setUnderline(True)
+                        item.setFont(font)
+                        item.setToolTip("📄 E-Fatura XML Önizlemesini Açmak İçin Tıklayın")
+                    else:
+                        item.setForeground(QBrush(QColor("#9CA3AF")))
+                        item.setToolTip("XML dosyası yok — Bu fatura önizlenemiyor")
                     item.setData(Qt.ItemDataRole.UserRole, row)
 
                 self.setItem(r_idx, c_idx, item)
-        self.resizeRowsToContents()
+        if len(rows) < 300:
+            self.resizeRowsToContents()
+        else:
+            self.verticalHeader().setDefaultSectionSize(28)
         self.setSortingEnabled(True)
 
     def _on_cell_clicked(self, row_idx, col_idx):
@@ -314,9 +324,10 @@ class IslemTablosu(QTableWidget):
 
         xml_path  = row_data.get("xml_dosya")
         fatura_no = row_data.get("faturano") or row_data.get("faturaNo") or "?"
+        kaynak    = row_data.get("kaynak") or ""
 
-        # ── 1. Dosya kontrolü ────────────────────────────────────────────────
-        if not xml_path or not os.path.exists(str(xml_path)):
+        # ── 1. XML kayıt kontrolü ────────────────────────────────────────────
+        if not xml_path or str(xml_path).strip().lower() in ("none", "null", ""):
             QMessageBox.information(
                 self,
                 "Fatura Dosyası Yok",
@@ -363,65 +374,66 @@ class IslemTablosu(QTableWidget):
 
         # ── 4. Fallback: XSLT yoksa kendi HTML şablonumuzu yaz ──────────────
         if not html_bytes:
-            NS = {
-                "cac": "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2",
-                "cbc": "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2",
-            }
-            root = ET.fromstring(xml_bytes)
+            try:
+                NS = {
+                    "cac": "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2",
+                    "cbc": "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2",
+                }
+                root = ET.fromstring(xml_bytes)
 
-            def tx(el, tag, ns="cbc"):
-                e = el.find(f"{ns}:{tag}", NS) if el is not None else None
-                return (e.text or "").strip() if e is not None else ""
+                def tx(el, tag, ns="cbc"):
+                    e = el.find(f"{ns}:{tag}", NS) if el is not None else None
+                    return (e.text or "").strip() if e is not None else ""
 
-            fno   = tx(root, "ID") or fatura_no
-            tarih = tx(root, "IssueDate")
+                fno   = tx(root, "ID") or fatura_no
+                tarih = tx(root, "IssueDate")
 
-            sup  = root.find("cac:AccountingSupplierParty/cac:Party", NS)
-            pn   = sup.find("cac:PartyName", NS) if sup else None
-            sup_unvan = tx(pn, "Name") if pn else ""
-            sup_vkn = ""
-            if sup:
-                for pid in sup.findall("cac:PartyIdentification", NS):
-                    ie = pid.find("cbc:ID", NS)
-                    if ie is not None and ie.attrib.get("schemeID") == "VKN":
-                        sup_vkn = (ie.text or "").strip()
+                sup  = root.find("cac:AccountingSupplierParty/cac:Party", NS)
+                pn   = sup.find("cac:PartyName", NS) if sup else None
+                sup_unvan = tx(pn, "Name") if pn else ""
+                sup_vkn = ""
+                if sup:
+                    for pid in sup.findall("cac:PartyIdentification", NS):
+                        ie = pid.find("cbc:ID", NS)
+                        if ie is not None and ie.attrib.get("schemeID") == "VKN":
+                            sup_vkn = (ie.text or "").strip()
 
-            cus  = root.find("cac:AccountingCustomerParty/cac:Party", NS)
-            pnc  = cus.find("cac:PartyName", NS) if cus else None
-            cus_unvan = tx(pnc, "Name") if pnc else ""
-            cus_vkn = ""
-            if cus:
-                for pid in cus.findall("cac:PartyIdentification", NS):
-                    ie = pid.find("cbc:ID", NS)
-                    if ie is not None and ie.attrib.get("schemeID") == "VKN":
-                        cus_vkn = (ie.text or "").strip()
+                cus  = root.find("cac:AccountingCustomerParty/cac:Party", NS)
+                pnc  = cus.find("cac:PartyName", NS) if cus else None
+                cus_unvan = tx(pnc, "Name") if pnc else ""
+                cus_vkn = ""
+                if cus:
+                    for pid in cus.findall("cac:PartyIdentification", NS):
+                        ie = pid.find("cbc:ID", NS)
+                        if ie is not None and ie.attrib.get("schemeID") == "VKN":
+                            cus_vkn = (ie.text or "").strip()
 
-            lmt     = root.find("cac:LegalMonetaryTotal", NS)
-            payable = tx(lmt, "PayableAmount")
+                lmt     = root.find("cac:LegalMonetaryTotal", NS)
+                payable = tx(lmt, "PayableAmount")
 
-            def fn(v):
-                try:    return f"{float(v):,.2f} TL"
-                except: return v or "-"
+                def fn(v):
+                    try:    return f"{float(v):,.2f} TL"
+                    except: return v or "-"
 
-            rows_html = ""
-            for i, line in enumerate(root.findall("cac:InvoiceLine", NS)):
-                item  = line.find("cac:Item", NS)
-                urun  = tx(item, "Name") if item else "-"
-                qty   = tx(line, "InvoicedQuantity")
-                price = line.find("cac:Price", NS)
-                bp    = tx(price, "PriceAmount") if price else ""
-                le    = tx(line, "LineExtensionAmount")
-                bg    = "#ffffff" if i % 2 == 0 else "#f8faff"
-                rows_html += (
-                    f"<tr style=\'background:{bg}\'>"
-                    f"<td style=\'padding:8px\'>{urun}</td>"
-                    f"<td style=\'padding:8px;text-align:center\'>{qty}</td>"
-                    f"<td style=\'padding:8px;text-align:right\'>{fn(bp)}</td>"
-                    f"<td style=\'padding:8px;text-align:right;font-weight:bold\'>{fn(le)}</td>"
-                    f"</tr>"
-                )
+                rows_html = ""
+                for i, line in enumerate(root.findall("cac:InvoiceLine", NS)):
+                    item  = line.find("cac:Item", NS)
+                    urun  = tx(item, "Name") if item else "-"
+                    qty   = tx(line, "InvoicedQuantity")
+                    price = line.find("cac:Price", NS)
+                    bp    = tx(price, "PriceAmount") if price else ""
+                    le    = tx(line, "LineExtensionAmount")
+                    bg    = "#ffffff" if i % 2 == 0 else "#f8faff"
+                    rows_html += (
+                        f"<tr style=\'background:{bg}\'>"
+                        f"<td style=\'padding:8px\'>{urun}</td>"
+                        f"<td style=\'padding:8px;text-align:center\'>{qty}</td>"
+                        f"<td style=\'padding:8px;text-align:right\'>{fn(bp)}</td>"
+                        f"<td style=\'padding:8px;text-align:right;font-weight:bold\'>{fn(le)}</td>"
+                        f"</tr>"
+                    )
 
-            html_str = f"""<!DOCTYPE html>
+                html_str = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
 body{{font-family:Arial,sans-serif;font-size:13px;color:#1f2937;background:#f0f4ff;margin:0;padding:20px}}
 .wrap{{max-width:900px;margin:0 auto}}
@@ -445,10 +457,21 @@ th{{background:#1e3a8a;color:white;padding:8px;text-align:left;font-size:11px}}
 {rows_html}</table>
 <div class="total">Ödenecek: {fn(payable)}</div>
 </div></div></body></html>"""
-            html_bytes = html_str.encode("utf-8")
+                html_bytes = html_str.encode("utf-8")
+            except Exception as fallback_exc:
+                QMessageBox.critical(
+                    self, 
+                    "Hata", 
+                    f"Fatura XML içeriği dönüştürülemedi ve ayrıştırılamadı:\n"
+                    f"1. XSLT Hatası: (Bkz. Konsol)\n"
+                    f"2. Ayrıştırma Hatası: {fallback_exc}"
+                )
+                return
 
-        # ── 5. Geçici dizine yaz (yerel dosya sistemi üzerinden aç) ─────────
-        tmp_dir  = tempfile.mkdtemp(prefix="efatura_preview_")
+        # ── 5. Geçici dizine yaz (yerel dosya sistemi üzerinden aç - Workspace İçi) ─
+        workspace_tmp = os.path.expanduser("~/NakitAkim/data/tmp")
+        os.makedirs(workspace_tmp, exist_ok=True)
+        tmp_dir = tempfile.mkdtemp(prefix="efatura_preview_", dir=workspace_tmp)
         html_file = os.path.join(tmp_dir, "fatura.html")
         with open(html_file, "wb") as fh:
             fh.write(html_bytes)
