@@ -233,6 +233,19 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
+    ("webadmin_sirket_config", """
+        CREATE TABLE IF NOT EXISTS webadmin_sirket_config (
+            id           SERIAL PRIMARY KEY,
+            userid       INTEGER NOT NULL UNIQUE,
+            firmaadi     TEXT    NOT NULL DEFAULT '',
+            webadmin_url TEXT    NOT NULL DEFAULT 'http://localhost:5050',
+            api_key      TEXT    NOT NULL DEFAULT '',
+            aktif        BOOLEAN NOT NULL DEFAULT TRUE,
+            kayit_tarihi TEXT    DEFAULT NOW()::TEXT,
+            guncelleme_tarihi TEXT DEFAULT NOW()::TEXT
+        )
+    """),
+
     ("vomsisbilgileri", """
         CREATE TABLE IF NOT EXISTS vomsisbilgileri (
             id       SERIAL PRIMARY KEY,

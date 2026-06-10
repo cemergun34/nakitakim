@@ -1,6 +1,7 @@
 """
 Giriş ekranı — PHP index.php / login formunun PyQt6 karşılığı.
 """
+from __future__ import annotations
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFrame

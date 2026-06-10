@@ -2,6 +2,7 @@
 Dashboard servis katmanı — PHP admin_panel.php mantığının Python karşılığı.
 SQLite ve PostgreSQL uyumludur (db.db_compat yardımcıları kullanılır).
 """
+from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 from db.database import get_connection

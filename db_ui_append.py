@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  VERİTABANI AYARLARI — SweetAlert tasarımı, batch migration, local/PG mod  ║

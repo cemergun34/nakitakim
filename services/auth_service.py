@@ -1,6 +1,7 @@
 """
 Kimlik doğrulama servisi — uyelik tablosundan (PHP giris.php mantığı).
 """
+from __future__ import annotations
 from db.database import get_connection
 
 

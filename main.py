@@ -3,6 +3,17 @@ IQ Finans — Nakit Akış Masaüstü Uygulaması
 Giriş noktası.
 """
 import sys
+import warnings
+
+# macOS LibreSSL / urllib3 uyumsuzluk uyarısını bastır (sadece uyarı, hata değil)
+warnings.filterwarnings("ignore", message=".*LibreSSL.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*NotOpenSSLWarning.*")
+try:
+    from urllib3.exceptions import NotOpenSSLWarning
+    warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
+except ImportError:
+    pass
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -146,6 +157,42 @@ def main():
         win.show()
         app.setQuitOnLastWindowClosed(True)
         login_screen.hide()
+
+        # ── Otomatik webadmin Sync ────────────────────────────────────────────
+        # Login sonrası, DB'de webadmin yapılandırması varsa otomatik çek.
+        # Kullanıcı hiçbir butona basmak zorunda kalmaz.
+        def _auto_webadmin_sync():
+            userid = user.get("id") or user.get("userid")
+            if not userid:
+                return
+            try:
+                from services.webadmin_client import get_webadmin_config
+                cfg = get_webadmin_config(userid)
+                if not cfg.get("enabled"):
+                    return   # Bu kullanıcı için webadmin tanımlı değil
+
+                from datetime import datetime, timedelta
+                from ui.screens.ayarlar_screen import WebAdminSyncDialog
+                start_str = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                end_str   = datetime.now().strftime("%Y-%m-%d")
+
+                dlg = WebAdminSyncDialog(
+                    userid=userid,
+                    start_str=start_str,
+                    end_str=end_str,
+                    parent=win,
+                )
+                dlg.setWindowTitle(
+                    f"🌐  Hoş geldiniz! Verileriniz güncelleniyor…"
+                    f"  ({cfg.get('firmaadi') or 'webadmin'})"
+                )
+                dlg.exec()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Otomatik webadmin sync hatası: %s", e)
+
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(800, _auto_webadmin_sync)   # pencere tamamen açıldıktan sonra
 
     login_screen.login_success.connect(_on_login)
     sys.exit(app.exec())

@@ -2,10 +2,22 @@
 Yıllık Gelir-Gider Karşılaştırma Grafiği.
 Custom QPainter ile çizilmiş, premium ve yüksek performanslı bar grafiği.
 """
+import sys
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QPainter, QColor, QFont, QBrush, QPen, QLinearGradient
 from utils.format import fmt_para
+
+# ── Platform'a göre mevcut sans-serif font ────────────────────────────────────
+def _sf(size: int, weight=QFont.Weight.Normal) -> QFont:
+    """Inter yerine platformda kesinlikle var olan bir font döner."""
+    if sys.platform == "darwin":
+        name = ".AppleSystemUIFont"   # macOS sistem fontu
+    elif sys.platform == "win32":
+        name = "Segoe UI"
+    else:
+        name = "Ubuntu"
+    return QFont(name, size, weight)
 
 
 class GelirGiderChart(QWidget):
@@ -67,14 +79,14 @@ class GelirGiderChart(QWidget):
 
         if not self._data:
             p.setPen(QColor("#6B7280"))
-            p.setFont(QFont("Inter", 11, QFont.Weight.Medium))
+            p.setFont(_sf(11, QFont.Weight.Medium))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Grafik verisi yükleniyor...")
             p.end()
             return
 
         # ── Grid Lines and Y-Axis Labels ──────────────────────────────────────
         steps = 4
-        p.setFont(QFont("Inter", 8))
+        p.setFont(_sf(8))
         grid_pen = QPen(QColor("#E5E7EB"), 1, Qt.PenStyle.DashLine)
         
         for i in range(steps + 1):
@@ -90,7 +102,7 @@ class GelirGiderChart(QWidget):
             p.drawText(QRectF(5, y - 8, pad_left - 12, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, fmt_para(val))
 
         # ── Legend ────────────────────────────────────────────────────────────
-        p.setFont(QFont("Inter", 9, QFont.Weight.Bold))
+        p.setFont(_sf(9, QFont.Weight.Bold))
         # Gelir Indicator
         p.setBrush(QColor("#10B981"))
         p.drawRoundedRect(pad_left, 15, 12, 12, 3, 3)
@@ -142,7 +154,7 @@ class GelirGiderChart(QWidget):
                 p.drawRoundedRect(QRectF(col_x + bar_w + bar_gap, y_base - h_gider, bar_w, h_gider), 3, 3)
             
             # Draw X Month Label
-            p.setFont(QFont("Inter", 8, QFont.Weight.Medium))
+            p.setFont(_sf(8, QFont.Weight.Medium))
             p.setPen(QColor("#4B5563"))
             p.drawText(QRectF(col_x, y_base + 6, col_w, 20), Qt.AlignmentFlag.AlignCenter, self.MONTHS[i])
             

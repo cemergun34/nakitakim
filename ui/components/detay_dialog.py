@@ -4,6 +4,7 @@ KPI Detay Diyaloğu — kartlara tıklandığında açılır.
   1. Şube / kategori bazlı özet kartları
   2. Seçilen şube / kategorinin işlem listesi (tablo)
 """
+from __future__ import annotations
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QWidget, QFrame, QGridLayout, QTableWidget,

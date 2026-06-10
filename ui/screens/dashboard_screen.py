@@ -2,6 +2,7 @@
 Dashboard ekranı — PHP admin_panel.php / admin.php'nin PyQt6 karşılığı.
 12 KPI kartı + Yıllık Gelir-Gider grafik.
 """
+from __future__ import annotations
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,

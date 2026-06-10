@@ -4,6 +4,7 @@ PHP ayarlar.php → Eklentiler tab → E-Fatura Çek + VOMSİS API bölümlerini
 """
 from __future__ import annotations
 import os
+from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QFileDialog, QFrame, QScrollArea,
@@ -1612,6 +1613,18 @@ class VomsisCard(QFrame):
         self._isle_btn.clicked.connect(self._on_isle)
         btn_row.addWidget(self._isle_btn)
 
+        # ── webadmin REST API üzerinden Çek ──────────────────────────────────
+        self._webadmin_btn = QPushButton("🌐  webadmin Çek")
+        self._webadmin_btn.setFixedHeight(38)
+        self._webadmin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._webadmin_btn.setStyleSheet(self._btn_style("#7c3aed"))
+        self._webadmin_btn.setToolTip(
+            "webadmin-nakitAkim REST API üzerinden Womsis verilerini çeker.\n"
+            "webadmin sunucusu http://localhost:5050 adresinde çalışıyor olmalı."
+        )
+        self._webadmin_btn.clicked.connect(self._on_webadmin_cek)
+        btn_row.addWidget(self._webadmin_btn)
+
         btn_row.addStretch()
         root.addLayout(btn_row)
 
@@ -1697,20 +1710,18 @@ class VomsisCard(QFrame):
             self._show_status("⚠️  Başlangıç tarihi bitiş tarihinden büyük olamaz.", "#92400e")
             return
 
-        dlg = QMessageBox(self)
-        dlg.setWindowTitle("VOMSİS İşle")
-        dlg.setIcon(QMessageBox.Icon.Question)
-        dlg.setText(
-            f"{start_qd.toString('dd.MM.yyyy')} — {end_qd.toString('dd.MM.yyyy')} "
-            f"aralığındaki banka hareketleri aktarılacak.<br><br>"
-            "Devam etmek istiyor musunuz?"
+        onay = SweetConfirmDialog.confirm(
+            self,
+            title="VOMSİS İşle",
+            text=(
+                f"{start_qd.toString('dd.MM.yyyy')} — {end_qd.toString('dd.MM.yyyy')} "
+                f"aralığındaki banka hareketleri aktarılacak.\n"
+                "Devam etmek istiyor musunuz?"
+            ),
+            confirm_text="⚡  İşle",
+            cancel_text="Vazgeç",
         )
-        dlg.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
-        )
-        dlg.button(QMessageBox.StandardButton.Yes).setText("⚡  İşle")
-        dlg.button(QMessageBox.StandardButton.Cancel).setText("Vazgeç")
-        if dlg.exec() != QMessageBox.StandardButton.Yes:
+        if not onay:
             return
 
         self._set_busy(True, "⚡  VOMSİS banka hareketleri alınıyor...")
@@ -1730,6 +1741,40 @@ class VomsisCard(QFrame):
             self._show_status(f"✅  {r['message']}", "#059669")
         else:
             self._show_status(f"❌  {r['message']}", "#dc2626")
+
+    # ── webadmin REST API üzerinden Çek ─────────────────────────────────────
+
+    def _on_webadmin_cek(self):
+        """
+        webadmin-nakitAkim REST API'yi tetikler — progress dialog ile.
+        """
+        start_qd = self._start_date.date()
+        end_qd   = self._end_date.date()
+
+        if start_qd > end_qd:
+            self._show_status("⚠️  Başlangıç tarihi bitiş tarihinden büyük olamaz.", "#92400e")
+            return
+
+        start_str = f"{start_qd.year():04d}-{start_qd.month():02d}-{start_qd.day():02d}"
+        end_str   = f"{end_qd.year():04d}-{end_qd.month():02d}-{end_qd.day():02d}"
+
+        dlg = WebAdminSyncDialog(
+            userid=self._userid,
+            start_str=start_str,
+            end_str=end_str,
+            parent=self,
+        )
+        dlg.exec()
+
+        # Dialog kapandıktan sonra kart statusını güncelle
+        self._show_status(
+            "🌐  webadmin işlemi tamamlandı. Sonuçlar dialog'da gösterildi.",
+            "#6366f1"
+        )
+
+    def _on_webadmin_done(self, r: dict):
+        # Artık kullanılmıyor — WebAdminSyncDialog içinde hallediliyor
+        pass
 
     # ── Manuel Toplu İşle ───────────────────────────────────────────────────
 
@@ -1756,6 +1801,7 @@ class VomsisCard(QFrame):
         self._kontrol_btn.setEnabled(not busy)
         self._kaydet_btn.setEnabled(not busy)
         self._isle_btn.setEnabled(not busy)
+        self._webadmin_btn.setEnabled(not busy)
         if busy and msg:
             self._show_status(msg, "#6366f1")
 
@@ -4653,6 +4699,765 @@ def _mk_lbl(text, style=""):
     if style:
         l.setStyleSheet(style)
     return l
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── webadmin Bağlantı Ayar Kartı ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WebAdminConfigCard(QFrame):
+    """
+    webadmin sunucusuna bağlantı, SSH tünel ve HTTPS ayarlarını yönetir.
+    Ayarlar → Eklentiler → VOMSİS API kartının altında görünür.
+    """
+
+    def __init__(self, userid: int, parent=None):
+        super().__init__(parent)
+        self._userid = userid
+        self.setStyleSheet(
+            "QFrame{background:white;border:1.5px solid #ddd6fe;"
+            "border-radius:14px;}"
+        )
+        self._build()
+        self._load()
+
+    # ── Stil yardımcıları ─────────────────────────────────────────────────────
+
+    def _inp(self) -> str:
+        return (
+            "QLineEdit{background:#f8fafc;border:1.5px solid #e2e8f0;"
+            "border-radius:8px;padding:0 10px;font-size:13px;color:#1f2937;}"
+            "QLineEdit:focus{border-color:#7c3aed;}"
+        )
+
+    def _lbl(self) -> str:
+        return "font-size:12px;font-weight:600;color:#374151;"
+
+    def _btn(self, color: str) -> str:
+        c2 = {"#7c3aed": "#6d28d9", "#059669": "#047857",
+               "#dc2626": "#b91c1c", "#0891b2": "#0e7490"}.get(color, color)
+        return (
+            f"QPushButton{{background:{color};color:white;border:none;"
+            f"border-radius:8px;font-size:12px;font-weight:700;"
+            f"padding:0 14px;}}"
+            f"QPushButton:hover{{background:{c2};}}"
+            f"QPushButton:disabled{{background:#e2e8f0;color:#94a3b8;}}"
+        )
+
+    # ── UI İnşa ───────────────────────────────────────────────────────────────
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 18)
+        root.setSpacing(14)
+
+        # ── Başlık ──
+        hdr = QHBoxLayout()
+        ic = QLabel("🔌")
+        ic.setStyleSheet("font-size:20px;")
+        hdr.addWidget(ic)
+        ttl = QLabel("webadmin Bağlantı Ayarları")
+        ttl.setStyleSheet("font-size:14px;font-weight:700;color:#1e293b;")
+        hdr.addWidget(ttl)
+        hdr.addStretch()
+        # Durum badge
+        self._status_badge = QLabel("⚪ Bağlı değil")
+        self._status_badge.setStyleSheet(
+            "font-size:11px;font-weight:600;color:#64748b;"
+            "background:#f1f5f9;border-radius:10px;padding:2px 8px;"
+        )
+        hdr.addWidget(self._status_badge)
+        root.addLayout(hdr)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#ede9fe;")
+        root.addWidget(sep)
+
+        # ── Temel Bağlantı ──
+        grp1_lbl = QLabel("🌐  Sunucu Bağlantısı")
+        grp1_lbl.setStyleSheet("font-size:12px;font-weight:700;color:#7c3aed;")
+        root.addWidget(grp1_lbl)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(10)
+
+        col_url = QVBoxLayout()
+        col_url.addWidget(self._mk_lbl("Sunucu URL"))
+        self._url_inp = QLineEdit()
+        self._url_inp.setFixedHeight(34)
+        self._url_inp.setPlaceholderText("http://localhost:5050")
+        self._url_inp.setStyleSheet(self._inp())
+        col_url.addWidget(self._url_inp)
+        row1.addLayout(col_url, 3)
+
+        col_key = QVBoxLayout()
+        col_key.addWidget(self._mk_lbl("API Key"))
+        self._key_inp = QLineEdit()
+        self._key_inp.setFixedHeight(34)
+        self._key_inp.setEchoMode(QLineEdit.EchoMode.Password)
+        self._key_inp.setPlaceholderText("••••••••••••")
+        self._key_inp.setStyleSheet(self._inp())
+        col_key.addWidget(self._key_inp)
+        row1.addLayout(col_key, 2)
+
+        root.addLayout(row1)
+
+        # ── SSH Tünel Bölümü (toggle) ──
+        self._ssh_toggle = QPushButton("🔐  SSH Tünel  ▸")
+        self._ssh_toggle.setCheckable(True)
+        self._ssh_toggle.setStyleSheet(
+            "QPushButton{background:#f5f3ff;color:#7c3aed;border:1px solid #ddd6fe;"
+            "border-radius:8px;font-size:12px;font-weight:700;padding:6px 12px;"
+            "text-align:left;}"
+            "QPushButton:checked{background:#ede9fe;}"
+            "QPushButton:hover{background:#ede9fe;}"
+        )
+        self._ssh_toggle.clicked.connect(self._toggle_ssh)
+        root.addWidget(self._ssh_toggle)
+
+        self._ssh_frame = QFrame()
+        self._ssh_frame.setStyleSheet(
+            "QFrame{background:#faf5ff;border:1px solid #ddd6fe;"
+            "border-radius:10px;}"
+        )
+        ssh_lay = QVBoxLayout(self._ssh_frame)
+        ssh_lay.setContentsMargins(14, 12, 14, 12)
+        ssh_lay.setSpacing(10)
+
+        ssh_info = QLabel(
+            "💡  SSH Tünel: webadmin sunucusu uzak makinedeyse, "
+            "SSH üzerinden güvenli bağlantı kurulur."
+        )
+        ssh_info.setWordWrap(True)
+        ssh_info.setStyleSheet("font-size:11px;color:#6d28d9;")
+        ssh_lay.addWidget(ssh_info)
+
+        ssh_row1 = QHBoxLayout()
+        ssh_row1.setSpacing(8)
+
+        c_host = QVBoxLayout()
+        c_host.addWidget(self._mk_lbl("SSH Host / IP"))
+        self._ssh_host = QLineEdit()
+        self._ssh_host.setFixedHeight(32)
+        self._ssh_host.setPlaceholderText("212.xxx.xxx.xxx")
+        self._ssh_host.setStyleSheet(self._inp())
+        c_host.addWidget(self._ssh_host)
+        ssh_row1.addLayout(c_host, 3)
+
+        c_port = QVBoxLayout()
+        c_port.addWidget(self._mk_lbl("SSH Port"))
+        self._ssh_port = QLineEdit("22")
+        self._ssh_port.setFixedHeight(32)
+        self._ssh_port.setFixedWidth(70)
+        self._ssh_port.setStyleSheet(self._inp())
+        c_port.addWidget(self._ssh_port)
+        ssh_row1.addLayout(c_port)
+
+        c_user = QVBoxLayout()
+        c_user.addWidget(self._mk_lbl("Kullanıcı Adı"))
+        self._ssh_user = QLineEdit()
+        self._ssh_user.setFixedHeight(32)
+        self._ssh_user.setPlaceholderText("ubuntu")
+        self._ssh_user.setStyleSheet(self._inp())
+        c_user.addWidget(self._ssh_user)
+        ssh_row1.addLayout(c_user, 2)
+
+        ssh_lay.addLayout(ssh_row1)
+
+        c_key = QVBoxLayout()
+        c_key.addWidget(self._mk_lbl("SSH Private Key Dosyası (.pem / id_rsa)"))
+        key_row = QHBoxLayout()
+        key_row.setSpacing(6)
+        self._ssh_key_path = QLineEdit()
+        self._ssh_key_path.setFixedHeight(32)
+        self._ssh_key_path.setPlaceholderText("~/.ssh/id_rsa")
+        self._ssh_key_path.setStyleSheet(self._inp())
+        key_row.addWidget(self._ssh_key_path)
+        btn_browse = QPushButton("📂")
+        btn_browse.setFixedSize(32, 32)
+        btn_browse.setStyleSheet(
+            "QPushButton{background:#ede9fe;border:1px solid #ddd6fe;"
+            "border-radius:6px;font-size:14px;}"
+            "QPushButton:hover{background:#ddd6fe;}"
+        )
+        btn_browse.clicked.connect(self._browse_key)
+        key_row.addWidget(btn_browse)
+        c_key.addLayout(key_row)
+        ssh_lay.addLayout(c_key)
+
+        self._ssh_frame.hide()
+        root.addWidget(self._ssh_frame)
+
+        # ── HTTPS Sertifika ──
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color:#ede9fe;")
+        root.addWidget(sep2)
+
+        https_lbl = QLabel("🔒  HTTPS / SSL Sertifikası")
+        https_lbl.setStyleSheet("font-size:12px;font-weight:700;color:#7c3aed;")
+        root.addWidget(https_lbl)
+
+        https_info = QLabel(
+            "webadmin sunucusu için self-signed SSL sertifikası oluşturur. "
+            "Sertifika webadmin klasörüne (cert.pem + key.pem) kaydedilir ve "
+            "sunucu HTTPS üzerinden çalışmaya başlar."
+        )
+        https_info.setWordWrap(True)
+        https_info.setStyleSheet("font-size:11px;color:#64748b;")
+        root.addWidget(https_info)
+
+        self._cert_status = QLabel("📋  Sertifika: Yok")
+        self._cert_status.setStyleSheet(
+            "font-size:11px;color:#64748b;background:#f8fafc;"
+            "border-radius:6px;padding:4px 8px;"
+        )
+        root.addWidget(self._cert_status)
+
+        https_row = QHBoxLayout()
+        https_row.setSpacing(8)
+        self._btn_gen_cert = QPushButton("🔒  HTTPS Sertifikası Oluştur")
+        self._btn_gen_cert.setFixedHeight(36)
+        self._btn_gen_cert.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_gen_cert.setStyleSheet(self._btn("#059669"))
+        self._btn_gen_cert.clicked.connect(self._gen_cert)
+        https_row.addWidget(self._btn_gen_cert)
+
+        self._btn_check_cert = QPushButton("🔍  Sertifika Kontrol")
+        self._btn_check_cert.setFixedHeight(36)
+        self._btn_check_cert.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_check_cert.setStyleSheet(self._btn("#0891b2"))
+        self._btn_check_cert.clicked.connect(self._check_cert)
+        https_row.addWidget(self._btn_check_cert)
+        https_row.addStretch()
+        root.addLayout(https_row)
+
+        # ── Alt Butonlar ──
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet("color:#ede9fe;")
+        root.addWidget(sep3)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setWordWrap(True)
+        self._status_lbl.setStyleSheet(
+            "font-size:12px;color:#374151;background:#f8fafc;"
+            "border-radius:6px;padding:6px 10px;border:none;"
+        )
+        self._status_lbl.hide()
+        root.addWidget(self._status_lbl)
+
+        foot = QHBoxLayout()
+        foot.setSpacing(8)
+
+        self._btn_test = QPushButton("📡  Bağlantı Test Et")
+        self._btn_test.setFixedHeight(36)
+        self._btn_test.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_test.setStyleSheet(self._btn("#0891b2"))
+        self._btn_test.clicked.connect(self._test_connection)
+        foot.addWidget(self._btn_test)
+
+        self._btn_save = QPushButton("💾  Kaydet")
+        self._btn_save.setFixedHeight(36)
+        self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_save.setStyleSheet(self._btn("#7c3aed"))
+        self._btn_save.clicked.connect(self._save)
+        foot.addWidget(self._btn_save)
+
+        foot.addStretch()
+        root.addLayout(foot)
+
+    # ── Yardımcılar ───────────────────────────────────────────────────────────
+
+    def _mk_lbl(self, text: str) -> QLabel:
+        l = QLabel(text)
+        l.setStyleSheet(self._lbl())
+        return l
+
+    def _toggle_ssh(self, checked: bool):
+        self._ssh_frame.setVisible(checked)
+        arrow = "▾" if checked else "▸"
+        self._ssh_toggle.setText(f"🔐  SSH Tünel  {arrow}")
+
+    def _browse_key(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "SSH Private Key Seç", str(Path.home() / ".ssh"),
+            "Key Dosyaları (*.pem *.key id_rsa);;Tüm Dosyalar (*)"
+        )
+        if path:
+            self._ssh_key_path.setText(path)
+
+    def _show_status(self, msg: str, color: str = "#374151"):
+        self._status_lbl.setStyleSheet(
+            f"font-size:12px;color:{color};background:#f8fafc;"
+            "border-radius:6px;padding:6px 10px;border:none;"
+        )
+        self._status_lbl.setText(msg)
+        self._status_lbl.show()
+
+    # ── Veri Yükleme ─────────────────────────────────────────────────────────
+
+    def _load(self):
+        import json
+        cfg_path = Path.home() / "NakitAkim" / "data" / "webadmin_config.json"
+        if not cfg_path.exists():
+            return
+        try:
+            cfg = json.loads(cfg_path.read_text())
+            self._url_inp.setText(cfg.get("base_url", ""))
+            self._key_inp.setText(cfg.get("api_key", ""))
+            # SSH
+            ssh = cfg.get("ssh", {})
+            if ssh:
+                self._ssh_host.setText(ssh.get("host", ""))
+                self._ssh_port.setText(str(ssh.get("port", 22)))
+                self._ssh_user.setText(ssh.get("username", ""))
+                self._ssh_key_path.setText(ssh.get("key_path", ""))
+                if ssh.get("enabled"):
+                    self._ssh_toggle.setChecked(True)
+                    self._toggle_ssh(True)
+        except Exception:
+            pass
+        self._check_cert()
+
+    # ── Kaydetme ─────────────────────────────────────────────────────────────
+
+    def _save(self):
+        import json
+        url = self._url_inp.text().strip().rstrip("/")
+        key = self._key_inp.text().strip()
+
+        if not url:
+            self._show_status("⚠️  Sunucu URL boş olamaz.", "#92400e")
+            return
+
+        cfg = {
+            "base_url": url,
+            "api_key":  key,
+            "timeout":  60,
+            "enabled":  True,
+        }
+
+        if self._ssh_toggle.isChecked():
+            cfg["ssh"] = {
+                "enabled":  True,
+                "host":     self._ssh_host.text().strip(),
+                "port":     int(self._ssh_port.text().strip() or "22"),
+                "username": self._ssh_user.text().strip(),
+                "key_path": self._ssh_key_path.text().strip(),
+                "remote_bind_port": 5050,
+                "local_bind_port":  5051,
+            }
+        else:
+            cfg["ssh"] = {"enabled": False}
+
+        cfg_path = Path.home() / "NakitAkim" / "data" / "webadmin_config.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+        self._show_status("✅  Ayarlar kaydedildi.", "#059669")
+
+    # ── Bağlantı Testi ───────────────────────────────────────────────────────
+
+    def _test_connection(self):
+        self._btn_test.setEnabled(False)
+        self._show_status("📡  Test ediliyor...", "#6366f1")
+
+        url = self._url_inp.text().strip().rstrip("/") or "http://localhost:5050"
+        key = self._key_inp.text().strip()
+
+        import threading
+        def _do_test():
+            try:
+                import requests
+                resp = requests.get(f"{url}/", timeout=5)
+                ok = resp.status_code in (200, 302, 404)
+            except Exception as e:
+                ok = False
+
+            # UI thread'e gönder
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(
+                self, "_on_test_result",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(bool, ok),
+                Q_ARG(str, url),
+            )
+
+        threading.Thread(target=_do_test, daemon=True).start()
+
+    from PyQt6.QtCore import pyqtSlot
+
+    @pyqtSlot(bool, str)
+    def _on_test_result(self, ok: bool, url: str):
+        self._btn_test.setEnabled(True)
+        if ok:
+            self._show_status(f"✅  {url} adresine bağlantı başarılı!", "#059669")
+            self._status_badge.setText("🟢 Bağlı")
+            self._status_badge.setStyleSheet(
+                "font-size:11px;font-weight:600;color:#059669;"
+                "background:#f0fdf4;border-radius:10px;padding:2px 8px;"
+            )
+        else:
+            self._show_status(
+                f"❌  {url} adresine ulaşılamadı. "
+                "webadmin sunucusunun çalıştığından emin olun.", "#dc2626"
+            )
+            self._status_badge.setText("🔴 Bağlı değil")
+            self._status_badge.setStyleSheet(
+                "font-size:11px;font-weight:600;color:#dc2626;"
+                "background:#fef2f2;border-radius:10px;padding:2px 8px;"
+            )
+
+    # ── HTTPS Sertifika Oluştur ───────────────────────────────────────────────
+
+    def _gen_cert(self):
+        confirm = SweetConfirmDialog.confirm(
+            self,
+            title="HTTPS Sertifikası Oluştur",
+            text=(
+                "webadmin klasörüne self-signed SSL sertifikası (cert.pem + key.pem) "
+                "oluşturulacak.\n\n"
+                "Bu işlem openssl komutunu kullanır. Devam edilsin mi?"
+            ),
+            confirm_text="🔒  Oluştur",
+            cancel_text="İptal",
+        )
+        if not confirm:
+            return
+
+        self._btn_gen_cert.setEnabled(False)
+        self._show_status("🔒  Sertifika oluşturuluyor...", "#059669")
+
+        import subprocess, threading
+
+        webadmin_dir = Path.home() / "webadmin-nakitAkim"
+        cert_path = webadmin_dir / "cert.pem"
+        key_path  = webadmin_dir / "key.pem"
+
+        def _run():
+            try:
+                result = subprocess.run([
+                    "openssl", "req", "-x509",
+                    "-newkey", "rsa:4096",
+                    "-keyout", str(key_path),
+                    "-out",    str(cert_path),
+                    "-days",   "365",
+                    "-nodes",
+                    "-subj",   "/C=TR/ST=Istanbul/L=Istanbul/O=webadmin-nakitAkim/CN=localhost"
+                ], capture_output=True, text=True, timeout=60)
+
+                success = cert_path.exists() and key_path.exists()
+                msg = "✅  Sertifika oluşturuldu." if success else f"❌  Hata: {result.stderr[:200]}"
+            except FileNotFoundError:
+                success = False
+                msg = "❌  openssl komutu bulunamadı. Lütfen openssl yükleyin: brew install openssl"
+            except Exception as e:
+                success = False
+                msg = f"❌  Hata: {e}"
+
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(
+                self, "_on_cert_done",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(bool, success),
+                Q_ARG(str, msg),
+            )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    @pyqtSlot(bool, str)
+    def _on_cert_done(self, success: bool, msg: str):
+        self._btn_gen_cert.setEnabled(True)
+        self._show_status(msg, "#059669" if success else "#dc2626")
+        if success:
+            self._check_cert()
+            # Config'e HTTPS URL öner
+            cur_url = self._url_inp.text().strip()
+            if cur_url.startswith("http://"):
+                https_url = cur_url.replace("http://", "https://")
+                self._url_inp.setText(https_url)
+                self._show_status(
+                    f"✅  Sertifika oluşturuldu. URL otomatik HTTPS'e güncellendi: {https_url}\n"
+                    "💡  webadmin'i yeniden başlatın: python3 app.py",
+                    "#059669"
+                )
+
+    def _check_cert(self):
+        webadmin_dir = Path.home() / "webadmin-nakitAkim"
+        cert_path = webadmin_dir / "cert.pem"
+        key_path  = webadmin_dir / "key.pem"
+
+        if cert_path.exists() and key_path.exists():
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["openssl", "x509", "-in", str(cert_path),
+                     "-noout", "-enddate"],
+                    capture_output=True, text=True, timeout=5
+                )
+                expire_line = result.stdout.strip()
+                expire = expire_line.replace("notAfter=", "") if expire_line else "?"
+                self._cert_status.setText(f"🔐  Sertifika: Mevcut  |  Son geçerlilik: {expire}")
+                self._cert_status.setStyleSheet(
+                    "font-size:11px;color:#059669;background:#f0fdf4;"
+                    "border-radius:6px;padding:4px 8px;"
+                )
+            except Exception:
+                self._cert_status.setText("🔐  Sertifika: Mevcut (detay alınamadı)")
+        else:
+            self._cert_status.setText("📋  Sertifika: Yok — 'Oluştur' butonuna basın")
+            self._cert_status.setStyleSheet(
+                "font-size:11px;color:#64748b;background:#f8fafc;"
+                "border-radius:6px;padding:4px 8px;"
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── webadmin Womsis Çekme İlerleme Dialog'u ────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WebAdminSyncDialog(QDialog):
+    """
+    'webadmin Çek' butonu için tam ilerleme paneli.
+    Aşamaları:
+      1. Onay göster (tarih aralığı + başlat butonu)
+      2. Worker başlat — canlı log satırları + marquee progress bar
+      3. Sonuç özeti göster (toplam çekilen / eklenen / atlanan)
+    """
+
+    def __init__(self, userid: int, start_str: str, end_str: str, parent=None):
+        super().__init__(parent)
+        self._userid    = userid
+        self._start_str = start_str
+        self._end_str   = end_str
+        self._worker    = None
+        self._log_lines: list[str] = []
+
+        self.setWindowTitle("webadmin Üzerinden Çek")
+        self.setMinimumWidth(480)
+        self.setMinimumHeight(300)
+        self.setModal(True)
+        self.setStyleSheet(
+            "QDialog{background:#ffffff;border-radius:12px;}"
+            "QLabel{font-family:'Segoe UI',Arial,sans-serif;background:transparent;}"
+        )
+        self._build()
+
+        # Dialog ekrana gelir gelmez otomatik olarak veri çekmeye başla
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(150, self._start)
+
+    # ── UI İnşa ────────────────────────────────────────────────────
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 22, 24, 22)
+        root.setSpacing(14)
+
+        # ── Başlık satırı ──
+        hdr = QHBoxLayout()
+        ic = QLabel("🌐")
+        ic.setStyleSheet("font-size:22px;")
+        hdr.addWidget(ic)
+        ttl = QLabel("webadmin üzerinden Womsis Çek")
+        ttl.setStyleSheet("font-size:15px;font-weight:700;color:#1e293b;")
+        hdr.addWidget(ttl)
+        hdr.addStretch()
+        root.addLayout(hdr)
+
+        # ── Tarih aralığı bilgi çipi ──
+        period_lbl = QLabel(
+            f"📅  {self._start_str}  —  {self._end_str} aralığı"
+        )
+        period_lbl.setStyleSheet(
+            "font-size:12px;color:#475569;background:#f1f5f9;"
+            "border-radius:6px;padding:7px 12px;"
+        )
+        root.addWidget(period_lbl)
+
+        # ── Log alanı ──
+        self._log_widget = QLabel("🌐  Bağlanılıyor...")
+        self._log_widget.setWordWrap(True)
+        self._log_widget.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._log_widget.setStyleSheet(
+            "font-size:12px;color:#374151;"
+            "background:#f8fafc;border:1px solid #e2e8f0;"
+            "border-radius:8px;padding:10px 12px;"
+            "line-height:1.6;"
+        )
+        self._log_widget.setMinimumHeight(110)
+        root.addWidget(self._log_widget)
+
+        # ── Progress bar (marquee) ──
+        self._pbar = QProgressBar()
+        self._pbar.setFixedHeight(6)
+        self._pbar.setTextVisible(False)
+        self._pbar.setRange(0, 0)   # marquee / belirsiz mod
+        self._pbar.setStyleSheet(
+            "QProgressBar{background:#e2e8f0;border-radius:3px;border:none;}"
+            "QProgressBar::chunk{background:#6366f1;border-radius:3px;}"
+        )
+        self._pbar.hide()
+        root.addWidget(self._pbar)
+
+        # ── Sonuç kartı (başlangıçta gizli) ──
+        self._result_frame = QFrame()
+        self._result_frame.setStyleSheet(
+            "QFrame{background:#f0fdf4;border:1px solid #86efac;"
+            "border-radius:8px;padding:2px;}"
+        )
+        result_lay = QHBoxLayout(self._result_frame)
+        result_lay.setContentsMargins(14, 10, 14, 10)
+        result_lay.setSpacing(18)
+
+        def _stat(label: str, val: str, color: str) -> QVBoxLayout:
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            v = QLabel(val)
+            v.setObjectName(f"stat_{label}")
+            v.setStyleSheet(
+                f"font-size:22px;font-weight:800;color:{color};"
+                "border:none;background:transparent;"
+            )
+            v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            l = QLabel(label)
+            l.setStyleSheet("font-size:10px;color:#64748b;border:none;background:transparent;")
+            l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(v)
+            col.addWidget(l)
+            return col
+
+        self._stat_cekilen  = QLabel("0")
+        self._stat_eklenen  = QLabel("0")
+        self._stat_atlanan  = QLabel("0")
+
+        def _stat_block(val_lbl: QLabel, label: str, color: str):
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            val_lbl.setStyleSheet(
+                f"font-size:22px;font-weight:800;color:{color};"
+                "border:none;background:transparent;"
+            )
+            val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl = QLabel(label)
+            lbl.setStyleSheet("font-size:10px;color:#64748b;border:none;background:transparent;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(val_lbl)
+            col.addWidget(lbl)
+            return col
+
+        result_lay.addLayout(_stat_block(self._stat_cekilen, "Çekilen", "#2563eb"))
+        result_lay.addLayout(_stat_block(self._stat_eklenen, "Eklenen", "#059669"))
+        result_lay.addLayout(_stat_block(self._stat_atlanan, "Atlanan", "#d97706"))
+        self._result_frame.hide()
+        root.addWidget(self._result_frame)
+
+        # ── Alt butonlar ──
+        foot = QHBoxLayout()
+        foot.setSpacing(10)
+
+        self._btn_start = QPushButton("🔄  Tekrar Dene")
+        self._btn_start.setFixedHeight(40)
+        self._btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_start.setStyleSheet(
+            "QPushButton{background:#6366f1;color:white;border:none;"
+            "border-radius:9px;font-size:13px;font-weight:700;padding:0 20px;}"
+            "QPushButton:hover{background:#4f46e5;}"
+            "QPushButton:disabled{background:#e2e8f0;color:#94a3b8;}"
+        )
+        self._btn_start.clicked.connect(self._start)
+        self._btn_start.hide()   # başlangıçta gizli — sadece sonra gösterilir
+        foot.addWidget(self._btn_start)
+
+        self._btn_close = QPushButton("Kapat")
+        self._btn_close.setFixedHeight(40)
+        self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_close.setStyleSheet(
+            "QPushButton{background:#f1f5f9;color:#475569;border:1.5px solid #e2e8f0;"
+            "border-radius:9px;font-size:13px;font-weight:600;padding:0 20px;}"
+            "QPushButton:hover{background:#e2e8f0;}"
+        )
+        self._btn_close.clicked.connect(self.accept)
+        foot.addWidget(self._btn_close)
+        root.addLayout(foot)
+
+    # ── İş Mantığı ────────────────────────────────────────────────
+
+    def _append_log(self, msg: str):
+        self._log_lines.append(msg)
+        # Son 6 satırı göster
+        self._log_widget.setText("\n".join(self._log_lines[-6:]))
+
+    def _start(self):
+        self._btn_start.hide()     # işlem başladığında butonu gizle
+        self._btn_close.setEnabled(False)
+        self._pbar.show()
+        self._result_frame.hide()
+        self._log_lines = []
+        self._append_log("🌐  webadmin sunucusuna bağlanılıyor...")
+
+        from services.webadmin_client import WebAdminSyncWorker
+        self._worker = WebAdminSyncWorker(
+            userid=self._userid,
+            start_date=self._start_str,
+            end_date=self._end_str,
+        )
+        self._worker.progress.connect(self._append_log)
+        self._worker.finished.connect(self._on_done)
+        self._worker.start()
+
+    def _on_done(self, r: dict):
+        self._pbar.hide()
+        self._btn_close.setEnabled(True)
+
+        if r.get("success"):
+            # ── Başarılı ──
+            inserted = r.get("inserted", 0)
+            skipped  = r.get("skipped",  0)
+            fetched  = r.get("count",    0)
+
+            self._append_log(f"✅  Tamamlandı! {inserted} yeni kayıt eklendi, {skipped} atlandı.")
+
+            # İstatistik kartları güncelle
+            self._stat_cekilen.setText(str(fetched))
+            self._stat_eklenen.setText(str(inserted))
+            self._stat_atlanan.setText(str(skipped))
+            self._result_frame.setStyleSheet(
+                "QFrame{background:#f0fdf4;border:1px solid #86efac;"
+                "border-radius:8px;padding:2px;}"
+            )
+            self._result_frame.show()
+
+            # Başarı butonu
+            self._btn_start.setText("✅  Tamamlandı")
+            self._btn_start.setStyleSheet(
+                "QPushButton{background:#059669;color:white;border:none;"
+                "border-radius:9px;font-size:13px;font-weight:700;padding:0 20px;}"
+            )
+            self._btn_start.setEnabled(False)   # sadece görselliği için
+            self._btn_start.show()
+
+        else:
+            # ── Hata ──
+            err = r.get("error") or r.get("message") or "Bilinmeyen hata"
+            self._append_log(f"❌  Hata: {err}")
+            self._result_frame.setStyleSheet(
+                "QFrame{background:#fef2f2;border:1px solid #fca5a5;"
+                "border-radius:8px;padding:2px;}"
+            )
+            self._stat_cekilen.setText("❌")
+            self._stat_eklenen.setText("0")
+            self._stat_atlanan.setText("0")
+            self._result_frame.show()
+
+            self._btn_start.setText("🔄  Tekrar Dene")
+            self._btn_start.setStyleSheet(
+                "QPushButton{background:#dc2626;color:white;border:none;"
+                "border-radius:9px;font-size:13px;font-weight:700;padding:0 20px;}"
+                "QPushButton:hover{background:#b91c1c;}"
+            )
 
 
 class SweetConfirmDialog(QDialog):
