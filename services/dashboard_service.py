@@ -372,6 +372,28 @@ def get_monthly_comparison(userid: int, musterino: int, yil: Optional[int] = Non
         conn.close()
 
 
+def get_bankalar_toplam(userid: int) -> dict:
+    """womsis_banka tablosundan gelir/gider/net toplamı döndürür."""
+    conn = get_connection()
+    try:
+        row = conn.execute("""
+            SELECT
+                COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gelir' THEN CAST(tutar AS REAL) ELSE 0 END), 0) AS gelir,
+                COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gider' THEN CAST(tutar AS REAL) ELSE 0 END), 0) AS gider,
+                COUNT(*) AS kayit
+            FROM womsis_banka
+            WHERE userid = ?
+        """, (userid,)).fetchone()
+        gelir = float(row["gelir"] or 0) if row else 0.0
+        gider = float(row["gider"] or 0) if row else 0.0
+        return {"gelir": gelir, "gider": gider, "net": gelir - gider,
+                "kayit": int(row["kayit"] or 0) if row else 0}
+    except Exception:
+        return {"gelir": 0.0, "gider": 0.0, "net": 0.0, "kayit": 0}
+    finally:
+        conn.close()
+
+
 def get_all_dashboard_data(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """Tüm dashboard KPI verilerini minimum sorgu sayısıyla döndürür.
 
@@ -395,6 +417,7 @@ def get_all_dashboard_data(userid: int, musterino: int, yil: Optional[int] = Non
         "kurum_odemeleri":get_kurum_odemeleri(userid, musterino, yil),
         "sanal_pos":      get_sanal_pos_toplam(userid, yil),
         "kredi_karti":    get_kredi_karti_toplam(userid, yil),
+        "bankalar":       get_bankalar_toplam(userid),
         "monthly_chart":  get_monthly_comparison(userid, musterino, yil),
     }
 

@@ -9,6 +9,13 @@ Fonksiyonlar:
     get_faturalar(userid, mod) → list[dict]
     get_alt_hesap_kodlari(userid) → list[dict]
     get_cari_hesaplar(userid) → list[dict]
+
+Mükerrer Kayıt Koruması (3 katman):
+    1. Uygulama katmanı — hash kontrolü (SELECT önceki kayıt)
+    2. Uygulama katmanı — faturano + userid + mod kombinasyon kontrolü
+    3. Veritabanı katmanı — UNIQUE INDEX (hash, userid) ve
+       UNIQUE INDEX (faturano, userid, gelirgidermod) ihlali yakalanırsa
+       "skipped" olarak döner (race condition koruması)
 """
 
 from __future__ import annotations
@@ -24,6 +31,29 @@ from db.efatura_parser import parse_invoice_xml
 # Yüklenen XML dosyaları için kalıcı klasör
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "faturalar")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def _is_unique_violation(exc: Exception) -> bool:
+    """
+    PostgreSQL veya SQLite unique constraint ihlali mi kontrol eder.
+    psycopg2: pgcode 23505 (unique_violation)
+    sqlite3:  'UNIQUE constraint failed' mesajı
+    """
+    msg = str(exc).lower()
+    # psycopg2
+    if hasattr(exc, 'pgcode') and getattr(exc, 'pgcode', '') == '23505':
+        return True
+    # psycopg2 — pgcode bazen wrapped exception içinde
+    cause = getattr(exc, '__cause__', None) or getattr(exc, '__context__', None)
+    if cause and hasattr(cause, 'pgcode') and getattr(cause, 'pgcode', '') == '23505':
+        return True
+    # SQLite
+    if 'unique constraint failed' in msg:
+        return True
+    # Genel fallback
+    if 'unique' in msg and ('violation' in msg or 'constraint' in msg or 'duplicate' in msg):
+        return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,7 +158,7 @@ def import_xml(xml_path: str, userid: int, mod: str = None) -> dict:
 
     conn = get_connection()
     try:
-        # 5 - Duplicate kontrolu
+        # 5a - Birincil duplicate kontrolu: hash
         row = conn.execute(
             "SELECT id FROM faturalar WHERE hash=? AND userid=? LIMIT 1",
             (fatura_hash, userid)
@@ -137,9 +167,25 @@ def import_xml(xml_path: str, userid: int, mod: str = None) -> dict:
             return {
                 "success": True,
                 "skipped": True,
-                "message": "Bu fatura zaten mevcut, atlandi.",
+                "message": "Bu fatura zaten mevcut (hash), atlandi.",
                 "meta": meta_dict
             }
+
+        # 5b - İkincil duplicate kontrolu: faturano + mod kombinasyonu
+        # (farklı hash ama aynı fatura no ile yeniden import senaryosu)
+        if fatura_no:
+            row2 = conn.execute(
+                "SELECT id FROM faturalar "
+                "WHERE faturano=? AND userid=? AND gelirgidermod=? LIMIT 1",
+                (fatura_no, userid, mod)
+            ).fetchone()
+            if row2:
+                return {
+                    "success": True,
+                    "skipped": True,
+                    "message": f"Bu fatura numarası zaten mevcut ({fatura_no}), atlandi.",
+                    "meta": meta_dict
+                }
 
         # 6 - XML kopyala
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -147,16 +193,27 @@ def import_xml(xml_path: str, userid: int, mod: str = None) -> dict:
         dest_path = os.path.join(UPLOAD_DIR, dest_name)
         shutil.copy2(xml_path, dest_path)
 
-        # 7 - INSERT
+        # 7 - INSERT (ON CONFLICT DO NOTHING — DB unique index ihlali race condition koruması)
         cur = conn.execute(
             """INSERT INTO faturalar
                (userid, unvan, vergino, vergiDairesi, toplam, fatura,
                 tarih, hash, gruplama, gelirGiderMod, faturano, kaynak, xml_dosya)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT DO NOTHING""",
             (userid, unvan, vergi_no, vergi_daire, toplam, meta_json,
              tarih, fatura_hash, gruplama, mod, fatura_no, "xml", dest_path)
         )
         fatura_id = cur.lastrowid
+
+        # ON CONFLICT DO NOTHING tetiklendiyse lastrowid None/0 olur
+        if not fatura_id:
+            conn.rollback()
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "Bu fatura zaten mevcut (DB constraint), atlandi.",
+                "meta": meta_dict
+            }
 
         # 8 - carihesaplar
         _ensure_cari_hesap(conn, unvan, vergi_no, vergi_daire, tc, userid)
@@ -171,6 +228,14 @@ def import_xml(xml_path: str, userid: int, mod: str = None) -> dict:
 
     except Exception as e:
         conn.rollback()
+        # DB unique constraint ihlali → mükerrer kayıt girişimi
+        if _is_unique_violation(e):
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "Bu fatura zaten mevcut (unique ihlali), atlandi.",
+                "meta": meta_dict
+            }
         return {"success": False, "message": f"Veritabani hatasi: {e}"}
     finally:
         conn.close()

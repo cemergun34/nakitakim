@@ -52,15 +52,28 @@ CREATE INDEX IF NOT EXISTS idx_womsi_pos_islemtarihi ON womsi_pos(userid, islemT
 
 
 def ensure_tables() -> None:
-    """womsi_pos tablosunu oluşturur (yoksa)."""
+    """womsi_pos tablosunu oluşturur (yoksa). SQLite ve PostgreSQL uyumlu."""
     conn = get_connection()
     try:
-        conn.executescript(_WOMSI_POS_SQL)
-        conn.commit()
+        # SQLite → executescript; PostgreSQL → tek tek execute
+        try:
+            conn.executescript(_WOMSI_POS_SQL)
+            conn.commit()
+        except AttributeError:
+            # PostgreSQL wrapper'ı — executescript yok, satır satır çalıştır
+            for stmt in _WOMSI_POS_SQL.split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    try:
+                        conn.execute(stmt + ";")
+                    except Exception:
+                        pass
+            conn.commit()
     except Exception:
         pass
     finally:
         conn.close()
+
 
 
 # ---------------------------------------------------------------------------
@@ -98,33 +111,23 @@ def get_dashboard_ozet(userid: int) -> dict:
     """
     womsi_pos tablosundan toplam İşlem ve Net Tutar değerlerini döndürür.
     PHP: womsisSonGuncellemeGoster() → res.toplam_islem_fmt, res.toplam_net_fmt
-
-    Returns:
-        {
-            'success': bool,
-            'toplam_islem': float,   → #womsisDashIslem
-            'toplam_net':   float,   → #womsisDashOdeme / #womsisToplamBadge
-            'toplam_islem_fmt': '₺...',
-            'toplam_net_fmt':   '₺...',
-            'kayit_sayisi': int
-        }
     """
     ensure_tables()
     conn = get_connection()
     try:
         row = conn.execute(
             "SELECT "
-            "  COALESCE(SUM(islemTutari), 0)       AS toplam_islem, "
-            "  COALESCE(SUM(isyeriUcretiTutar), 0) AS toplam_isyeri, "
-            "  COALESCE(SUM(netTutar), 0)           AS toplam_net, "
+            "  COALESCE(SUM(islemtutari), 0)       AS toplam_islem, "
+            "  COALESCE(SUM(isyeriucretitutar), 0) AS toplam_isyeri, "
+            "  COALESCE(SUM(nettutar), 0)           AS toplam_net, "
             "  COUNT(*) AS kayit_sayisi "
             "FROM womsi_pos WHERE userid = ?",
             (userid,)
         ).fetchone()
-        islem  = float(row["toplam_islem"]  or 0)
-        isyeri = float(row["toplam_isyeri"] or 0)
-        net    = float(row["toplam_net"]    or 0)
-        kayit  = int(row["kayit_sayisi"]    or 0)
+        islem  = float(row[0] or 0)
+        isyeri = float(row[1] or 0)
+        net    = float(row[2] or 0)
+        kayit  = int(row[3] or 0)
         return {
             "success":          True,
             "toplam_islem":     islem,
@@ -158,12 +161,12 @@ def get_hareketler(
 ) -> dict:
     """
     womsi_pos tablosundan tarih aralığına göre hareketleri getirir.
-    PHP: ajax/get_fiziksel_pos_hareketleri.php → SELECT ... WHERE STR_TO_DATE(islemTarihi,'%d.%m.%Y') BETWEEN
+    Kolon adları lowercase — hem SQLite hem PostgreSQL uyumlu.
 
     Returns:
         {
             'success': bool,
-            'data': [dict, ...],          ← 9 sütun
+            'data': [dict, ...],
             'toplam_islem':      float,
             'toplam_isyeri':     float,
             'toplam_net':        float,
@@ -183,11 +186,12 @@ def get_hareketler(
 
     conn = get_connection()
     try:
+        # Lowercase kolon adları — hem SQLite hem PG uyumlu
         rows_all = conn.execute(
-            "SELECT isyeriNo, cariHesap, hesabaGecisTarihi, "
-            "       islemTutari, islemTarihi, posNo, "
-            "       isyeriUcretiTutar, netTutar, brand, "
-            "       kartNo, islemTipi, aciklama "
+            "SELECT isyerino, carihesap, hesabagecistarihi, "
+            "       islemtutari, islemtarihi, posno, "
+            "       isyeriucretitutar, nettutar, brand, "
+            "       kartno, islemtipi, aciklama "
             "FROM womsi_pos WHERE userid = ?",
             (userid,)
         ).fetchall()
@@ -198,38 +202,55 @@ def get_hareketler(
         data: list[dict] = []
 
         for r in rows_all:
-            r = dict(r)
-            norm = _norm_date(r.get("islemTarihi", ""))
+            # _CIRow case-insensitive dict — key ile doğrudan eriş
+            islemtarihi_v       = r["islemtarihi"]
+            isyerino_v          = r["isyerino"]
+            carihesap_v         = r["carihesap"]
+            hesabagecistarihi_v = r["hesabagecistarihi"]
+            islemtutari_v       = r["islemtutari"]
+            posno_v             = r["posno"]
+            isyeriucret_v       = r["isyeriucretitutar"]
+            nettutar_v          = r["nettutar"]
+            brand_v             = r["brand"]
+            kartno_v            = r["kartno"]
+            islemtipi_v         = r["islemtipi"]
+            aciklama_v          = r["aciklama"]
+
+            norm = _norm_date(str(islemtarihi_v or ""))
             if not norm:
                 continue
             if norm < ilk_tarih or norm > son_tarih:
                 continue
 
-            gross  = float(r.get("islemTutari")       or 0)
-            comm   = float(r.get("isyeriUcretiTutar") or 0)
-            net    = float(r.get("netTutar")           or 0)
+            gross = float(islemtutari_v or 0)
+            comm  = float(isyeriucret_v or 0)
+            net   = float(nettutar_v    or 0)
 
             toplam_islem  += gross
             toplam_isyeri += comm
             toplam_net    += net
 
             data.append({
-                "isyerino":          r.get("isyeriNo",          ""),
-                "carihesap":         r.get("cariHesap",         ""),
-                "hesabagecistarihi": r.get("hesabaGecisTarihi", ""),
+                "isyerino":          str(isyerino_v          or ""),
+                "carihesap":         str(carihesap_v         or ""),
+                "hesabagecistarihi": str(hesabagecistarihi_v or ""),
                 "islemtutari":       gross,
-                "islemtarihi":       r.get("islemTarihi",       ""),
-                "posno":             r.get("posNo",             ""),
+                "islemtarihi":       str(islemtarihi_v       or ""),
+                "posno":             str(posno_v             or ""),
                 "isyeritutar":       comm,
                 "nettutar":          net,
-                "brand":             r.get("brand",             ""),
-                "kartno":            r.get("kartNo",            ""),
-                "islemtipi":         r.get("islemTipi",        ""),
-                "aciklama":          r.get("aciklama",          ""),
+                "brand":             str(brand_v             or ""),
+                "kartno":            str(kartno_v            or ""),
+                "islemtipi":         str(islemtipi_v         or ""),
+                "aciklama":          str(aciklama_v          or ""),
             })
 
+
         # PHP: ORDER BY STR_TO_DATE(islemTarihi,'%d.%m.%Y') DESC
-        data.sort(key=lambda x: _norm_date(x.get("islemtarihi", "")) or "", reverse=True)
+        data.sort(
+            key=lambda x: _norm_date(x.get("islemtarihi", "")) or "",
+            reverse=True
+        )
 
         return {
             "success":           True,
@@ -247,3 +268,4 @@ def get_hareketler(
         return {"success": False, "message": f"Veritabanı hatası: {exc}"}
     finally:
         conn.close()
+

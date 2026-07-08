@@ -197,77 +197,6 @@ class FizikselPosKPICard(KPICard):
         self._son_lbl.setText(alt_yazi)
 
 
-class BankalaBakiyeKPICard(KPICard):
-    """
-    Bankalar Bakiye kartı — PaytrKPICard ile aynı pattern.
-
-    Layout:
-      H3  : 'Bankalar Bakiye'
-      div : Net Tutar  (balance — mint yeşil badge)
-      row : [Gelir | Gider]  (iki sütun, sarı / kırmızı)
-      son : 'womsis_banka · tüm dönem'
-    Renk: #374151 → #1F2937
-    """
-
-    def __init__(self, click_cb=None, parent=None):
-        super().__init__(
-            title="Bankalar Bakiye",
-            value="₺0,00",
-            color="#374151",
-            color2="#1F2937",
-            click_cb=click_cb,
-            parent=parent,
-        )
-        self.setFixedHeight(160)
-
-        # Net badge — mint yeşil
-        self.value_lbl.setStyleSheet(
-            "color: rgb(170,255,204); font-size:20px; font-weight:700;"
-            " background:transparent; letter-spacing:-0.5px;"
-        )
-        self.title_lbl.setStyleSheet(
-            "color:#ffffff; font-size:12px; font-weight:600; background:transparent;"
-        )
-
-        from PyQt6.QtWidgets import QHBoxLayout as _HBL, QVBoxLayout as _VBL, QLabel as _LBL
-        row_w = _HBL()
-        row_w.setSpacing(4)
-
-        def _blok(key: str, lbl: str, clr: str):
-            col = _VBL()
-            col.setSpacing(0)
-            hdr = _LBL(lbl)
-            hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            hdr.setStyleSheet("color:rgba(255,255,255,.70);font-size:11px;background:transparent;")
-            val = _LBL("-")
-            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            val.setStyleSheet(f"color:{clr};font-size:12px;font-weight:600;background:transparent;")
-            col.addWidget(hdr)
-            col.addWidget(val)
-            setattr(self, key, val)
-            row_w.addLayout(col)
-
-        _blok("_gelir_lbl", "Gelir",  "#ffe0a0")   # sarı
-        _blok("_gider_lbl", "Gider",  "#ffb3b3")   # açık kırmızı
-
-        self._alt_lbl = _LBL("womsis_banka · tüm dönem")
-        self._alt_lbl.setStyleSheet(
-            "color:rgba(255,255,255,.80);font-size:10px;background:transparent;"
-        )
-
-        lay = self.layout()
-        lay.addLayout(row_w)
-        lay.addWidget(self._alt_lbl)
-
-    def set_bankalar(self, net_fmt: str, gelir_fmt: str, gider_fmt: str,
-                     alt_yazi: str = "womsis_banka · tüm dönem"):
-        """Net (büyük badge) + Gelir | Gider satırını doldur."""
-        self.value_lbl.setText(net_fmt)
-        self._gelir_lbl.setText(gelir_fmt)
-        self._gider_lbl.setText(gider_fmt)
-        self._alt_lbl.setText(alt_yazi)
-
-
 class DashboardLoader(QThread):
     """Arka planda veri yükler — UI donmaması için."""
     data_ready = pyqtSignal(dict)
@@ -285,212 +214,6 @@ class DashboardLoader(QThread):
             self.data_ready.emit(data)
         except Exception as e:
             self.error.emit(str(e))
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ExcelOzetBuilder — Her sheet için kayıt/gelir/gider/fark izleyici
-# _export_excel metodunda kullanılır.
-# ─────────────────────────────────────────────────────────────────────────────
-
-class ExcelOzetBuilder:
-    """
-    Excel export sırasında her sheet için istatistik toplar ve
-    ÖZET sheet'ini openpyxl Workbook'a yazar.
-
-    Kullanım:
-        ozet = ExcelOzetBuilder()
-        ozet.kaydet("Nakit Kasa", kayit=100, gelir=5000.0, gider=2000.0)
-        ozet.yaz(wb, baslik="Dashboard 2026", simdi="08.07.2026 14:00")
-
-    Her sheet için desteklenen sütunlar:
-        Sheet Adı | Kayıt | Gelir (₺) | Gider (₺) | Fark (₺)
-    Tutar bilgisi olmayan sheetler için Gelir/Gider/Fark boş bırakılır.
-    """
-
-    # Her sheet için hangi para sütununu hangi gelir/gider anahtarıyla eşle
-    _GELIR_HEADERS = {"Gelir (₺)", "İşlem Tutarı (₺)", "Ödeme Tutarı (₺)",
-                      "Net Tutar (₺)", "Brüt Tutar (₺)", "Tutar (₺)",
-                      "Gayri Resmi Tutar (₺)"}
-    _GIDER_HEADERS = {"Gider (₺)", "Komisyon (₺)", "Kesinti Tutarı (₺)",
-                      "Vergi Kesinti (₺)"}
-
-    def __init__(self):
-        # {sheet_adı: {"kayit": int, "gelir": float, "gider": float}}
-        self._data: dict[str, dict] = {}
-
-    # ── Public API ───────────────────────────────────────────────────────────
-
-    def kaydet(self, sheet_adi: str, kayit: int = 0,
-               gelir: float | None = None,
-               gider: float | None = None) -> None:
-        """Sheet istatistiğini kaydet."""
-        self._data[sheet_adi] = {
-            "kayit": kayit,
-            "gelir": gelir,   # None → bu sheet için gelir yok
-            "gider": gider,   # None → bu sheet için gider yok
-        }
-
-    def kayit_sayisi(self, sheet_adi: str) -> int:
-        return self._data.get(sheet_adi, {}).get("kayit", 0)
-
-    def toplam_kayit(self) -> int:
-        return sum(d["kayit"] for d in self._data.values())
-
-    def ozet_str(self) -> str:
-        """Başarı popup'ı için tek satır özet."""
-        satirlar = []
-        for ad, d in self._data.items():
-            gelir = d["gelir"]
-            gider = d["gider"]
-            if gelir is not None:
-                net = (gelir or 0) - (gider or 0)
-                satirlar.append(
-                    f"  • {ad}: {d['kayit']:,} kayıt | "
-                    f"G:{gelir:,.0f}₺ / G:{gider or 0:,.0f}₺ | Net:{net:+,.0f}₺"
-                )
-            else:
-                satirlar.append(f"  • {ad}: {d['kayit']:,} kayıt")
-        return "\n".join(satirlar)
-
-    def yaz(self, wb, baslik: str, simdi: str,
-            hdr_color: str = "1E3A8A") -> None:
-        """
-        Workbook'a index=0 olarak ÖZET sheet'ini ekler.
-        Sütunlar: Sheet Adı | Kayıt | Gelir (₺) | Gider (₺) | Fark (₺)
-        Tutar bilgisi olmayan satırlarda para sütunları boş kalır.
-        """
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-
-        ws = wb.create_sheet(title="ÖZET", index=0)
-
-        # ── Stil setleri ──
-        def _f(bold=False, size=10, color="FF1F2937", italic=False):
-            return Font(name="Segoe UI", size=size, bold=bold,
-                        color=color, italic=italic)
-
-        def _fill(hex_color: str):
-            return PatternFill(start_color=hex_color, end_color=hex_color,
-                               fill_type="solid")
-
-        def _border(light="FFE5E7EB"):
-            s = Side(style="thin", color=light)
-            return Border(left=s, right=s, top=s, bottom=s)
-
-        border_total = Border(
-            top=Side(style="thin", color="FF94A3B8"),
-            bottom=Side(style="double", color=hdr_color),
-        )
-
-        # ── Başlık blokları ──
-        ws.append([baslik])
-        ws.cell(row=1, column=1).font = _f(bold=True, size=16, color=hdr_color)
-        ws.merge_cells("A1:E1")
-
-        ws.append([f"Oluşturulma: {simdi}"])
-        ws.cell(row=2, column=1).font = _f(size=9, color="FF4B5563", italic=True)
-        ws.append([])  # boşluk
-
-        # ── Başlık satırı ──
-        HEADERS = ["Sheet Adı", "Kayıt", "Gelir (₺)", "Gider (₺)", "Fark (₺)"]
-        ws.append(HEADERS)
-        for ci, hdr in enumerate(HEADERS, 1):
-            cell = ws.cell(row=4, column=ci)
-            cell.font      = _f(bold=True, size=10, color="FFFFFFFF")
-            cell.fill      = _fill(hdr_color)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border    = _border()
-
-        # ── Veri satırları ──
-        r = 5
-        toplam_gelir = toplam_gider = 0.0
-        has_gelir = False
-
-        for sheet_adi, d in self._data.items():
-            kayit  = d.get("kayit", 0)
-            gelir  = d.get("gelir")
-            gider  = d.get("gider") or 0.0
-
-            row_vals = [sheet_adi, kayit, None, None, None]
-            if gelir is not None:
-                has_gelir = True
-                fark = gelir - gider
-                row_vals[2] = gelir
-                row_vals[3] = gider
-                row_vals[4] = fark
-                toplam_gelir += gelir
-                toplam_gider += gider
-
-            # Satır arka plan: gelir/gider farka göre hafif ton
-            if gelir is not None:
-                fark_val = gelir - gider
-                if fark_val > 0:
-                    row_fill = _fill("F0FDF4")   # hafif yeşil
-                elif fark_val < 0:
-                    row_fill = _fill("FFF1F2")   # hafif kırmızı
-                else:
-                    row_fill = _fill("F8FAFC")   # nötr
-            else:
-                row_fill = _fill("F8FAFC")
-
-            ws.append(row_vals)
-            for ci, val in enumerate(row_vals, 1):
-                cell = ws.cell(row=r, column=ci)
-                cell.fill   = row_fill
-                cell.border = _border()
-                if ci == 1:
-                    cell.font      = _f(bold=False)
-                    cell.alignment = Alignment(horizontal="left", vertical="center")
-                elif ci == 2:
-                    cell.font         = _f(bold=True, color="FF1E3A8A")
-                    cell.alignment    = Alignment(horizontal="right", vertical="center")
-                    cell.number_format = "#,##0"
-                elif ci in (3, 4, 5):
-                    cell.font         = _f(bold=(ci == 5), color="FF047857" if ci == 5 and (val or 0) >= 0 else "FFDC2626")
-                    cell.alignment    = Alignment(horizontal="right", vertical="center")
-                    cell.number_format = "#,##0.00"
-                    if val is not None and ci == 5:
-                        cell.font = _f(bold=True,
-                                       color="FF047857" if val >= 0 else "FFDC2626")
-            r += 1
-
-        # ── TOPLAM satırı ──
-        if has_gelir:
-            t_row = ["GENEL TOPLAM",
-                     self.toplam_kayit(),
-                     toplam_gelir,
-                     toplam_gider,
-                     toplam_gelir - toplam_gider]
-            ws.append(t_row)
-            for ci, val in enumerate(t_row, 1):
-                cell = ws.cell(row=r, column=ci)
-                cell.font   = _f(bold=True, size=11, color=hdr_color)
-                cell.fill   = _fill("EFF6FF")
-                cell.border = border_total
-                if ci == 1:
-                    cell.alignment = Alignment(horizontal="left", vertical="center")
-                else:
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                    if ci == 2:
-                        cell.number_format = "#,##0"
-                    else:
-                        cell.number_format = "#,##0.00"
-                        if ci == 5:
-                            net_val = toplam_gelir - toplam_gider
-                            cell.font = _f(bold=True, size=11,
-                                           color="FF047857" if net_val >= 0 else "FFDC2626")
-            r += 1
-
-        # ── Sütun genişlikleri ──
-        ws.column_dimensions["A"].width = 26
-        ws.column_dimensions["B"].width = 10
-        ws.column_dimensions["C"].width = 16
-        ws.column_dimensions["D"].width = 16
-        ws.column_dimensions["E"].width = 16
-
-        ws.freeze_panes = "A5"
-        ws.sheet_view.showGridLines = False
 
 
 class DashboardScreen(QWidget):
@@ -536,7 +259,7 @@ class DashboardScreen(QWidget):
         root.addLayout(header)
 
         # ── Bilgi banner ────────────────────────────────────────────────────────
-        self.banner = QLabel("FİNANS DURUM BİLGİSİ")
+        self.banner = QLabel(f"FİNANS DURUM BİLGİSİ ( {self._yil} )")
         self.banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.banner.setFixedHeight(38)
         self.banner.setStyleSheet(f"""
@@ -558,7 +281,13 @@ class DashboardScreen(QWidget):
         current_year = datetime.now().year
         for y in range(current_year + 1, current_year - 6, -1):
             self.yil_combo.addItem(str(y), y)
+        # ⚠ Sinyali bağlamadan ÖNCE setCurrentText yapılmalı —
+        # aksi hâlde _on_yil_changed erken tetiklenir ve currentData() None döner
         self.yil_combo.setCurrentText(str(self._yil))
+        # Başlangıç değerini combo'dan doğrula (setCurrentText bulamazsa ilk item seçilir)
+        combo_val = self.yil_combo.currentData()
+        if combo_val is not None:
+            self._yil = combo_val
         self.yil_combo.setFixedHeight(32)
         self.yil_combo.setFixedWidth(120)
         self.yil_combo.setStyleSheet(f"""
@@ -618,11 +347,8 @@ class DashboardScreen(QWidget):
                     click_cb=lambda k=key: self._on_card_click(k),
                 )
             elif key == "fiziksel_pos":
+                # PHP: #btnFizikselPosHareketleri (koyu mavi gradient)
                 card = FizikselPosKPICard(
-                    click_cb=lambda k=key: self._on_card_click(k),
-                )
-            elif key == "bankalar_bakiye":
-                card = BankalaBakiyeKPICard(
                     click_cb=lambda k=key: self._on_card_click(k),
                 )
             else:
@@ -683,7 +409,6 @@ class DashboardScreen(QWidget):
             }}
             QPushButton:hover {{ background: #047857; }}
         """)
-        self.excel_btn.clicked.connect(self._export_excel)
         filter_bar.addWidget(self.excel_btn)
 
         vbox.addLayout(filter_bar)
@@ -709,7 +434,13 @@ class DashboardScreen(QWidget):
 
     def _load_data(self):
         if self._loader and self._loader.isRunning():
-            return
+            # Eski loader'ın sinyallerini kes — yanıt gelirse UI'yı bozmasın
+            try:
+                self._loader.data_ready.disconnect()
+                self._loader.error.disconnect()
+            except Exception:
+                pass
+            self._loader.quit()
 
         self._loader = DashboardLoader(self._userid, self._musterino, self._yil)
         self._loader.data_ready.connect(self._on_data_ready)
@@ -718,6 +449,7 @@ class DashboardScreen(QWidget):
 
     def refresh(self):
         """Sol menüden sayfaya geçince veriler yeniden yüklenir."""
+        self.banner.setText(f"FİNANS DURUM BİLGİSİ ( {self._yil} )")
         self._load_data()
 
     def _on_data_ready(self, data: dict):
@@ -772,7 +504,7 @@ class DashboardScreen(QWidget):
         # Maaş Kira SMM — PHP: #dashMaasKiraSmmmToplam
         # Formül: SUM(ABS(gaytutar - vergkestutar))  her satır için
         from services.vergi_muhtasar_service import get_dashboard_toplam as _mks_toplam
-        mks_r = _mks_toplam(self._userid, musterino=str(self._musterino))
+        mks_r = _mks_toplam(self._userid, musterino=str(self._musterino), yil=self._yil)
         if mks_r.get("success") and mks_r["fark_toplam"] > 0:
             mks_val_str = mks_r["fark_toplam_fmt"]   # '10.853.717,00 ₺'
         else:
@@ -783,24 +515,8 @@ class DashboardScreen(QWidget):
             "Personel, Kira ve Müşavirlik Giderleri"
         )
 
-        # Bankalar Bakiye (womsis_banka)
-        banka = data.get("bankalar", {})
-        b_gelir = banka.get("gelir", 0)
-        b_gider = banka.get("gider", 0)
-        b_net   = banka.get("net",   0)
-        banka_card = self._cards.get("bankalar_bakiye")
-        if isinstance(banka_card, BankalaBakiyeKPICard):
-            banka_card.set_bankalar(
-                net_fmt=fmt_para(b_net),
-                gelir_fmt=fmt_para(b_gelir),
-                gider_fmt=fmt_para(b_gider),
-                alt_yazi=f"{banka.get('kayit', 0):,} hareket · tüm dönem",
-            )
-        else:
-            banka_card.set_value(
-                fmt_para(b_net),
-                f"Gelir: {fmt_para(b_gelir)}  Gider: {fmt_para(b_gider)}"
-            )
+        # Bankalar Bakiye
+        c["bankalar_bakiye"].set_value("₺0,00", "Detaylar için tıklayın...")
 
         # Sanal Pos (PayTR) — PHP: #paytrToplamBadge / #paytrDashIslem / #paytrDashOdeme / #paytrSonGuncelleme
         pos = data.get("sanal_pos", {})
@@ -884,26 +600,16 @@ class DashboardScreen(QWidget):
         yil = self._yil
 
         if key in ("nakit_kasa_gelir", "nakit_kasa_odeme"):
-            ozet = detay_service.get_nakit_kasa_sube_ozet(uid, mno, yil)
-            def detay_fn(sube_adi):
-                return detay_service.get_nakit_kasa_detay(uid, mno, yil, sube_adi=sube_adi)
+            def detay_fn(_sube_adi):
+                # genel_hesap_hareketleri'nden kasa kayıtları — dashboard ile aynı kaynak
+                return detay_service.get_nakit_kasa_detay(uid, mno, yil)
             dlg = DetayDialog(
-                baslik="Nakit Kasa — Şube Özeti",
-                ozet_rows=ozet,
+                baslik="Nakit Kasa Hareketleri",
+                ozet_rows=[],
                 detay_fn=detay_fn,
                 tablo_tipi="genel_hesap",
-                parent=self,
-            )
-        elif key == "gider_pusulasi":
-            ozet = detay_service.get_gider_pusulasi_sube_ozet(uid, mno, yil)
-            def detay_fn(sube_adi):
-                return detay_service.get_gider_pusulasi_detay(uid, mno, yil, sube_adi=sube_adi)
-            dlg = DetayDialog(
-                baslik="Gider Pusulası — Şube Özeti",
-                ozet_rows=ozet,
-                detay_fn=detay_fn,
-                tablo_tipi="genel_hesap",
-                userid=uid,
+                direct_detay=True,
+                yil=yil,
                 parent=self,
             )
 
@@ -917,6 +623,7 @@ class DashboardScreen(QWidget):
                 detay_fn=detay_fn,
                 tablo_tipi="genel_hesap",
                 userid=uid,
+                yil=yil,
                 parent=self,
             )
 
@@ -930,6 +637,7 @@ class DashboardScreen(QWidget):
                 detay_fn=_kes_detay,
                 tablo_tipi="faturalar",
                 userid=uid,
+                yil=yil,
                 parent=self,
             )
 
@@ -943,6 +651,7 @@ class DashboardScreen(QWidget):
                 detay_fn=_gel_detay,
                 tablo_tipi="faturalar",
                 userid=uid,
+                yil=yil,
                 parent=self,
             )
 
@@ -957,7 +666,7 @@ class DashboardScreen(QWidget):
             return
 
         elif key == "maas_kira_smm":
-            dlg = MaasKiraSmmDialog(self._userid, str(self._musterino), parent=self)
+            dlg = MaasKiraSmmDialog(self._userid, str(self._musterino), yil=self._yil, parent=self)
             dlg.exec()
             return
 
@@ -968,11 +677,6 @@ class DashboardScreen(QWidget):
 
         elif key == "sanal_pos":
             dlg = SanalPosDialog(self._userid, str(self._musterino), self._yil, parent=self)
-            dlg.exec()
-            return
-
-        elif key == "bankalar_bakiye":
-            dlg = BankalaBakiyeDialog(self._userid, parent=self)
             dlg.exec()
             return
 
@@ -988,665 +692,21 @@ class DashboardScreen(QWidget):
         dlg.exec()
 
     def _on_yil_changed(self):
-        self._yil = self.yil_combo.currentData()
+        combo_val = self.yil_combo.currentData()
+        if combo_val is None:
+            return   # combo henüz hazır değil, erken tetiklenmeden çık
+        self._yil = combo_val
         self.banner.setText(f"FİNANS DURUM BİLGİSİ ( {self._yil} )")
+        # İlk tarih DateEdit'i seçilen yılın 1 Ocak'ına güncelle
+        try:
+            from PyQt6.QtCore import QDate
+            self.ilk_tarih.setDate(QDate(self._yil, 1, 1))
+        except Exception:
+            pass
         # Kartları yükleniyor moduna al
         for card in self._cards.values():
             card.set_value("Yükleniyor...")
         self._load_data()
-
-
-
-    def _export_excel(self):
-        """
-        Dashboard'daki tüm kartların verilerini TEK Excel dosyasına,
-        her kart için ayrı bir sheet olarak aktarır.
-        Şube filtresi UYGULANMAZ — tüm veri çekilir.
-        """
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
-        from PyQt6.QtCore import Qt as QtC
-        import datetime
-        import traceback
-        try:
-            import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-            from openpyxl.utils import get_column_letter
-        except ImportError:
-            QMessageBox.critical(self, "Eksik Kütüphane",
-                                 "openpyxl yüklenmemiş.\nTerminalde: pip install openpyxl")
-            return
-    
-        yil        = self._yil
-        uid        = self._userid
-        mno        = self._musterino
-        ilk        = self.ilk_tarih.date()
-        son        = self.son_tarih.date()
-        ilk_str    = ilk.toString("yyyy-MM-dd")
-        son_str    = son.toString("yyyy-MM-dd")
-        ilk_goster = ilk.toString("dd.MM.yyyy")
-        son_goster = son.toString("dd.MM.yyyy")
-        simdi      = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
-    
-        dosya_adi = f"dashboard_rapor_{yil}_{ilk_str}_{son_str}.xlsx"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Excel Olarak Kaydet", dosya_adi, "Excel Files (*.xlsx)"
-        )
-        if not path:
-            return
-    
-        # ── İlerleme dialogu ──
-        prog = QProgressDialog("Excel hazırlanıyor...", None, 0, 12, self)
-        prog.setWindowTitle("Excel Export")
-        prog.setWindowModality(QtC.WindowModality.WindowModal)
-        prog.setMinimumWidth(340)
-        prog.show()
-    
-        try:
-            from db.database import get_connection
-            from db.db_compat import yr
-            from services import detay_service
-    
-            wb = openpyxl.Workbook()
-            wb.remove(wb.active)   # default boş sheet'i sil
-    
-            def get_val(r, key):
-                if key in r:
-                    return r[key]
-                kl = key.lower()
-                if kl in r:
-                    return r[kl]
-                return None
-
-            def _fmt_goster_yyyymmdd(t) -> str:
-                s = str(t) if t else ""
-                if len(s) == 8 and s.isdigit():
-                    return f"{s[6:8]}.{s[4:6]}.{s[0:4]}"
-                return s
-
-            # ─────────────────────────────────────────────────────────────────
-            # YARDIMCI FONKSİYONLAR
-            # ─────────────────────────────────────────────────────────────────
-    
-            def _stiller(hdr_color: str):
-                """Renk koduna göre stil seti döndürür."""
-                return dict(
-                    font_title    = Font(name="Segoe UI", size=13, bold=True,  color=hdr_color),
-                    font_subtitle = Font(name="Segoe UI", size=9,  italic=True, color="FF4B5563"),
-                    font_header   = Font(name="Segoe UI", size=10, bold=True,  color="FFFFFFFF"),
-                    font_data     = Font(name="Segoe UI", size=10, color="FF1F2937"),
-                    font_total    = Font(name="Segoe UI", size=10, bold=True,  color=hdr_color),
-                    fill_header   = PatternFill(start_color=hdr_color, end_color=hdr_color, fill_type="solid"),
-                    fill_gelir    = PatternFill(start_color="FFDCFCE7", end_color="FFDCFCE7", fill_type="solid"),
-                    fill_gider    = PatternFill(start_color="FFFEE2E2", end_color="FFFEE2E2", fill_type="solid"),
-                    fill_total    = PatternFill(start_color="FFF1F5F9", end_color="FFF1F5F9", fill_type="solid"),
-                    border_thin   = Border(
-                        left=Side(style="thin", color="FFE5E7EB"), right=Side(style="thin", color="FFE5E7EB"),
-                        top=Side(style="thin",  color="FFE5E7EB"), bottom=Side(style="thin", color="FFE5E7EB"),
-                    ),
-                    border_total  = Border(
-                        top=Side(style="thin", color="FF94A3B8"),
-                        bottom=Side(style="double", color=hdr_color),
-                    ),
-                )
-    
-            def _yeni_sheet(title: str, baslik: str, alt_yazi: str,
-                            headers: list[str], rows_data: list[dict],
-                            para_sutunlar: set[str], hdr_color: str,
-                            para_prefix: str = ""):
-                """
-                Yeni sheet oluşturur ve doldurur.
-                para_sutunlar: sütun başlığındaki para birimi içeren isimler.
-                """
-                # ── 1. Toplam para değerlerini önceden hesapla ──
-                _gelir_total = 0.0
-                _gider_total = 0.0
-                _has_para = False
-                for _r in rows_data:
-                    _rd = dict(_r) if not isinstance(_r, dict) else _r
-                    for _hdr in para_sutunlar:
-                        _val = float(get_val(_rd, _hdr) or 0)
-                        if "gider" in _hdr.lower() or "kesinti" in _hdr.lower() or "komisyon" in _hdr.lower():
-                            _gider_total += _val
-                        else:
-                            _gelir_total += _val
-                        _has_para = True
-
-                ws = wb.create_sheet(title=title)
-                s  = _stiller(hdr_color)
-    
-                # ── Başlık blokları ──
-                ws.append([baslik])
-                ws.cell(row=1, column=1).font = s["font_title"]
-
-                # ── Gelir / Gider / Kalan özet satırı (İlk satırdan sonra açılan satır) ──
-                if _has_para:
-                    _kalan = _gelir_total - _gider_total
-                    summary_text = f"Gelir Toplamı: {_gelir_total:,.2f} ₺   │   Gider Toplamı: {_gider_total:,.2f} ₺   │   Kalan: {_kalan:+,.2f} ₺"
-                    ws.append([summary_text])
-                    summary_cell = ws.cell(row=2, column=1)
-                    summary_cell.font = Font(name="Segoe UI", size=10, bold=True, color="FF1E3A8A")
-                else:
-                    ws.append([]) # boş satır
-                    
-                ws.append([alt_yazi])
-                ws.cell(row=3, column=1).font = s["font_subtitle"]
-                ws.append([])   # boşluk satırı
-    
-                # ── Sütun başlıkları ──
-                ws.append(headers)
-                for ci, hdr in enumerate(headers, 1):
-                    cell = ws.cell(row=5, column=ci)
-                    cell.font      = s["font_header"]
-                    cell.fill      = s["fill_header"]
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-                    cell.border    = s["border_thin"]
-    
-                # ── Veri satırları ──
-                toplam: dict[str, float] = {h: 0.0 for h in para_sutunlar}
-                cur = 6
-                for row in rows_data:
-                    r = dict(row) if not isinstance(row, dict) else row
-                    row_data = []
-                    for hdr in headers:
-                        val = get_val(r, hdr)
-                        if hdr in para_sutunlar:
-                            fval = float(val or 0)
-                            row_data.append(fval)
-                            toplam[hdr] = toplam.get(hdr, 0.0) + fval
-                        else:
-                            row_data.append(str(val or ""))
-                    ws.append(row_data)
-    
-                    for ci, hdr in enumerate(headers, 1):
-                        cell = ws.cell(row=cur, column=ci)
-                        cell.font   = s["font_data"]
-                        cell.border = s["border_thin"]
-                        if hdr in para_sutunlar:
-                            fval = float(row_data[ci - 1] or 0)
-                            cell.alignment     = Alignment(horizontal="right", vertical="center")
-                            cell.number_format = "#,##0.00"
-                            if "gelir" in hdr.lower() and fval > 0:
-                                cell.fill = s["fill_gelir"]
-                            elif "gider" in hdr.lower() and fval > 0:
-                                cell.fill = s["fill_gider"]
-                            elif "tutar" in hdr.lower() or "toplam" in hdr.lower():
-                                cell.fill = s["fill_gelir"]
-                        elif ci == 1:
-                            cell.alignment = Alignment(horizontal="center", vertical="center")
-                        else:
-                            cell.alignment = Alignment(horizontal="left", vertical="center")
-                    cur += 1
-    
-                # ── GENEL TOPLAM satırı ──
-                if para_sutunlar:
-                    t_row = {h: "" for h in headers}
-                    t_row[headers[0]] = "GENEL TOPLAM"
-                    for h in para_sutunlar:
-                        t_row[h] = toplam.get(h, 0.0)
-                    ws.append([t_row[h] for h in headers])
-                    for ci, hdr in enumerate(headers, 1):
-                        cell = ws.cell(row=cur, column=ci)
-                        cell.font   = s["font_total"]
-                        cell.fill   = s["fill_total"]
-                        cell.border = s["border_total"]
-                        if hdr in para_sutunlar:
-                            cell.alignment     = Alignment(horizontal="right", vertical="center")
-                            cell.number_format = "#,##0.00"
-                        else:
-                            cell.alignment = Alignment(horizontal="left", vertical="center")
-    
-                # ── Otomatik sütun genişliği ──
-                for col in ws.columns:
-                    max_len    = 0
-                    col_letter = get_column_letter(col[0].column)
-                    for cell in col:
-                        if cell.row <= 4:
-                            continue
-                        if cell.value is not None:
-                            s_val = f"{cell.value:,.2f}" if isinstance(cell.value, float) else str(cell.value)
-                            max_len = max(max_len, len(s_val))
-                    ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
-    
-                # ── AutoFilter (Filtre Özelliği) ──
-                if rows_data:
-                    last_col_letter = get_column_letter(len(headers))
-                    ws.auto_filter.ref = f"A5:{last_col_letter}{cur - 1}"
-    
-                ws.freeze_panes = "A6"
-                return (len(rows_data),
-                        _gelir_total if _has_para else None,
-                        _gider_total if _has_para else None)
-    
-            def _rows_to_dicts(rows):
-                import json
-                res = []
-                for r in rows:
-                    d = dict(r) if not isinstance(r, dict) else dict(r)
-                    if "fatura" in d:
-                        try:
-                            meta = json.loads(d["fatura"] or "{}")
-                            d["Açıklama"] = meta.get("aciklama", "")
-                        except Exception:
-                            d["Açıklama"] = ""
-                    res.append(d)
-                return res
-    
-            ozet = ExcelOzetBuilder()
-            conn = get_connection()
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 1. NAKİT KASA HAREKETLERİ (kasa kaynağı, tüm yıl)
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("1/12 Nakit Kasa Hareketleri...")
-            prog.setValue(0)
-            rows = conn.execute(f"""
-                SELECT tarih_date AS Tarih, form_id AS "Form No",
-                       COALESCE(sube,'(Şubesiz)') AS Şube,
-                       COALESCE(aciklama,'') AS Açıklama,
-                       COALESCE(kategori,'') AS Kategori,
-                       COALESCE(teslim_sekli,'') AS "Teslim Şekli",
-                       COALESCE(odeme_sekli,'') AS "Ödeme Şekli",
-                       COALESCE(gelir,0) AS "Gelir (₺)",
-                       COALESCE(gider,0) AS "Gider (₺)",
-                       COALESCE(nerden_geliyor,'') AS Kaynak
-                FROM genel_hesap_hareketleri
-                WHERE userid=? AND musteri_no=? AND nerden_geliyor='kasa'
-                  AND tarih_date >= ? AND tarih_date <= ?
-                ORDER BY tarih_date ASC, id ASC
-            """, (uid, mno, ilk_str, son_str)).fetchall()
-            _n, _g, _gd = _yeni_sheet(
-                title="Nakit Kasa",
-                baslik=f"Nakit Kasa Hareketleri — {ilk_goster} / {son_goster}",
-                alt_yazi=f"Kayıt: {len(rows):,}  •  {simdi}",
-                headers=["Tarih","Form No","Şube","Açıklama","Kategori",
-                         "Teslim Şekli","Ödeme Şekli","Gelir (₺)","Gider (₺)","Kaynak"],
-                rows_data=_rows_to_dicts(rows),
-                para_sutunlar={"Gelir (₺)", "Gider (₺)"},
-                hdr_color="FF059669",
-            )
-            ozet.kaydet("Nakit Kasa", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 2. KESİLEN FATURALAR
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("2/12 Kesilen Faturalar...")
-            prog.setValue(1)
-            _mod_col  = "gelirGiderMod" if not hasattr(conn, "server_version") else "gelirgidermod"
-            _fmod_col = "faturaMod"     if not hasattr(conn, "server_version") else "faturamod"
-            _fno_col  = "formNo"        if not hasattr(conn, "server_version") else "formno"
-            _ykl_col  = "yuklenmeTarihi" if not hasattr(conn, "server_version") else "yuklenmetarihi"
-            from db.db_compat import left4
-            rows = conn.execute(f"""
-                SELECT f.tarih AS Tarih, f.unvan AS Ünvan, f.vergino AS "Vergi No",
-                       f.faturano AS "Fatura No",
-                       CAST(f.toplam AS REAL) AS "Toplam (₺)",
-                       COALESCE(
-                           (SELECT MIN(sube) FROM genel_hesap_hareketleri 
-                            WHERE form_id = f.{_fno_col} AND userid = f.userid AND musteri_no = ?),
-                           '(Şubesiz)'
-                       ) AS Şube,
-                       f.kaynak AS Kaynak,
-                       f.fatura AS fatura
-                FROM faturalar f
-                WHERE f.userid=? AND {left4('f.tarih')}=?
-                  AND f.{_mod_col}='gelir'
-                ORDER BY f.tarih DESC, f.id DESC
-            """, (mno, uid, str(yil))).fetchall()
-            _n, _g, _gd = _yeni_sheet(
-                title="Kesilen Faturalar",
-                baslik=f"Kesilen Faturalar — {yil}",
-                alt_yazi=f"Kayıt: {len(rows):,}  •  {simdi}",
-                headers=["Tarih","Ünvan","Açıklama","Vergi No","Fatura No","Toplam (₺)","Şube","Kaynak"],
-                rows_data=_rows_to_dicts(rows),
-                para_sutunlar={"Toplam (₺)"},
-                hdr_color="FF6D28D9",
-            )
-            ozet.kaydet("Kesilen Faturalar", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 3. GELEN FATURALAR
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("3/12 Gelen Faturalar...")
-            prog.setValue(2)
-            rows = conn.execute(f"""
-                SELECT f.tarih AS Tarih, f.unvan AS Ünvan, f.vergino AS "Vergi No",
-                       f.faturano AS "Fatura No",
-                       CAST(f.toplam AS REAL) AS "Toplam (₺)",
-                       COALESCE(
-                           (SELECT MIN(sube) FROM genel_hesap_hareketleri 
-                            WHERE form_id = f.{_fno_col} AND userid = f.userid AND musteri_no = ?),
-                           '(Şubesiz)'
-                       ) AS Şube,
-                       f.kaynak AS Kaynak,
-                       f.fatura AS fatura
-                FROM faturalar f
-                WHERE f.userid=? AND {left4('f.tarih')}=?
-                  AND f.{_mod_col}='gider'
-                ORDER BY f.tarih DESC, f.id DESC
-            """, (mno, uid, str(yil))).fetchall()
-            _n, _g, _gd = _yeni_sheet(
-                title="Gelen Faturalar",
-                baslik=f"Gelen Faturalar — {yil}",
-                alt_yazi=f"Kayıt: {len(rows):,}  •  {simdi}",
-                headers=["Tarih","Ünvan","Açıklama","Vergi No","Fatura No","Toplam (₺)","Şube","Kaynak"],
-                rows_data=_rows_to_dicts(rows),
-                para_sutunlar={"Toplam (₺)"},
-                hdr_color="FFDB2777",
-            )
-            ozet.kaydet("Gelen Faturalar", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 4. GİDER PUSULASI
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("4/12 Gider Pusulası...")
-            prog.setValue(3)
-            rows = conn.execute(f"""
-                SELECT tarih_date AS Tarih, form_id AS "Form No",
-                       COALESCE(sube,'(Şubesiz)') AS Şube,
-                       COALESCE(aciklama,'') AS Açıklama,
-                       COALESCE(teslim_sekli,'') AS "Teslim Şekli",
-                       COALESCE(odeme_sekli,'') AS "Ödeme Şekli",
-                       COALESCE(gelir,0) AS "Gelir (₺)",
-                       COALESCE(gider,0) AS "Gider (₺)",
-                       COALESCE(kategori,'') AS Kategori,
-                       COALESCE(nerden_geliyor,'') AS Kaynak
-                FROM genel_hesap_hareketleri
-                WHERE userid=? AND musteri_no=?
-                  AND tarih_date >= ? AND tarih_date <= ?
-                  AND (teslim_sekli LIKE '%Cihaz Alımı%'
-                    OR teslim_sekli LIKE '%Parça Alımı (Cihaz)%')
-                ORDER BY tarih_date ASC, id ASC
-            """, (uid, mno, ilk_str, son_str)).fetchall()
-            _n, _g, _gd = _yeni_sheet(
-                title="Gider Pusulası",
-                baslik=f"Gider Pusulası — {ilk_goster} / {son_goster}",
-                alt_yazi=f"Teslim: Cihaz Alımı | Parça Alımı  •  Kayıt: {len(rows):,}  •  {simdi}",
-                headers=["Tarih","Form No","Şube","Açıklama","Teslim Şekli",
-                         "Ödeme Şekli","Gelir (₺)","Gider (₺)","Kategori","Kaynak"],
-                rows_data=_rows_to_dicts(rows),
-                para_sutunlar={"Gelir (₺)", "Gider (₺)"},
-                hdr_color="FF16A34A",
-            )
-            ozet.kaydet("Gider Pusulası", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 5. KURUM ÖDEMELERİ
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("5/12 Kurum Ödemeleri...")
-            prog.setValue(4)
-            from services.detay_service import get_kurum_odemeleri_detay_tarih
-            ilk_yyyymmdd = ilk.toString("yyyyMMdd")
-            son_yyyymmdd = son.toString("yyyyMMdd")
-            
-            BEYANNAME_TUR = {
-                "770.01": "KDV / SGK Beyannamesi",
-                "730.08": "Muhtasar ve Prim Hizmet Beyannamesi",
-            }
-            HESAP_ACIKLAMA = {
-                "770.01": "770.01 — Vergi Giderleri (SGK / KDV / Gelir Vergisi)",
-                "730.08": "730.08 — İşçilik / Müşavirlik Giderleri",
-            }
-            
-            kurum_rows_dialog = get_kurum_odemeleri_detay_tarih(mno, ilk_yyyymmdd, son_yyyymmdd)
-            kurum_export_rows = []
-            for r in kurum_rows_dialog:
-                kod = get_val(r, "hesapKodu")
-                beyan_t = BEYANNAME_TUR.get(kod, HESAP_ACIKLAMA.get(kod, kod))
-                kurum_export_rows.append({
-                    "Beyanname Türü": beyan_t,
-                    "Ünvan": get_val(r, "unvan") or "-",
-                    "Vergi No": get_val(r, "vergiNo") or "",
-                    "İlk Tarih": _fmt_goster_yyyymmdd(get_val(r, "ilkTarih")),
-                    "Son Tarih": _fmt_goster_yyyymmdd(get_val(r, "sonTarih")),
-                    "Sözleşme No": get_val(r, "sozlesmeNo") or "",
-                    "Sözl. Tarih": _fmt_goster_yyyymmdd(get_val(r, "sozlesmeTarih")),
-                    "Tutar (₺)": float(get_val(r, "tutar") or 0)
-                })
-                
-            _n, _g, _gd = _yeni_sheet(
-                title="Kurum Ödemeleri",
-                baslik=f"Kurum Ödemeleri — {ilk_goster} / {son_goster}",
-                alt_yazi=f"Kayıt: {len(kurum_export_rows):,}  •  {simdi}",
-                headers=["Beyanname Türü", "Ünvan", "Vergi No", "İlk Tarih", "Son Tarih", "Sözleşme No", "Sözl. Tarih", "Tutar (₺)"],
-                rows_data=kurum_export_rows,
-                para_sutunlar={"Tutar (₺)"},
-                hdr_color="FF1E3A8A",
-            )
-            ozet.kaydet("Kurum Ödemeleri", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 6. MAAŞ KİRA SMM
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("6/12 Maaş Kira SMM...")
-            prog.setValue(5)
-            try:
-                from services.vergi_muhtasar_service import get_vergi_muhtasar
-                muhtasar_res = get_vergi_muhtasar(uid, musterino=str(mno), yil=yil)
-                muhtasar_rows = muhtasar_res.get("data", [])
-            except Exception:
-                muhtasar_rows = []
-                
-            muhtasar_export_rows = []
-            for r in muhtasar_rows:
-                gay = float(get_val(r, "gaytutar") or 0)
-                verg = float(get_val(r, "vergkestutar") or 0)
-                fark = gay - verg
-                muhtasar_export_rows.append({
-                    "Dönem": get_val(r, "donem") or "",
-                    "Açıklama": get_val(r, "ack") or "",
-                    "Gayri Resmi Tutar": gay,
-                    "Vergi Kesinti Tutarı": verg,
-                    "Fark": fark
-                })
-                
-            _n, _g, _gd = _yeni_sheet(
-                title="Maas Kira SMM",
-                baslik=f"Maaş / Kira / SMM — {yil}",
-                alt_yazi=f"Kayıt: {len(muhtasar_export_rows):,}  •  {simdi}",
-                headers=["Dönem", "Açıklama", "Gayri Resmi Tutar", "Vergi Kesinti Tutarı", "Fark"],
-                rows_data=muhtasar_export_rows,
-                para_sutunlar={"Gayri Resmi Tutar", "Vergi Kesinti Tutarı", "Fark"},
-                hdr_color="FF1a3a5c",
-            )
-            ozet.kaydet("Maaş Kira SMM", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 7. BANKALAR BAKİYE
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("7/12 Bankalar Bakiye...")
-            prog.setValue(6)
-            rows = conn.execute("""
-                SELECT
-                    tarih,
-                    COALESCE(sube, '(Şubesiz)') AS sube,
-                    COALESCE(aciklama, '')       AS aciklama,
-                    COALESCE(gelirgider, '')     AS gelirgider,
-                    CAST(tutar AS REAL)          AS tutar,
-                    COALESCE(faturaunvan, '')    AS faturaunvan,
-                    COALESCE(kaynak, '')         AS kaynak
-                FROM womsis_banka
-                WHERE userid = ?
-                ORDER BY tarih DESC, id DESC
-            """, (uid,)).fetchall()
-            
-            banka_export_rows = []
-            for r in rows:
-                banka_export_rows.append({
-                    "Tarih": get_val(r, "tarih") or "",
-                    "Banka / Şube": get_val(r, "sube") or "(Şubesiz)",
-                    "Açıklama": get_val(r, "aciklama") or "",
-                    "Tür": get_val(r, "gelirgider") or "",
-                    "Tutar (₺)": float(get_val(r, "tutar") or 0),
-                    "Karşı Taraf": get_val(r, "faturaunvan") or "",
-                    "Kaynak": get_val(r, "kaynak") or ""
-                })
-                
-            _n, _g, _gd = _yeni_sheet(
-                title="Bankalar",
-                baslik=f"Banka Hareketleri — Tüm Dönem",
-                alt_yazi=f"Kayıt: {len(banka_export_rows):,}  •  {simdi}",
-                headers=["Tarih", "Banka / Şube", "Açıklama", "Tür", "Tutar (₺)", "Karşı Taraf", "Kaynak"],
-                rows_data=banka_export_rows,
-                para_sutunlar={"Tutar (₺)"},
-                hdr_color="FF374151",
-            )
-            ozet.kaydet("Bankalar", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 8. SANAL POS
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("8/12 Sanal Pos...")
-            prog.setValue(7)
-            try:
-                from services.paytr_service import get_sanal_pos_hareketleri_db
-                sp_res = get_sanal_pos_hareketleri_db(uid, str(mno), ilk_str, son_str)
-                sp_raw = sp_res.get("data", [])
-            except Exception:
-                sp_raw = []
-                
-            sp_export_rows = []
-            for r in sp_raw:
-                sp_export_rows.append({
-                    "İşlem Tarihi": get_val(r, "islemtarihi") or "",
-                    "Sipariş No": get_val(r, "siparisno") or "",
-                    "İşlem Tutarı": float(get_val(r, "islemtutari") or 0),
-                    "Ödeme Tutarı": float(get_val(r, "odemetutari") or 0),
-                    "Kur": get_val(r, "kur") or "",
-                    "Mağaza No": get_val(r, "magazano") or "",
-                    "Net Tutar": float(get_val(r, "nettutar") or 0),
-                    "Kesinti Tutarı": float(get_val(r, "kesintitutari") or 0),
-                    "Kesinti Oranı": get_val(r, "kesintiorani") or "",
-                    "Kart Markası": get_val(r, "kartmarkasi") or "",
-                    "Kart No": get_val(r, "kartno") or "",
-                    "Ödeme Tipi": get_val(r, "odemetipi") or "",
-                    "Kart Tipi": get_val(r, "karttipi") or "",
-                    "Taksit Sayısı": get_val(r, "taksitsayisi") or ""
-                })
-                
-            _n, _g, _gd = _yeni_sheet(
-                title="Sanal POS",
-                baslik=f"Sanal POS Hareketleri — {ilk_goster} / {son_goster}",
-                alt_yazi=f"Kayıt: {len(sp_export_rows):,}  •  {simdi}",
-                headers=["İşlem Tarihi", "Sipariş No", "İşlem Tutarı", "Ödeme Tutarı", "Kur", 
-                         "Mağaza No", "Net Tutar", "Kesinti Tutarı", "Kesinti Oranı", 
-                         "Kart Markası", "Kart No", "Ödeme Tipi", "Kart Tipi", "Taksit Sayısı"],
-                rows_data=sp_export_rows,
-                para_sutunlar={"İşlem Tutarı", "Ödeme Tutarı", "Net Tutar", "Kesinti Tutarı"},
-                hdr_color="FF111827",
-            )
-            ozet.kaydet("Sanal POS", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 9. FİZİKSEL POS
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("9/12 Fiziksel Pos...")
-            prog.setValue(8)
-            rows = conn.execute("""
-                SELECT islemTarihi                      AS "Tarih",
-                       cariHesap                       AS "Banka",
-                       posNo                           AS "Terminal No",
-                       CAST(netTutar AS REAL)          AS "Net Tutar (₺)",
-                       CAST(isyeriUcretiTutar AS REAL) AS "Komisyon (₺)",
-                       CAST(islemTutari AS REAL)       AS "Brüt Tutar (₺)",
-                       islemTipi                       AS "Ödeme Türü",
-                       brand                           AS "Kart Markası"
-                FROM womsi_pos
-                WHERE userid=?
-                ORDER BY islemTarihi DESC, id DESC
-            """, (uid,)).fetchall()
-            _n, _g, _gd = _yeni_sheet(
-                title="Fiziksel POS",
-                baslik=f"Fiziksel POS Hareketleri — Tüm Dönem",
-                alt_yazi=f"Kayıt: {len(rows):,}  •  {simdi}",
-                headers=["Tarih","Banka","Terminal No","Net Tutar (₺)",
-                         "Komisyon (₺)","Brüt Tutar (₺)","Ödeme Türü","Kart Markası"],
-                rows_data=_rows_to_dicts(rows),
-                para_sutunlar={"Net Tutar (₺)","Komisyon (₺)","Brüt Tutar (₺)"},
-                hdr_color="FF1F2937",
-            )
-            ozet.kaydet("Fiziksel POS", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 10. KREDİ KARTLARI
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("10/11 Kredi Kartları...")
-            prog.setValue(9)
-            try:
-                from db.db_compat import right4 as _r4
-                kk_raw = conn.execute(f"""
-                    SELECT
-                        tarih                          AS "Tarih",
-                        aciklama                       AS "Açıklama",
-                        Banka                          AS "Kart / Banka",
-                        hesapKodu                      AS "Hesap Kodu",
-                        CAST(alinan_tutar1 AS REAL)    AS "Tutar (₺)",
-                        CASE WHEN alinan_tutar1 < 0
-                             THEN 'Ödeme' ELSE 'Borç' END AS "Tür"
-                    FROM kredikartidata
-                    WHERE userid = ?
-                      AND {_r4('tarih')} = ?
-                    ORDER BY tarih ASC, id ASC
-                """, (str(uid), str(yil))).fetchall()
-                kk_rows = _rows_to_dicts(kk_raw)
-            except Exception as _kk_e:
-                print(f"Kredi kartı export hata: {_kk_e}")
-                kk_rows = []
-            _n, _g, _gd = _yeni_sheet(
-                title="Kredi Kartları",
-                baslik=f"Kredi Kartı Hareketleri — {yil}",
-                alt_yazi=f"Kayıt: {len(kk_rows):,}  •  {simdi}",
-                headers=["Tarih", "Açıklama", "Kart / Banka",
-                         "Hesap Kodu", "Tutar (₺)", "Tür"],
-                rows_data=kk_rows,
-                para_sutunlar={"Tutar (₺)"},
-                hdr_color="FFD97706",
-            )
-            ozet.kaydet("Kredi Kartları", kayit=_n, gelir=_g, gider=_gd)
-    
-            # ═══════════════════════════════════════════════════════════════════
-            # 11. ÖZET (ExcelOzetBuilder ile oluşturulur)
-            # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("11/11 Özet sayfası...")
-            prog.setValue(10)
-            ozet.yaz(
-                wb,
-                baslik=f"Dashboard Raporu — {yil}  ({ilk_goster} / {son_goster})",
-                simdi=simdi,
-                hdr_color="FF1E3A8A",
-            )
-    
-            conn.close()
-    
-            # ── Kaydet ──
-            prog.setValue(12)
-            wb.save(path)
-            prog.close()
-    
-            msg = QMessageBox(self)
-            msg.setWindowTitle("✅  Excel Hazır")
-            msg.setText(
-                f"Tüm kartlar başarıyla dışa aktarıldı!\n\n"
-                f"📄  {path}\n"
-                f"📋  Toplam {ozet.toplam_kayit():,} kayıt  •  {len(ozet._data)} sheet\n"
-                f"📅  {ilk_goster} — {son_goster}\n\n"
-                + ozet.ozet_str()
-            )
-            msg.setStyleSheet("""
-                QMessageBox { background-color: white; }
-                QLabel { color: #1F2937; font-size: 12px; font-weight: 500;
-                          min-width: 380px; min-height: 40px; }
-                QPushButton { background-color: #2563EB; color: white; border: none;
-                              border-radius: 6px; padding: 6px 18px;
-                              font-size: 11px; font-weight: bold; }
-                QPushButton:hover { background-color: #1D4ED8; }
-            """)
-            msg.exec()
-    
-        except Exception as exc:
-            prog.close()
-            print(traceback.format_exc())
-            QMessageBox.critical(self, "Hata", f"Excel oluşturulurken hata:\n{exc}")
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2391,354 +1451,11 @@ class BeyannamePreviewDialog(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Bankalar Bakiye Dialog
-# womsis_banka tablosu — şube/banka bazlı gelir/gider/net hareketler
-# ─────────────────────────────────────────────────────────────────────────────
-
-class BankalaBakiyeDialog(QDialog):
-    """
-    Bankalar Bakiye kartına tıklandığında açılan detay diyalogu.
-
-    Yapı (eski PHP sistemiyle birebir — iki panelli):
-    ┌──────────────────┬──────────────────────────────────────────────┐
-    │  Sol panel       │  Sağ panel                                   │
-    │  Banka / Şube    │  Seçilen bankaya ait hareket tablosu         │
-    │  GROUP BY özet   │  Tarih | Açıklama | Tür | Tutar | Karşı Taraf│
-    │  Hepsi + liste   │  Alt bant: Gelir / Gider / Net               │
-    └──────────────────┴──────────────────────────────────────────────┘
-    """
-
-    _STYLE = """
-        QDialog  { background: #F0F4F8; }
-        QFrame#sol_panel {
-            background: white;
-            border: 1px solid #CBD5E1;
-            border-radius: 10px;
-        }
-        QFrame#sag_panel {
-            background: white;
-            border: 1px solid #CBD5E1;
-            border-radius: 10px;
-        }
-        QLabel#diyalog_baslik {
-            font-size: 15px; font-weight: 800; color: #1E3A8A;
-        }
-        QLabel#panel_baslik {
-            font-size: 12px; font-weight: 700; color: #374151;
-            padding: 6px 10px;
-            background: #EFF6FF;
-            border-radius: 6px;
-        }
-        QLabel#ozet_bant {
-            font-size: 11px; color: #374151;
-            background: #F8FAFC;
-            border: 1px solid #E2E8F0;
-            border-radius: 6px;
-            padding: 5px 10px;
-        }
-        QTableWidget {
-            background: white;
-            gridline-color: #F1F5F9;
-            font-size: 11px;
-            color: #1F2937;
-            border: none;
-        }
-        QTableWidget::item { padding: 3px 6px; }
-        QTableWidget::item:hover    { background: #EFF6FF; }
-        QTableWidget::item:selected { background: #DBEAFE; color: #1E3A8A; }
-        QTableWidget::item:alternate{ background: #F8FAFC; }
-        QHeaderView::section {
-            background: #1E3A8A; color: white;
-            font-weight: 700; font-size: 10px;
-            padding: 5px 6px; border: none;
-            border-right: 1px solid #1D4ED8;
-        }
-        QPushButton#kapat_btn {
-            background: #1E3A8A; color: white;
-            border: none; border-radius: 6px;
-            padding: 6px 22px; font-weight: 700; font-size: 11px;
-        }
-        QPushButton#kapat_btn:hover { background: #1D4ED8; }
-    """
-
-    _SOL_COLS = ["Banka / Şube", "Kayıt", "Gelir (₺)", "Gider (₺)", "Net (₺)"]
-    _SAG_COLS = ["Tarih", "Açıklama", "Tür", "Tutar (₺)", "Karşı Taraf", "Kaynak"]
-
-    def __init__(self, userid: int, parent=None):
-        super().__init__(parent)
-        self._userid       = userid
-        self._tum_data: list[dict] = []
-        self._secili_sube: str | None = None
-
-        self.setWindowTitle("🏦  Bankalar — Banka / Şube Detayı")
-        self.setMinimumSize(1180, 660)
-        self.resize(1300, 740)
-        self.setStyleSheet(self._STYLE)
-        self._build_ui()
-        self._load_all()
-
-    # ── UI ───────────────────────────────────────────────────────────────────
-
-    def _build_ui(self):
-        from PyQt6.QtWidgets import (
-            QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-            QTableWidget, QHeaderView, QPushButton, QSplitter,
-        )
-        from PyQt6.QtCore import Qt
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
-
-        hdr = QLabel("🏦  Bankalar — Şube Bazlı Hareket Tablosu")
-        hdr.setObjectName("diyalog_baslik")
-        root.addWidget(hdr)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(6)
-
-        # ─ Sol Panel ─────────────────────────────────────────────
-        sol_frame = QFrame()
-        sol_frame.setObjectName("sol_panel")
-        sol_lay = QVBoxLayout(sol_frame)
-        sol_lay.setContentsMargins(10, 10, 10, 10)
-        sol_lay.setSpacing(6)
-
-        sol_lbl = QLabel("🏛  Banka / Şube Listesi")
-        sol_lbl.setObjectName("panel_baslik")
-        sol_lay.addWidget(sol_lbl)
-
-        self._sol_tablo = QTableWidget()
-        self._sol_tablo.setColumnCount(len(self._SOL_COLS))
-        self._sol_tablo.setHorizontalHeaderLabels(self._SOL_COLS)
-        self._sol_tablo.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        for ci in range(1, len(self._SOL_COLS)):
-            self._sol_tablo.setColumnWidth(ci, 90)
-        self._sol_tablo.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._sol_tablo.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._sol_tablo.setAlternatingRowColors(True)
-        self._sol_tablo.verticalHeader().setVisible(False)
-        self._sol_tablo.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self._sol_tablo.itemSelectionChanged.connect(self._on_sube_secildi)
-        sol_lay.addWidget(self._sol_tablo)
-
-        splitter.addWidget(sol_frame)
-
-        # ─ Sağ Panel ─────────────────────────────────────────────
-        sag_frame = QFrame()
-        sag_frame.setObjectName("sag_panel")
-        sag_lay = QVBoxLayout(sag_frame)
-        sag_lay.setContentsMargins(10, 10, 10, 10)
-        sag_lay.setSpacing(6)
-
-        self._sag_baslik = QLabel("📋  Tüm Hareketler")
-        self._sag_baslik.setObjectName("panel_baslik")
-        sag_lay.addWidget(self._sag_baslik)
-
-        self._sag_tablo = QTableWidget()
-        self._sag_tablo.setColumnCount(len(self._SAG_COLS))
-        self._sag_tablo.setHorizontalHeaderLabels(self._SAG_COLS)
-        hh = self._sag_tablo.horizontalHeader()
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for ci, w in enumerate([110, 0, 70, 120, 160, 100]):
-            if w:
-                self._sag_tablo.setColumnWidth(ci, w)
-        self._sag_tablo.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._sag_tablo.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._sag_tablo.setAlternatingRowColors(True)
-        self._sag_tablo.verticalHeader().setVisible(False)
-        self._sag_tablo.setSortingEnabled(True)
-        sag_lay.addWidget(self._sag_tablo)
-
-        self._ozet_bant = QLabel("—")
-        self._ozet_bant.setObjectName("ozet_bant")
-        self._ozet_bant.setTextFormat(Qt.TextFormat.RichText)
-        sag_lay.addWidget(self._ozet_bant)
-
-        splitter.addWidget(sag_frame)
-        splitter.setSizes([340, 860])
-        root.addWidget(splitter, stretch=1)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        kapat = QPushButton("  Kapat  ")
-        kapat.setObjectName("kapat_btn")
-        kapat.clicked.connect(self.accept)
-        btn_row.addWidget(kapat)
-        root.addLayout(btn_row)
-
-    # ── Veri ─────────────────────────────────────────────────────────────────
-
-    def _load_all(self):
-        from db.database import get_connection
-        try:
-            conn = get_connection()
-            rows = conn.execute("""
-                SELECT
-                    tarih,
-                    COALESCE(aciklama, '')       AS aciklama,
-                    COALESCE(gelirgider, '')     AS gelirgider,
-                    CAST(tutar AS REAL)          AS tutar,
-                    COALESCE(sube, '(Şubesiz)') AS sube,
-                    COALESCE(faturaunvan, '')    AS faturaunvan,
-                    COALESCE(kaynak, '')         AS kaynak
-                FROM womsis_banka
-                WHERE userid = ?
-                ORDER BY tarih DESC, id DESC
-            """, (self._userid,)).fetchall()
-            self._tum_data = [dict(r) if not isinstance(r, dict) else r for r in rows]
-            conn.close()
-        except Exception as exc:
-            self._tum_data = []
-            print(f"BankalaBakiyeDialog hata: {exc}")
-        self._doldur_sol()
-        self._doldur_sag(None)
-
-    def _doldur_sol(self):
-        from PyQt6.QtWidgets import QTableWidgetItem
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QColor
-
-        gruplar: dict[str, dict] = {}
-        for r in self._tum_data:
-            sube  = r.get("sube") or "(Şubesiz)"
-            tur   = str(r.get("gelirgider", "")).lower()
-            tutar = float(r.get("tutar") or 0)
-            if sube not in gruplar:
-                gruplar[sube] = {"kayit": 0, "gelir": 0.0, "gider": 0.0}
-            gruplar[sube]["kayit"] += 1
-            if tur == "gelir":
-                gruplar[sube]["gelir"] += tutar
-            else:
-                gruplar[sube]["gider"] += tutar
-
-        self._sol_tablo.setSortingEnabled(False)
-        self._sol_tablo.setRowCount(0)
-
-        # Hepsi satırı
-        tg = sum(d["gelir"] for d in gruplar.values())
-        tgd = sum(d["gider"] for d in gruplar.values())
-        self._ekle_sol_satir("🔷  Hepsi", len(self._tum_data), tg, tgd,
-                              bold=True, bg="#EFF6FF")
-
-        # Şubeler (gelir büyükten küçüğe)
-        for sube, d in sorted(gruplar.items(),
-                               key=lambda x: x[1]["gelir"], reverse=True):
-            self._ekle_sol_satir(sube, d["kayit"], d["gelir"], d["gider"])
-
-        self._sol_tablo.setSortingEnabled(False)
-        self._sol_tablo.selectRow(0)
-
-    def _ekle_sol_satir(self, ad, kayit, gelir, gider, bold=False, bg=None):
-        from PyQt6.QtWidgets import QTableWidgetItem
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QColor
-
-        net = gelir - gider
-        ri  = self._sol_tablo.rowCount()
-        self._sol_tablo.insertRow(ri)
-        self._sol_tablo.setRowHeight(ri, 30)
-
-        vals   = [ad, str(kayit), f"{gelir:,.2f}", f"{gider:,.2f}", f"{net:+,.2f}"]
-        aligns = [Qt.AlignmentFlag.AlignLeft,   Qt.AlignmentFlag.AlignRight,
-                  Qt.AlignmentFlag.AlignRight,  Qt.AlignmentFlag.AlignRight,
-                  Qt.AlignmentFlag.AlignRight]
-        colors = [None, None, "#047857", "#DC2626",
-                  "#047857" if net >= 0 else "#DC2626"]
-
-        for ci, (v, align, col) in enumerate(zip(vals, aligns, colors)):
-            it = QTableWidgetItem(v)
-            it.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
-            if col:
-                it.setForeground(QColor(col))
-            if bold:
-                f = it.font(); f.setBold(True); it.setFont(f)
-            if bg:
-                it.setBackground(QColor(bg))
-            self._sol_tablo.setItem(ri, ci, it)
-
-    def _on_sube_secildi(self):
-        sel = self._sol_tablo.selectedItems()
-        if not sel:
-            return
-        ad = self._sol_tablo.item(sel[0].row(), 0)
-        if not ad:
-            return
-        metin = ad.text().replace("🔷  ", "").strip()
-        sube  = None if metin == "Hepsi" else metin
-        self._secili_sube = sube
-        self._sag_baslik.setText(
-            f"📋  {'Tüm Hareketler' if sube is None else sube}"
-        )
-        self._doldur_sag(sube)
-
-    def _doldur_sag(self, sube: str | None):
-        from PyQt6.QtWidgets import QTableWidgetItem
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QColor
-
-        rows = (self._tum_data if sube is None
-                else [r for r in self._tum_data
-                      if (r.get("sube") or "(Şubesiz)") == sube])
-
-        self._sag_tablo.setSortingEnabled(False)
-        self._sag_tablo.setRowCount(0)
-
-        toplam_gelir = toplam_gider = 0.0
-        for r in rows:
-            tur   = str(r.get("gelirgider", "")).lower()
-            tutar = float(r.get("tutar") or 0)
-            if tur == "gelir":
-                toplam_gelir += tutar
-            else:
-                toplam_gider += tutar
-
-            ri = self._sag_tablo.rowCount()
-            self._sag_tablo.insertRow(ri)
-            self._sag_tablo.setRowHeight(ri, 26)
-
-            vals   = [
-                str(r.get("tarih", "") or ""),
-                str(r.get("aciklama", "") or ""),
-                str(r.get("gelirgider", "") or ""),
-                f"{tutar:,.2f}",
-                str(r.get("faturaunvan", "") or ""),
-                str(r.get("kaynak", "") or ""),
-            ]
-            aligns = [Qt.AlignmentFlag.AlignLeft,   Qt.AlignmentFlag.AlignLeft,
-                      Qt.AlignmentFlag.AlignCenter, Qt.AlignmentFlag.AlignRight,
-                      Qt.AlignmentFlag.AlignLeft,   Qt.AlignmentFlag.AlignLeft]
-            para_col = "#047857" if tur == "gelir" else "#DC2626"
-
-            for ci, (v, align) in enumerate(zip(vals, aligns)):
-                it = QTableWidgetItem(v)
-                it.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
-                if ci in (2, 3):
-                    it.setForeground(QColor(para_col))
-                self._sag_tablo.setItem(ri, ci, it)
-
-        self._sag_tablo.setSortingEnabled(True)
-
-        net = toplam_gelir - toplam_gider
-        ns  = "+" if net >= 0 else ""
-        nc  = "#047857" if net >= 0 else "#DC2626"
-        self._ozet_bant.setText(
-            f"<b>{len(rows):,}</b> kayıt  &nbsp;|&nbsp;  "
-            f"Gelir: <b style='color:#047857'>{toplam_gelir:,.2f} ₺</b>  "
-            f"Gider: <b style='color:#DC2626'>{toplam_gider:,.2f} ₺</b>  "
-            f"Net: <b style='color:{nc}'>{ns}{net:,.2f} ₺</b>"
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Kredi Kartı Detay Dialog
 # PHP: admin.php → Kredi Kartları kartı → modal (kart özet + ekstre tablo)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class KrediKartiDialog(QDialog):
-
     """
     PHP admin.php 'Kredi Kartları' modalının PyQt6 karşılığı.
 
@@ -3621,24 +2338,24 @@ class SanalPosDialog(QDialog):
             ws.title = "Sanal Pos"
 
             # Excel Stylings
-            font_title = Font(name="Segoe UI", size=14, bold=True, color="FF212121")
-            font_subtitle = Font(name="Segoe UI", size=9, italic=True, color="FF4B5563")
-            font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFFFF")
-            font_data = Font(name="Segoe UI", size=10, color="FF1F2937")
-            font_total = Font(name="Segoe UI", size=11, bold=True, color="FF212121")
+            font_title = Font(name="Segoe UI", size=14, bold=True, color="212121")
+            font_subtitle = Font(name="Segoe UI", size=9, italic=True, color="4B5563")
+            font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+            font_data = Font(name="Segoe UI", size=10, color="1F2937")
+            font_total = Font(name="Segoe UI", size=11, bold=True, color="212121")
 
-            fill_header = PatternFill(start_color="FF212121", end_color="FF212121", fill_type="solid") # Dark
-            fill_total = PatternFill(start_color="FFF3F4F6", end_color="FFF3F4F6", fill_type="solid")  # Light Gray
+            fill_header = PatternFill(start_color="212121", end_color="212121", fill_type="solid") # Dark
+            fill_total = PatternFill(start_color="F3F4F6", end_color="F3F4F6", fill_type="solid")  # Light Gray
 
             border_thin = Border(
-                left=Side(style="thin", color="FFE5E7EB"),
-                right=Side(style="thin", color="FFE5E7EB"),
-                top=Side(style="thin", color="FFE5E7EB"),
-                bottom=Side(style="thin", color="FFE5E7EB")
+                left=Side(style="thin", color="E5E7EB"),
+                right=Side(style="thin", color="E5E7EB"),
+                top=Side(style="thin", color="E5E7EB"),
+                bottom=Side(style="thin", color="E5E7EB")
             )
             border_total = Border(
-                top=Side(style="thin", color="FFD1D5DB"),
-                bottom=Side(style="double", color="FF212121")
+                top=Side(style="thin", color="D1D5DB"),
+                bottom=Side(style="double", color="212121")
             )
 
             # 1. Rapor Başlık Bloğu
@@ -4120,14 +2837,16 @@ class MaasKiraSmmDialog(QDialog):
         ("Fark",                 "fark",         130, Qt.AlignmentFlag.AlignRight, "#28a745"),
     ]
 
-    def __init__(self, userid: int, musterino: str = None, parent=None):
+    def __init__(self, userid: int, musterino: str = None, yil: int = None, parent=None):
         super().__init__(parent)
         self._userid    = userid
         self._musterino = musterino
+        self._yil       = yil
         self._rows: list[dict] = []
         self._all_rows: list[dict] = []
 
-        self.setWindowTitle("💼  Maaş Kira Smm — Vergi Muhtasar")
+        title_yil = f" ({yil})" if yil else ""
+        self.setWindowTitle(f"💼  Maaş Kira Smm — Vergi Muhtasar{title_yil}")
         self.setMinimumSize(1000, 660)
         self.resize(1160, 720)
         self._setup_ui()
@@ -4182,19 +2901,6 @@ class MaasKiraSmmDialog(QDialog):
 
         self._donem_cb.currentIndexChanged.connect(self._on_filter_change)
         self._ack_cb.currentIndexChanged.connect(self._on_ack_filter)
-        
-        self._excel_btn = QPushButton("📥 Excel İndir")
-        self._excel_btn.setFixedHeight(30)
-        self._excel_btn.setFixedWidth(110)
-        self._excel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._excel_btn.setStyleSheet(
-            "QPushButton{background:#10b981;color:white;border:none;"
-            "border-radius:4px;font-size:12px;font-weight:700;}"
-            "QPushButton:hover{background:#059669;}"
-        )
-        self._excel_btn.clicked.connect(self._export_excel)
-        fr.addWidget(self._excel_btn)
-
         fr.addStretch()
         tl.addLayout(fr)
         root.addWidget(top)
@@ -4295,7 +3001,8 @@ class MaasKiraSmmDialog(QDialog):
         """PHP: loadVergilerData() → vergiMuhtasarGetir.php"""
         from services.vergi_muhtasar_service import get_vergi_muhtasar
         donem = self._donem_cb.currentData() or ""
-        result = get_vergi_muhtasar(self._userid, musterino=self._musterino, donem=donem)
+        result = get_vergi_muhtasar(self._userid, musterino=self._musterino,
+                                    donem=donem, yil=self._yil)
         if not result.get("success"):
             self._durum_lbl.setText(f"❌ {result.get('message', 'Hata')}")
             return
@@ -4416,201 +3123,3 @@ class MaasKiraSmmDialog(QDialog):
             empty.setForeground(QColor("#6c757d"))
             self._tbl.setItem(0, 0, empty)
             self._tbl.setSpan(0, 0, 1, len(self.SUTUNLAR))
-
-    def _export_excel(self):
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Excel Olarak Kaydet", "maas_kira_smm_raporu.xlsx", "Excel Files (*.xlsx)"
-        )
-        if not path:
-            return
-
-        try:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Maaş Kira SMM"
-
-            # Excel Stylings
-            font_title = Font(name="Segoe UI", size=14, bold=True, color="FF1A3A5C")
-            font_subtitle = Font(name="Segoe UI", size=9, italic=True, color="FF4B5563")
-            font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFFFF")
-            font_data = Font(name="Segoe UI", size=10, color="FF1F2937")
-            font_total = Font(name="Segoe UI", size=11, bold=True, color="FF1A3A5C")
-
-            fill_header = PatternFill(start_color="FF1A3A5C", end_color="FF1A3A5C", fill_type="solid")
-            fill_total = PatternFill(start_color="FFF1F5F9", end_color="FFF1F5F9", fill_type="solid")
-
-            border_thin = Border(
-                left=Side(style="thin", color="FFE5E7EB"),
-                right=Side(style="thin", color="FFE5E7EB"),
-                top=Side(style="thin", color="FFE5E7EB"),
-                bottom=Side(style="thin", color="FFE5E7EB")
-            )
-            border_total = Border(
-                top=Side(style="thin", color="FF94A3B8"),
-                bottom=Side(style="double", color="FF1A3A5C")
-            )
-
-            # 1. Title Block
-            ws.append(["Maaş / Kira / SMM — Vergi Muhtasar Raporu"])
-            ws.cell(row=1, column=1).font = font_title
-
-            donem_val = self._donem_cb.currentText()
-            ack_val = self._ack_cb.currentText()
-            filtre_str = f"Filtreler - Dönem: {donem_val}, Açıklama: {ack_val}"
-            ws.append([filtre_str])
-            ws.cell(row=2, column=1).font = font_subtitle
-
-            ws.append([]) # Blank row
-
-            # Headers
-            headers = [col[0] for col in self.SUTUNLAR]
-            ws.append(headers)
-
-            header_row_idx = 4
-            for col_idx in range(len(headers)):
-                cell = ws.cell(row=header_row_idx, column=col_idx+1)
-                cell.font = font_header
-                cell.fill = fill_header
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                cell.border = border_thin
-
-            # Sum tracker for columns
-            column_sums = {col: 0.0 for col in range(len(self.SUTUNLAR))}
-
-            # Rows writing
-            current_row_idx = 5
-            for row in range(self._tbl.rowCount()):
-                if self._tbl.isRowHidden(row):
-                    continue
-
-                # Check if there is an empty table item indicator
-                item_first = self._tbl.item(row, 0)
-                if item_first and "kaydı bulunamadı" in item_first.text():
-                    continue
-
-                row_data = []
-                for col in range(self._tbl.columnCount()):
-                    item = self._tbl.item(row, col)
-                    cell_text = item.text() if item else ""
-                    field_name = self.SUTUNLAR[col][1]
-
-                    # Check if it is an amount column
-                    if field_name in ("gaytutar", "vergkestutar", "fark"):
-                        val_num = 0.0
-                        if item:
-                            val_data = item.data(Qt.ItemDataRole.UserRole)
-                            if val_data is not None:
-                                try:
-                                    val_num = float(val_data)
-                                except (ValueError, TypeError):
-                                    val_num = 0.0
-                            else:
-                                # Fallback parse
-                                s = cell_text.replace("₺", "").replace("TL", "").replace("+", "").replace("-", "").strip()
-                                s = s.replace(".", "").replace(",", ".")
-                                try:
-                                    val_num = float(s)
-                                except ValueError:
-                                    val_num = 0.0
-                        row_data.append(val_num)
-                        column_sums[col] += val_num
-                    else:
-                        row_data.append(cell_text)
-
-                ws.append(row_data)
-
-                # Style active data row
-                for col in range(len(row_data)):
-                    cell = ws.cell(row=current_row_idx, column=col+1)
-                    cell.font = font_data
-                    cell.border = border_thin
-                    field_name = self.SUTUNLAR[col][1]
-
-                    if field_name in ("gaytutar", "vergkestutar", "fark"):
-                        cell.alignment = Alignment(horizontal="right", vertical="center")
-                        cell.number_format = '#,##0.00'
-                    elif field_name == "donem":
-                        cell.alignment = Alignment(horizontal="center", vertical="center")
-                    else:
-                        cell.alignment = Alignment(horizontal="left", vertical="center")
-
-                current_row_idx += 1
-
-            # 2. Dynamic GENEL TOPLAM Row
-            summary_row = []
-            for col in range(self._tbl.columnCount()):
-                field_name = self.SUTUNLAR[col][1]
-                if col == 0:
-                    summary_row.append("GENEL TOPLAM")
-                elif field_name in ("gaytutar", "vergkestutar", "fark"):
-                    summary_row.append(column_sums[col])
-                else:
-                    summary_row.append("")
-
-            ws.append(summary_row)
-
-            # Style summary row
-            for col in range(len(summary_row)):
-                cell = ws.cell(row=current_row_idx, column=col+1)
-                cell.font = font_total
-                cell.fill = fill_total
-                cell.border = border_total
-                field_name = self.SUTUNLAR[col][1]
-
-                if col == 0:
-                    cell.alignment = Alignment(horizontal="left", vertical="center")
-                elif field_name in ("gaytutar", "vergkestutar", "fark"):
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                    cell.number_format = '#,##0.00'
-
-            # 3. Auto Width Adjustment
-            for col in ws.columns:
-                max_len = 0
-                col_letter = get_column_letter(col[0].column)
-                for cell in col:
-                    if cell.row in (1, 2, 3): # Skip title headers for width
-                        continue
-                    if cell.value is not None:
-                        if isinstance(cell.value, float):
-                            val_str = f"{cell.value:,.2f}"
-                        else:
-                            val_str = str(cell.value)
-                        max_len = max(max_len, len(val_str))
-                ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
-
-            # Set gridlines visible
-            ws.views.sheetView[0].showGridLines = True
-
-            wb.save(path)
-
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Başarılı")
-            msg.setText("Maaş Kira SMM Excel raporu başarıyla kaydedildi!")
-            msg.setStyleSheet("""
-                QMessageBox { background-color: white; }
-                QLabel { color: #1F2937; font-size: 13px; font-weight: 600; min-width: 280px; min-height: 40px; }
-                QPushButton { background-color: #1a3a5c; color: white; border: none; border-radius: 6px; padding: 6px 18px; font-size: 11px; font-weight: bold; }
-                QPushButton:hover { background-color: #0d2137; }
-            """)
-            msg.exec()
-
-        except Exception as e:
-            import traceback
-            err_msg = f"Excel kaydedilirken hata oluştu:\n{e}\n\nDetay:\n{traceback.format_exc()}"
-            print(err_msg)
-
-            msg = QMessageBox(self)
-            msg.setIcon(QMessageBox.Icon.Critical)
-            msg.setWindowTitle("Hata")
-            msg.setText(f"Excel raporu oluşturulurken beklenmedik hata oluştu:\n{e}")
-            msg.setStyleSheet("""
-                QMessageBox { background-color: white; }
-                QLabel { color: #DC2626; font-size: 12px; font-weight: 600; min-width: 240px; }
-                QPushButton { background-color: #DC2626; color: white; border: none; border-radius: 6px; padding: 6px 16px; }
-            """)
-            msg.exec()

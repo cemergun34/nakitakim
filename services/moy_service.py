@@ -359,6 +359,16 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
 
     # Lokal DB'ye yaz
     local = get_connection()
+
+    # PostgreSQL sequence dynamic fix (SQLite'tan aktarılan id'ler yüzünden sequence geri kalmış olabilir)
+    from db.db_config import get_mode
+    if get_mode() == "postgres":
+        try:
+            local.execute("SELECT setval(pg_get_serial_sequence('nakitakis_parametre', 'id'), COALESCE(MAX(id), 1)) FROM nakitakis_parametre")
+            local.commit()
+        except Exception as seq_err:
+            logger.warning("nakitakis_parametre sequence resetleme hatası: %s", seq_err)
+
     basari = 0
     detaylar = []   # hangi verilerin çekildiği bilgisi
     try:

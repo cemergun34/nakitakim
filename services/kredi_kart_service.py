@@ -133,12 +133,12 @@ def yukle_csv_yapıkredi(
     try:
         insert_sql = (
             "INSERT INTO kredikartidata "
-            "(userid, musterino, tarih, aciklama, Tutar, hesapKodu, alinan_tutar1, Banka) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "(userid, musterino, tarih, aciklama, tutar, hesapkodu, alinan_tutar1, banka) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
         )
         check_sql = (
             "SELECT COUNT(*) FROM kredikartidata "
-            "WHERE userid=? AND tarih=? AND aciklama=? AND alinan_tutar1=?"
+            "WHERE userid=%s AND tarih=%s AND aciklama=%s AND alinan_tutar1=%s"
         )
 
         for line in lines:
@@ -176,7 +176,7 @@ def yukle_csv_yapıkredi(
 
             # Mükerrer kontrolü
             mukerrer_sayisi = conn.execute(
-                check_sql, (userid, islem_tarihi, islemler, tutar_float)
+                check_sql, (str(userid), islem_tarihi, islemler, tutar_float)
             ).fetchone()[0]
             if mukerrer_sayisi > 0:
                 mukerrer += 1
@@ -184,7 +184,7 @@ def yukle_csv_yapıkredi(
 
             try:
                 conn.execute(insert_sql, (
-                    userid, userid,
+                    str(userid), str(userid),
                     islem_tarihi, islemler,
                     tutar_str_duzenli, hesap_kodu, tutar_float, banka_adi
                 ))
@@ -284,8 +284,136 @@ def _parse_pdf_yapıkredi(dosya_yolu: str) -> list[dict]:
 
 
 def _parse_pdf_fallback(dosya_yolu: str, banka: str = "") -> list[dict]:
-    """pdfplumber yüklü değilse ya da parser import başarısız olursa boş döner."""
-    return []
+    """pdfplumber ile basit metin okuma üzerinden parse etmeye çalışır."""
+    islemler = []
+    try:
+        import pdfplumber
+        import os
+        import re
+
+        kaynak_dosya = os.path.basename(dosya_yolu)
+
+        if banka == "isbank":
+            isbank_pattern = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+(\d+)\s+(.+?)\s+(-?\d{1,3}(?:\.\d{3})*(?:,\d+))(?:\s|$)")
+            isbank_start_pattern = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+(\d+)\s+(.+?)(?:\s+(-?\d{1,3}(?:\.\d{3})*(?:,\d+))(?:\s|$))?$")
+
+            with pdfplumber.open(dosya_yolu) as pdf:
+                pending_date = None
+                pending_desc = None
+
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if not text:
+                        continue
+
+                    for line in text.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        if pending_date:
+                            amt_match = re.match(r"^(-?\d{1,3}(?:\.\d{3})*(?:,\d+))$", line)
+                            if amt_match:
+                                tutar_str = amt_match.group(1)
+                                tutar = tutar_str.replace('.', '').replace(',', '.')
+                                islemler.append({
+                                    "islem_tarihi": pending_date,
+                                    "aciklama": pending_desc.strip(),
+                                    "tutar_str": tutar_str,
+                                    "tutar": float(tutar),
+                                    "kaynak_dosya": kaynak_dosya
+                                })
+                                pending_date = pending_desc = None
+                                continue
+                            else:
+                                pending_date = pending_desc = None
+
+                        match = isbank_pattern.search(line)
+                        if match:
+                            tarih = match.group(1)
+                            aciklama = match.group(3).strip()
+                            tutar_str = match.group(4)
+                            tutar = tutar_str.replace('.', '').replace(',', '.')
+                            islemler.append({
+                                "islem_tarihi": tarih,
+                                "aciklama": aciklama,
+                                "tutar_str": tutar_str,
+                                "tutar": float(tutar),
+                                "kaynak_dosya": kaynak_dosya
+                            })
+                        else:
+                            match_start = isbank_start_pattern.search(line)
+                            if match_start and not match_start.group(4):
+                                pending_date = match_start.group(1)
+                                pending_desc = match_start.group(3)
+
+        elif banka == "yapıkredi":
+            # YapıKredi: "17 Aralık 2025  AÇIKLAMA  1.234,56"
+            TR_AYLAR = {
+                "Ocak": "01", "Şubat": "02", "Mart": "03", "Nisan": "04",
+                "Mayıs": "05", "Haziran": "06", "Temmuz": "07", "Ağustos": "08",
+                "Eylül": "09", "Ekim": "10", "Kasım": "11", "Aralık": "12",
+            }
+
+            def _tr_tarih_cevir(gun: str, ay_str: str, yil: str) -> str:
+                ay = TR_AYLAR.get(ay_str, "00")
+                return f"{gun.zfill(2)}/{ay}/{yil}"
+
+            # Başlık satırını ve özet satırlarını atlamak için
+            SKIP_PATTERNS = re.compile(
+                r"(İşlem Tarihi|ÖNCEKI DÖNEM|ÖNCEKİ DÖNEM|DÖNEM BORCU|TOPLAM|PUAN ÖZETİ|"
+                r"Alışveriş.*Aylık|Akdi Faiz|Gecikme Faiz|Devreden|Kalan TL|"
+                r"Dijital Kart|ABNO|FTNO|İşlem Tutarı|taksidi|TRY|USD Karşılığı)",
+                re.IGNORECASE
+            )
+
+            # "17 Aralık 2025  AÇIKLAMA  1.234,56  [opsiyonel taksit bilgisi] [opsiyonel puan]"
+            yk_pattern = re.compile(
+                r"^(\d{1,2})\s+(Ocak|Şubat|Mart|Nisan|Mayıs|Haziran|Temmuz|Ağustos|Eylül|Ekim|Kasım|Aralık)\s+(\d{4})"
+                r"\s+(.+?)\s+(\+?-?\d{1,3}(?:\.\d{3})*,\d+)"
+                r"(?:\s+[\d.,/]+)*(?:\s+\d+)?$"
+            )
+
+            with pdfplumber.open(dosya_yolu) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    if not text:
+                        continue
+
+                    for line in text.split('\n'):
+                        line = line.strip()
+                        if not line or SKIP_PATTERNS.search(line):
+                            continue
+
+                        match = yk_pattern.match(line)
+                        if match:
+                            gun, ay_str, yil, aciklama, tutar_raw = match.groups()
+                            tarih = _tr_tarih_cevir(gun, ay_str, yil)
+
+                            # Ödeme satırlarını atla (+tutar)
+                            if tutar_raw.startswith("+"):
+                                continue
+
+                            tutar_str = tutar_raw.strip()
+                            tutar = tutar_str.replace('.', '').replace(',', '.')
+                            try:
+                                tutar_float = float(tutar)
+                            except ValueError:
+                                continue
+
+                            islemler.append({
+                                "islem_tarihi": tarih,
+                                "aciklama": aciklama.strip(),
+                                "tutar_str": tutar_str,
+                                "tutar": tutar_float,
+                                "kaynak_dosya": kaynak_dosya
+                            })
+
+    except Exception as e:
+        import logging
+        logging.error("Fallback parse hatası: %s", e)
+
+    return islemler
 
 
 def _yukle_pdf_ortak(
@@ -307,12 +435,12 @@ def _yukle_pdf_ortak(
     try:
         insert_sql = (
             "INSERT INTO kredikartidata "
-            "(userid, musterino, tarih, aciklama, Tutar, alinan_tutar1, hesapKodu, womsiskey, Banka) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "(userid, musterino, tarih, aciklama, tutar, alinan_tutar1, hesapkodu, womsiskey, banka) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         check_sql = (
             "SELECT COUNT(*) FROM kredikartidata "
-            "WHERE userid=? AND tarih=? AND alinan_tutar1=? AND aciklama LIKE ?"
+            "WHERE userid=%s AND tarih=%s AND alinan_tutar1=%s AND aciklama LIKE %s"
         )
 
         for idx, dosya_yolu in enumerate(dosya_yolları):
@@ -350,7 +478,7 @@ def _yukle_pdf_ortak(
                 # Mükerrer kontrolü (PHP checkStmt karşılığı)
                 mukerrer_sayisi = conn.execute(
                     check_sql,
-                    (userid, islem_tarihi, tutar_float, f"%{aciklama_orj}")
+                    (str(userid), islem_tarihi, tutar_float, f"%{aciklama_orj}%")
                 ).fetchone()[0]
                 if mukerrer_sayisi > 0:
                     mukerrer += 1
@@ -359,15 +487,20 @@ def _yukle_pdf_ortak(
                 womsiskey = _random_key()
 
                 try:
+                    conn.execute("SAVEPOINT sp_insert")
                     conn.execute(insert_sql, (
-                        userid, userid,
+                        str(userid), str(userid),
                         islem_tarihi, aciklama_birlesik,
                         tutar_str_duzenli, tutar_float,
                         hesap_kodu, womsiskey, dosya_banka_adi
                     ))
+                    conn.execute("RELEASE SAVEPOINT sp_insert")
                     basarili += 1
                 except Exception as exc:
+                    conn.execute("ROLLBACK TO SAVEPOINT sp_insert")
                     hatali += 1
+                    import sys
+                    print(f"DB INSERT HATA: {exc}", file=sys.stderr)
                     hatalar.append(f"{os.path.basename(dosya_yolu)}: {exc}")
 
             toplam_basarili += basarili
@@ -469,10 +602,6 @@ def yukle_dosyalar(
         return {"success": False, "errors": f"Desteklenmeyen dosya türü: {dosya_turu}", "added": 0, "skipped": 0}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Yeni Kart Tanımlama ve Silme
-# ─────────────────────────────────────────────────────────────────────────────
-
 def ekle_kredi_kart(
     userid: int,
     banka: str,
@@ -485,9 +614,9 @@ def ekle_kredi_kart(
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO key_kartlari (banka, no, userid, hesapKodu, bankaAdi, iban) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (banka, no, userid, hesap_kodu, banka_adi, iban)
+            "INSERT INTO key_kartlari (banka, no, userid, hesapkodu, bankaadi, iban) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (banka, no, str(userid), hesap_kodu, banka_adi, iban)
         )
         conn.commit()
         return {"success": True}
@@ -503,54 +632,8 @@ def sil_kredi_kart(userid: int, card_id: int) -> dict:
     conn = get_connection()
     try:
         conn.execute(
-            "DELETE FROM key_kartlari WHERE id = ? AND userid = ?",
-            (card_id, userid)
-        )
-        conn.commit()
-        return {"success": True}
-    except Exception as exc:
-        conn.rollback()
-        return {"success": False, "message": str(exc)}
-    finally:
-        conn.close()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Yeni Kart Tanımlama ve Silme
-# ─────────────────────────────────────────────────────────────────────────────
-
-def ekle_kredi_kart(
-    userid: int,
-    banka: str,
-    no: str,
-    hesap_kodu: str,
-    banka_adi: str,
-    iban: str
-) -> dict:
-    """Yeni bir kredi kartını key_kartlari tablosuna ekler."""
-    conn = get_connection()
-    try:
-        conn.execute(
-            "INSERT INTO key_kartlari (banka, no, userid, hesapKodu, bankaAdi, iban) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (banka, no, userid, hesap_kodu, banka_adi, iban)
-        )
-        conn.commit()
-        return {"success": True}
-    except Exception as exc:
-        conn.rollback()
-        return {"success": False, "message": str(exc)}
-    finally:
-        conn.close()
-
-
-def sil_kredi_kart(userid: int, card_id: int) -> dict:
-    """Kredi kartını key_kartlari tablosundan siler."""
-    conn = get_connection()
-    try:
-        conn.execute(
-            "DELETE FROM key_kartlari WHERE id = ? AND userid = ?",
-            (card_id, userid)
+            "DELETE FROM key_kartlari WHERE id = %s AND userid = %s",
+            (card_id, str(userid))
         )
         conn.commit()
         return {"success": True}

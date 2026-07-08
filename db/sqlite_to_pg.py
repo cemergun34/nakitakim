@@ -168,6 +168,14 @@ def migrate_all(batch_size: int = BATCH_SIZE) -> Generator[MigrasyonSonuc, None,
                     pg_conn.commit()
                     aktarilan += len(batch)
 
+                # Reset sequence (identity) to match max ID
+                pk_col = "kayitno" if pg_tablo == "tanim_kullanici" else "id"
+                try:
+                    cur.execute(f"SELECT setval(pg_get_serial_sequence('{pg_tablo}', '{pk_col}'), COALESCE(MAX({pk_col}), 1)) FROM {pg_tablo}")
+                    pg_conn.commit()
+                except Exception:
+                    pass
+
                 yield MigrasyonSonuc(
                     tablo=tablo,
                     toplam=toplam,

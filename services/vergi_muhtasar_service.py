@@ -51,12 +51,13 @@ def _parse_decimal(val: str) -> Optional[float]:
 # Okuma  (PHP vergiMuhtasarGetir.php karşılığı)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "") -> dict:
+def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "", yil: int = None) -> dict:
     """
     Kullanıcıya ait Vergi Muhtasar kayıtlarını döndürür.
 
     PHP'deki davranışla birebir:
     - donem parametresi varsa filtrelenir
+    - yil parametresi varsa o yıla ait kayıtlar filtrelenir
     - Distinct dönem listesi de döndürülür
     - Her satır için fark = gaytutar - vergkestutar hesaplanır
     - Döndürülen sözlük: { 'success': bool, 'data': [...], 'donemler': [...] }
@@ -73,6 +74,12 @@ def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "") -> d
         if donem:
             where  += " AND donem = ?"
             params.append(donem)
+
+        if yil and not donem:
+            # donem örn: 'Oca.25', 'Ara.26' — son 2 hane yılın son 2 rakamı
+            yil_suffix = str(yil)[-2:]
+            where += " AND donem LIKE ?"
+            params.append(f"%.{yil_suffix}")
 
         sql  = (f"SELECT id, hesapkodu, ack, donem, gaytutar, vergkestutar "
                 f"FROM {TABLE} {where} ORDER BY donem, hesapkodu")
@@ -123,12 +130,12 @@ def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "") -> d
         conn.close()
 
 
-def get_dashboard_toplam(userid: int, musterino: str = None) -> dict:
+def get_dashboard_toplam(userid: int, musterino: str = None, yil: int = None) -> dict:
     """
     PHP: initMaasKiraSmmmCard() → #dashMaasKiraSmmmToplam
     Formül: farkToplam += Math.abs(gay - verg)  (her satır için, NULL→0)
     """
-    r = get_vergi_muhtasar(userid, musterino=musterino)
+    r = get_vergi_muhtasar(userid, musterino=musterino, yil=yil)
     if not r.get("success"):
         return {"success": False, "fark_toplam": 0.0, "fark_toplam_fmt": "₺0,00"}
 

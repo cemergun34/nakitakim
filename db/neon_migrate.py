@@ -45,6 +45,16 @@ for table in TABLES:
         from psycopg2.extras import execute_batch
         execute_batch(cur, sql, data, page_size=500)
         raw.commit()
+
+        # Reset sequence (identity) to match max ID
+        pg_tablo = table.lower()
+        pk_col = "kayitno" if pg_tablo == "tanim_kullanici" else "id"
+        try:
+            cur.execute(f"SELECT setval(pg_get_serial_sequence('\"{pg_tablo}\"', '{pk_col}'), COALESCE(MAX(\"{pk_col}\"), 1)) FROM \"{pg_tablo}\"")
+            raw.commit()
+        except Exception:
+            pass
+
         cur.close()
         total += len(data)
         print(f"  ✅ {table:30s} {len(data):>6,} kayıt aktarıldı")

@@ -62,8 +62,12 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(ayarlar)
         self._screens["ayarlar"] = ayarlar
 
-        # Moy'dan veri çekilince dashboard'u otomatik yenile
-        if hasattr(ayarlar, "_moy_card"):
+        # Ayarlar'dan veri çekilince dashboard otomatik yenilenir
+        # Öncelik: AyarlarScreen seviyesindeki data_changed sinyali (tüm kartlar)
+        if hasattr(ayarlar, "data_changed"):
+            ayarlar.data_changed.connect(dash.refresh)
+        # Ek güvence: MoyCard doğrudan da bağlı kalsın
+        if hasattr(ayarlar, "_moy_card") and hasattr(ayarlar._moy_card, "data_changed"):
             ayarlar._moy_card.data_changed.connect(dash.refresh)
 
         self.stack.setCurrentWidget(dash)

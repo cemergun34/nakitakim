@@ -417,6 +417,11 @@ PG_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_hareketler_gelirgider ON hareketler(gelirgider);",
     "CREATE INDEX IF NOT EXISTS idx_ghh_userid_nerden_tarih ON genel_hesap_hareketleri(userid, nerden_geliyor, tarih_date);",
     "CREATE INDEX IF NOT EXISTS idx_faturalar_userid_tarih ON faturalar(userid, tarih);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_faturalar_hash_userid "
+    "ON faturalar (hash, userid) WHERE hash IS NOT NULL AND hash <> '';",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_faturalar_no_userid_mod "
+    "ON faturalar (faturano, userid, gelirgidermod) "
+    "WHERE faturano IS NOT NULL AND faturano <> '';",
     "CREATE INDEX IF NOT EXISTS idx_vomsis_userid ON vomsisbilgileri(userid);",
     'CREATE INDEX IF NOT EXISTS idx_moy_musteri ON moy_bilgileri(musterino);',
     'CREATE INDEX IF NOT EXISTS idx_vergimuhtasar_userid_donem ON vergimuhtasar(userid, donem);',

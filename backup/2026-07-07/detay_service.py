@@ -40,25 +40,30 @@ def _col(sqlite_name: str, pg_name: str) -> str:
 def get_nakit_kasa_sube_ozet(userid: int, musterino: int, yil: int) -> list[dict]:
     """
     Nakit Kasa Gelir kartına tıklandığında gösterilecek
-    şube bazlı gelir/gider özeti (genel_hesap_hareketleri tablosundan).
+    şube bazlı gelir/gider özeti (hareketler tablosundan).
+    hareketler.tarih formatı: DD.MM.YYYY → 7. karakterden 4 karakter = yıl.
     """
+    _yil_col  = tarih_yil_hareketler("h.tarih")
+    _mno_col  = _col('"musteriNo"', "musterino")
+    _gelir_col = _col('"gelirGider"', "gelirgider")
+    _sube_ack = _col("subeAck", "subeack")
     conn = get_connection()
     try:
         rows = conn.execute(f"""
             SELECT
-                COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
-                COALESCE(g.sube, '(Şubesiz)') AS sube_id,
-                {_round_sql("SUM(CAST(g.gelir AS REAL))")} AS toplam_gelir,
-                {_round_sql("SUM(CAST(g.gider AS REAL))")} AS toplam_gider,
+                COALESCE(s.{_sube_ack}, '(şubesiz)') AS sube_adi,
+                COALESCE(CAST(NULLIF(TRIM(h.sube),'') AS INTEGER), 0)  AS sube_id,
+                {_round_sql(f"SUM(CASE WHEN h.{_gelir_col}='gelir' THEN CAST(h.alinan_tutar1 AS REAL) ELSE 0 END)")} AS toplam_gelir,
+                {_round_sql(f"SUM(CASE WHEN h.{_gelir_col}='gider' THEN CAST(h.alinan_tutar1 AS REAL) ELSE 0 END)")} AS toplam_gider,
                 COUNT(*) AS kayit_sayisi
-            FROM genel_hesap_hareketleri g
-            WHERE g.userid = ?
-              AND g.musteri_no = ?
-              AND g.nerden_geliyor = 'kasa'
-              AND {yr("g.tarih_date")} = ?
-            GROUP BY g.sube
+            FROM hareketler h
+            LEFT JOIN subeler s ON CAST(NULLIF(TRIM(h.sube),'') AS INTEGER) = s.id
+            WHERE h.{_mno_col} = ?
+              AND length(h.tarih) >= 10
+              AND {_yil_col} = ?
+            GROUP BY h.sube, s.{_sube_ack}
             ORDER BY toplam_gelir DESC
-        """, (userid, musterino, str(yil))).fetchall()
+        """, (musterino, str(yil))).fetchall()
         return list(rows)
     finally:
         conn.close()
@@ -201,7 +206,7 @@ def get_hareketler_detay(userid: int, musterino: int, yil: int,
         conn.close()
 
 
-def get_nakit_kasa_detay(userid: int, musterino: int, yil: int, sube_adi: str = None) -> list[dict]:
+def get_nakit_kasa_detay(userid: int, musterino: int, yil: int) -> list[dict]:
     """
     Nakit Kasa detay listesi — dashboard ile AYNI kaynak.
     genel_hesap_hareketleri tablosundan nerden_geliyor='kasa' filtresiyle çeker.
@@ -209,44 +214,27 @@ def get_nakit_kasa_detay(userid: int, musterino: int, yil: int, sube_adi: str = 
     """
     conn = get_connection()
     try:
-        if sube_adi == "(Şubesiz)":
-            rows = conn.execute(f"""
-                SELECT
-                    g.id, g.tarih_date AS tarih, g.form_id, g.aciklama,
-                    '(Şubesiz)' AS sube_adi, g.gelir, g.gider,
-                    g.teslim_sekli, g.odeme_sekli, g.kategori, g.nerden_geliyor
-                FROM genel_hesap_hareketleri g
-                WHERE g.userid = ? AND g.musteri_no = ? AND g.nerden_geliyor = 'kasa'
-                  AND (g.sube IS NULL OR g.sube = '')
-                  AND {yr("g.tarih_date")} = ?
-                ORDER BY g.tarih_date DESC, g.id DESC
-                LIMIT 2000
-            """, (userid, musterino, str(yil))).fetchall()
-        elif sube_adi:
-            rows = conn.execute(f"""
-                SELECT
-                    g.id, g.tarih_date AS tarih, g.form_id, g.aciklama,
-                    g.sube AS sube_adi, g.gelir, g.gider,
-                    g.teslim_sekli, g.odeme_sekli, g.kategori, g.nerden_geliyor
-                FROM genel_hesap_hareketleri g
-                WHERE g.userid = ? AND g.musteri_no = ? AND g.nerden_geliyor = 'kasa'
-                  AND g.sube = ?
-                  AND {yr("g.tarih_date")} = ?
-                ORDER BY g.tarih_date DESC, g.id DESC
-                LIMIT 2000
-            """, (userid, musterino, sube_adi, str(yil))).fetchall()
-        else:
-            rows = conn.execute(f"""
-                SELECT
-                    g.id, g.tarih_date AS tarih, g.form_id, g.aciklama,
-                    COALESCE(g.sube, '(Şubesiz)') AS sube_adi, g.gelir, g.gider,
-                    g.teslim_sekli, g.odeme_sekli, g.kategori, g.nerden_geliyor
-                FROM genel_hesap_hareketleri g
-                WHERE g.userid = ? AND g.musteri_no = ? AND g.nerden_geliyor = 'kasa'
-                  AND {yr("g.tarih_date")} = ?
-                ORDER BY g.tarih_date DESC, g.id DESC
-                LIMIT 2000
-            """, (userid, musterino, str(yil))).fetchall()
+        rows = conn.execute(f"""
+            SELECT
+                g.id,
+                g.tarih_date   AS tarih,
+                g.form_id,
+                g.aciklama,
+                COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
+                g.gelir,
+                g.gider,
+                g.teslim_sekli,
+                g.odeme_sekli,
+                g.kategori,
+                g.nerden_geliyor
+            FROM genel_hesap_hareketleri g
+            WHERE g.userid     = ?
+              AND g.musteri_no = ?
+              AND g.nerden_geliyor = 'kasa'
+              AND {yr("g.tarih_date")} = ?
+            ORDER BY g.tarih_date DESC, g.id DESC
+            LIMIT 2000
+        """, (userid, musterino, str(yil))).fetchall()
         return list(rows)
     finally:
         conn.close()
@@ -313,7 +301,7 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
                        toplam, {_mod_col} AS gelirgidermod,
                        {_fmod_col} AS faturamod,
                        {_fno_col} AS formno, kaynak,
-                       {_ykl_col} AS yuklenmetarihi, xml_dosya, fatura
+                       {_ykl_col} AS yuklenmetarihi, xml_dosya
                 FROM faturalar
                 WHERE userid = ?
                   AND {left4("tarih")} = ?
@@ -329,7 +317,7 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
                        toplam, {_mod_col} AS gelirgidermod,
                        {_fmod_col} AS faturamod,
                        {_fno_col} AS formno, kaynak,
-                       {_ykl_col} AS yuklenmetarihi, xml_dosya, fatura
+                       {_ykl_col} AS yuklenmetarihi, xml_dosya
                 FROM faturalar
                 WHERE userid = ?
                   AND {left4("tarih")} = ?
@@ -337,18 +325,7 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
                 ORDER BY tarih DESC, id DESC
                 LIMIT 10000
             """, (userid, str(yil), mod)).fetchall()
-        
-        res = []
-        import json
-        for r in rows:
-            d = dict(r)
-            try:
-                meta = json.loads(d.get("fatura") or "{}")
-                d["aciklama"] = meta.get("aciklama", "")
-            except Exception:
-                d["aciklama"] = ""
-            res.append(d)
-        return res
+        return list(rows)
     finally:
         conn.close()
 
@@ -484,7 +461,7 @@ def get_fatura_detay_by_sube(userid: int, musterino: int, yil: int,
                        f.{_fmod_col} AS faturamod,
                        f.{_fno_col} AS formno, f.kaynak,
                        f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
-                       NULL AS sube_adi, f.fatura
+                       NULL AS sube_adi
                 FROM faturalar f
                 LEFT JOIN genel_hesap_hareketleri g
                     ON g.form_id = f.{_fno_col}
@@ -506,7 +483,7 @@ def get_fatura_detay_by_sube(userid: int, musterino: int, yil: int,
                        f.{_fmod_col} AS faturamod,
                        f.{_fno_col} AS formno, f.kaynak,
                        f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
-                       g.sube AS sube_adi, f.fatura
+                       g.sube AS sube_adi
                 FROM faturalar f
                 JOIN genel_hesap_hareketleri g
                     ON g.form_id = f.{_fno_col}
@@ -519,115 +496,6 @@ def get_fatura_detay_by_sube(userid: int, musterino: int, yil: int,
                 ORDER BY f.tarih DESC, f.id DESC
                 LIMIT 5000
             """, (musterino, userid, str(yil), mod, sube_adi)).fetchall()
-        
-        res = []
-        import json
-        for r in rows:
-            d = dict(r)
-            try:
-                meta = json.loads(d.get("fatura") or "{}")
-                d["aciklama"] = meta.get("aciklama", "")
-            except Exception:
-                d["aciklama"] = ""
-            res.append(d)
-        return res
-    finally:
-        conn.close()
-
-
-def get_gider_pusulasi_sube_ozet(userid: int, musterino: int, yil: int) -> list[dict]:
-    """
-    Gider Pusulası kartına tıklandığında
-    genel_hesap_hareketleri tablosundan şube bazlı özet.
-    """
-    conn = get_connection()
-    try:
-        rows = conn.execute(f"""
-            SELECT
-                COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
-                {_round_sql("SUM(CAST(g.gelir AS REAL))")} AS toplam_gelir,
-                {_round_sql("SUM(CAST(g.gider AS REAL))")} AS toplam_gider,
-                COUNT(*) AS kayit_sayisi
-            FROM genel_hesap_hareketleri g
-            WHERE g.userid = ?
-              AND g.musteri_no = ?
-              AND (g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%' OR g.teslim_sekli LIKE '%Cihaz Alımı%')
-              AND {yr("g.tarih_date")} = ?
-            GROUP BY g.sube
-            ORDER BY toplam_gider DESC
-        """, (userid, musterino, str(yil))).fetchall()
-        return list(rows)
-    finally:
-        conn.close()
-
-
-def get_gider_pusulasi_detay(userid: int, musterino: int, yil: int,
-                             teslim_sekli_filtre: str = None, sube_adi: str = None) -> list[dict]:
-    """
-    Gider Pusulası detay listesi.
-    genel_hesap_hareketleri tablosundan teslim_sekli IN ('Cihaz Alımı', 'Parça Alımı (Cihaz)')
-    filtresiyle çeker. Dashboard'daki _get_genel_hesap_all sorgusuyla aynı mantık.
-
-    teslim_sekli_filtre: None → tüm pusulalar; belirli değer → sadece o teslim şekli
-    """
-    conn = get_connection()
-    try:
-        if sube_adi and sube_adi != "(Şubesiz)":
-            sube_condition = "AND g.sube = ?"
-            params = [userid, musterino, str(yil), sube_adi]
-        elif sube_adi == "(Şubesiz)":
-            sube_condition = "AND (g.sube IS NULL OR g.sube = '')"
-            params = [userid, musterino, str(yil)]
-        else:
-            sube_condition = ""
-            params = [userid, musterino, str(yil)]
-
-        if teslim_sekli_filtre:
-            rows = conn.execute(f"""
-                SELECT
-                    g.id,
-                    g.tarih_date   AS tarih,
-                    g.form_id,
-                    g.aciklama,
-                    COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
-                    g.gelir,
-                    g.gider,
-                    g.teslim_sekli,
-                    g.odeme_sekli,
-                    g.kategori,
-                    g.nerden_geliyor
-                FROM genel_hesap_hareketleri g
-                WHERE g.userid     = ?
-                  AND g.musteri_no = ?
-                  AND {yr('g.tarih_date')} = ?
-                  {sube_condition}
-                  AND g.teslim_sekli LIKE ?
-                ORDER BY g.tarih_date DESC, g.id DESC
-                LIMIT 3000
-            """, tuple(params + [f"%{teslim_sekli_filtre}%"])).fetchall()
-        else:
-            rows = conn.execute(f"""
-                SELECT
-                    g.id,
-                    g.tarih_date   AS tarih,
-                    g.form_id,
-                    g.aciklama,
-                    COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
-                    g.gelir,
-                    g.gider,
-                    g.teslim_sekli,
-                    g.odeme_sekli,
-                    g.kategori,
-                    g.nerden_geliyor
-                FROM genel_hesap_hareketleri g
-                WHERE g.userid     = ?
-                  AND g.musteri_no = ?
-                  AND {yr('g.tarih_date')} = ?
-                  {sube_condition}
-                  AND (g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%' OR g.teslim_sekli LIKE '%Cihaz Alımı%')
-                ORDER BY g.tarih_date DESC, g.id DESC
-                LIMIT 3000
-            """, tuple(params)).fetchall()
         return list(rows)
     finally:
         conn.close()
@@ -654,23 +522,13 @@ def get_fatura_by_formno(userid: int, formno: str) -> list[dict]:
                    toplam, {_mod_col} AS gelirgidermod,
                    {_fmod_col} AS faturamod,
                    {_fno_col} AS formno, kaynak,
-                   {_ykl_col} AS yuklenmetarihi, xml_dosya, fatura
+                   {_ykl_col} AS yuklenmetarihi, xml_dosya
             FROM faturalar
             WHERE userid = ?
               AND {_fno_col} = ?
             ORDER BY tarih DESC, id DESC
             LIMIT 100
         """, (userid, str(formno).strip())).fetchall()
-        res = []
-        import json
-        for r in rows:
-            d = dict(r)
-            try:
-                meta = json.loads(d.get("fatura") or "{}")
-                d["aciklama"] = meta.get("aciklama", "")
-            except Exception:
-                d["aciklama"] = ""
-            res.append(d)
-        return res
+        return list(rows)
     finally:
         conn.close()

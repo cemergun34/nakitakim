@@ -18,9 +18,30 @@ import csv
 import io
 import re
 import datetime
+import ssl
 import urllib.request
 import urllib.error
 from typing import Callable, Optional
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """
+    macOS'ta Python'un varsayılan CA deposu boş olabilir (cafile=None).
+    certifi kütüphanesi varsa onun CA paketini kullan; yoksa doğrulama kapalı fallback.
+    """
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        return ctx
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    # Fallback: sertifika doğrulamasını kapat (certifi yoksa)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 from db.database import get_connection
 
@@ -61,7 +82,7 @@ def _csv_download(url: str, label: str = "") -> str:
         headers={"User-Agent": "Mozilla/5.0 (compatible; NakitAkim/1.0)"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=_TIMEOUT, context=_ssl_context()) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
         tag = f" [{label}]" if label else ""

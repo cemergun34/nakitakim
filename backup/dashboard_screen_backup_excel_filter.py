@@ -886,24 +886,18 @@ class DashboardScreen(QWidget):
         if key in ("nakit_kasa_gelir", "nakit_kasa_odeme"):
             ozet = detay_service.get_nakit_kasa_sube_ozet(uid, mno, yil)
             def detay_fn(sube_adi):
-                return detay_service.get_nakit_kasa_detay(uid, mno, yil, sube_adi=sube_adi)
+                # sube id'sini bul
+                sube_id = None
+                for r in ozet:
+                    if r.get("sube_adi") == sube_adi:
+                        sube_id = r.get("sube_id")
+                        break
+                return detay_service.get_hareketler_detay(uid, mno, yil, sube_id=sube_id)
             dlg = DetayDialog(
                 baslik="Nakit Kasa — Şube Özeti",
                 ozet_rows=ozet,
                 detay_fn=detay_fn,
-                tablo_tipi="genel_hesap",
-                parent=self,
-            )
-        elif key == "gider_pusulasi":
-            ozet = detay_service.get_gider_pusulasi_sube_ozet(uid, mno, yil)
-            def detay_fn(sube_adi):
-                return detay_service.get_gider_pusulasi_detay(uid, mno, yil, sube_adi=sube_adi)
-            dlg = DetayDialog(
-                baslik="Gider Pusulası — Şube Özeti",
-                ozet_rows=ozet,
-                detay_fn=detay_fn,
-                tablo_tipi="genel_hesap",
-                userid=uid,
+                tablo_tipi="hareketler",
                 parent=self,
             )
 
@@ -1206,11 +1200,6 @@ class DashboardScreen(QWidget):
                             s_val = f"{cell.value:,.2f}" if isinstance(cell.value, float) else str(cell.value)
                             max_len = max(max_len, len(s_val))
                     ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
-    
-                # ── AutoFilter (Filtre Özelliği) ──
-                if rows_data:
-                    last_col_letter = get_column_letter(len(headers))
-                    ws.auto_filter.ref = f"A5:{last_col_letter}{cur - 1}"
     
                 ws.freeze_panes = "A6"
                 return (len(rows_data),
@@ -4182,19 +4171,6 @@ class MaasKiraSmmDialog(QDialog):
 
         self._donem_cb.currentIndexChanged.connect(self._on_filter_change)
         self._ack_cb.currentIndexChanged.connect(self._on_ack_filter)
-        
-        self._excel_btn = QPushButton("📥 Excel İndir")
-        self._excel_btn.setFixedHeight(30)
-        self._excel_btn.setFixedWidth(110)
-        self._excel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._excel_btn.setStyleSheet(
-            "QPushButton{background:#10b981;color:white;border:none;"
-            "border-radius:4px;font-size:12px;font-weight:700;}"
-            "QPushButton:hover{background:#059669;}"
-        )
-        self._excel_btn.clicked.connect(self._export_excel)
-        fr.addWidget(self._excel_btn)
-
         fr.addStretch()
         tl.addLayout(fr)
         root.addWidget(top)
@@ -4416,201 +4392,3 @@ class MaasKiraSmmDialog(QDialog):
             empty.setForeground(QColor("#6c757d"))
             self._tbl.setItem(0, 0, empty)
             self._tbl.setSpan(0, 0, 1, len(self.SUTUNLAR))
-
-    def _export_excel(self):
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Excel Olarak Kaydet", "maas_kira_smm_raporu.xlsx", "Excel Files (*.xlsx)"
-        )
-        if not path:
-            return
-
-        try:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Maaş Kira SMM"
-
-            # Excel Stylings
-            font_title = Font(name="Segoe UI", size=14, bold=True, color="FF1A3A5C")
-            font_subtitle = Font(name="Segoe UI", size=9, italic=True, color="FF4B5563")
-            font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFFFF")
-            font_data = Font(name="Segoe UI", size=10, color="FF1F2937")
-            font_total = Font(name="Segoe UI", size=11, bold=True, color="FF1A3A5C")
-
-            fill_header = PatternFill(start_color="FF1A3A5C", end_color="FF1A3A5C", fill_type="solid")
-            fill_total = PatternFill(start_color="FFF1F5F9", end_color="FFF1F5F9", fill_type="solid")
-
-            border_thin = Border(
-                left=Side(style="thin", color="FFE5E7EB"),
-                right=Side(style="thin", color="FFE5E7EB"),
-                top=Side(style="thin", color="FFE5E7EB"),
-                bottom=Side(style="thin", color="FFE5E7EB")
-            )
-            border_total = Border(
-                top=Side(style="thin", color="FF94A3B8"),
-                bottom=Side(style="double", color="FF1A3A5C")
-            )
-
-            # 1. Title Block
-            ws.append(["Maaş / Kira / SMM — Vergi Muhtasar Raporu"])
-            ws.cell(row=1, column=1).font = font_title
-
-            donem_val = self._donem_cb.currentText()
-            ack_val = self._ack_cb.currentText()
-            filtre_str = f"Filtreler - Dönem: {donem_val}, Açıklama: {ack_val}"
-            ws.append([filtre_str])
-            ws.cell(row=2, column=1).font = font_subtitle
-
-            ws.append([]) # Blank row
-
-            # Headers
-            headers = [col[0] for col in self.SUTUNLAR]
-            ws.append(headers)
-
-            header_row_idx = 4
-            for col_idx in range(len(headers)):
-                cell = ws.cell(row=header_row_idx, column=col_idx+1)
-                cell.font = font_header
-                cell.fill = fill_header
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                cell.border = border_thin
-
-            # Sum tracker for columns
-            column_sums = {col: 0.0 for col in range(len(self.SUTUNLAR))}
-
-            # Rows writing
-            current_row_idx = 5
-            for row in range(self._tbl.rowCount()):
-                if self._tbl.isRowHidden(row):
-                    continue
-
-                # Check if there is an empty table item indicator
-                item_first = self._tbl.item(row, 0)
-                if item_first and "kaydı bulunamadı" in item_first.text():
-                    continue
-
-                row_data = []
-                for col in range(self._tbl.columnCount()):
-                    item = self._tbl.item(row, col)
-                    cell_text = item.text() if item else ""
-                    field_name = self.SUTUNLAR[col][1]
-
-                    # Check if it is an amount column
-                    if field_name in ("gaytutar", "vergkestutar", "fark"):
-                        val_num = 0.0
-                        if item:
-                            val_data = item.data(Qt.ItemDataRole.UserRole)
-                            if val_data is not None:
-                                try:
-                                    val_num = float(val_data)
-                                except (ValueError, TypeError):
-                                    val_num = 0.0
-                            else:
-                                # Fallback parse
-                                s = cell_text.replace("₺", "").replace("TL", "").replace("+", "").replace("-", "").strip()
-                                s = s.replace(".", "").replace(",", ".")
-                                try:
-                                    val_num = float(s)
-                                except ValueError:
-                                    val_num = 0.0
-                        row_data.append(val_num)
-                        column_sums[col] += val_num
-                    else:
-                        row_data.append(cell_text)
-
-                ws.append(row_data)
-
-                # Style active data row
-                for col in range(len(row_data)):
-                    cell = ws.cell(row=current_row_idx, column=col+1)
-                    cell.font = font_data
-                    cell.border = border_thin
-                    field_name = self.SUTUNLAR[col][1]
-
-                    if field_name in ("gaytutar", "vergkestutar", "fark"):
-                        cell.alignment = Alignment(horizontal="right", vertical="center")
-                        cell.number_format = '#,##0.00'
-                    elif field_name == "donem":
-                        cell.alignment = Alignment(horizontal="center", vertical="center")
-                    else:
-                        cell.alignment = Alignment(horizontal="left", vertical="center")
-
-                current_row_idx += 1
-
-            # 2. Dynamic GENEL TOPLAM Row
-            summary_row = []
-            for col in range(self._tbl.columnCount()):
-                field_name = self.SUTUNLAR[col][1]
-                if col == 0:
-                    summary_row.append("GENEL TOPLAM")
-                elif field_name in ("gaytutar", "vergkestutar", "fark"):
-                    summary_row.append(column_sums[col])
-                else:
-                    summary_row.append("")
-
-            ws.append(summary_row)
-
-            # Style summary row
-            for col in range(len(summary_row)):
-                cell = ws.cell(row=current_row_idx, column=col+1)
-                cell.font = font_total
-                cell.fill = fill_total
-                cell.border = border_total
-                field_name = self.SUTUNLAR[col][1]
-
-                if col == 0:
-                    cell.alignment = Alignment(horizontal="left", vertical="center")
-                elif field_name in ("gaytutar", "vergkestutar", "fark"):
-                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                    cell.number_format = '#,##0.00'
-
-            # 3. Auto Width Adjustment
-            for col in ws.columns:
-                max_len = 0
-                col_letter = get_column_letter(col[0].column)
-                for cell in col:
-                    if cell.row in (1, 2, 3): # Skip title headers for width
-                        continue
-                    if cell.value is not None:
-                        if isinstance(cell.value, float):
-                            val_str = f"{cell.value:,.2f}"
-                        else:
-                            val_str = str(cell.value)
-                        max_len = max(max_len, len(val_str))
-                ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
-
-            # Set gridlines visible
-            ws.views.sheetView[0].showGridLines = True
-
-            wb.save(path)
-
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Başarılı")
-            msg.setText("Maaş Kira SMM Excel raporu başarıyla kaydedildi!")
-            msg.setStyleSheet("""
-                QMessageBox { background-color: white; }
-                QLabel { color: #1F2937; font-size: 13px; font-weight: 600; min-width: 280px; min-height: 40px; }
-                QPushButton { background-color: #1a3a5c; color: white; border: none; border-radius: 6px; padding: 6px 18px; font-size: 11px; font-weight: bold; }
-                QPushButton:hover { background-color: #0d2137; }
-            """)
-            msg.exec()
-
-        except Exception as e:
-            import traceback
-            err_msg = f"Excel kaydedilirken hata oluştu:\n{e}\n\nDetay:\n{traceback.format_exc()}"
-            print(err_msg)
-
-            msg = QMessageBox(self)
-            msg.setIcon(QMessageBox.Icon.Critical)
-            msg.setWindowTitle("Hata")
-            msg.setText(f"Excel raporu oluşturulurken beklenmedik hata oluştu:\n{e}")
-            msg.setStyleSheet("""
-                QMessageBox { background-color: white; }
-                QLabel { color: #DC2626; font-size: 12px; font-weight: 600; min-width: 240px; }
-                QPushButton { background-color: #DC2626; color: white; border: none; border-radius: 6px; padding: 6px 16px; }
-            """)
-            msg.exec()

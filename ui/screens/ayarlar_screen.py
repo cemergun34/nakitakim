@@ -10,10 +10,11 @@ from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QScrollArea,
     QMessageBox, QProgressBar, QDialog, QDialogButtonBox,
     QLineEdit, QDateEdit, QSizePolicy, QGridLayout,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QStackedWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QBrush, QColor
 
 from ui.theme import COLORS
 from services.efatura_service import (
@@ -306,17 +307,17 @@ class VomsisIsleWorker(QThread):
                 # Aynı VOMSİS kaydı zaten varsa atla
                 if vomsis_key:
                     exists = conn.execute(
-                        "SELECT id FROM hareketler WHERE womsisKey=? AND userid=? LIMIT 1",
+                        "SELECT id FROM womsis_banka WHERE womsiskey=? AND userid=? LIMIT 1",
                         (str(vomsis_key), self._userid)
                     ).fetchone()
                     if exists:
                         continue
 
                 conn.execute(
-                    """INSERT INTO hareketler
-                       (tarih, aciklama, gelirGider, alinan_tutar1, kaynak, womsisKey, userid)
+                    """INSERT INTO womsis_banka
+                       (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey, userid)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (tarih_raw, aciklama, gelir_gider, tutar, "vomsis",
+                    (tarih_raw, aciklama, gelir_gider, abs(tutar), "vomsis",
                      str(vomsis_key), self._userid)
                 )
                 count += 1
@@ -419,17 +420,17 @@ class TopluBankalarIsleWorker(QThread):
 
                         if vomsis_key:
                             exists = conn.execute(
-                                "SELECT id FROM hareketler WHERE womsiskey=? AND userid=? LIMIT 1",
+                                "SELECT id FROM womsis_banka WHERE womsiskey=? AND userid=? LIMIT 1",
                                 (str(vomsis_key), self._userid)
                             ).fetchone()
                             if exists:
                                 continue
 
                         conn.execute(
-                            """INSERT INTO hareketler
-                               (tarih, aciklama, gelirgider, alinan_tutar1, kaynak, womsiskey, userid)
+                            """INSERT INTO womsis_banka
+                               (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey, userid)
                                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                            (tarih_raw, aciklama, gelir_gider, tutar, "vomsis",
+                            (tarih_raw, aciklama, gelir_gider, abs(tutar), "vomsis",
                              str(vomsis_key), self._userid)
                         )
                         total_inserted += 1
@@ -1033,6 +1034,10 @@ class ManuelTopluIsleDialog(QDialog):
     def _on_queue_step_done(self, result: dict):
         done = 4 - len(self._queue)
         self._progress_bar.setValue(done)
+        # Eski worker'ı Qt'ye bırak — GC'den önce thread tamamen bitsin
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
         self._run_next_in_queue()
 
     # ── Tek işlem bitişi ──────────────────────────────────────────────────
@@ -1040,6 +1045,10 @@ class ManuelTopluIsleDialog(QDialog):
     def _on_done(self, result: dict):
         self._progress_bar.hide()
         self._set_buttons_enabled(True)
+        # Eski worker'ı Qt'ye bırak — GC thread'i silmesin
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
         if result["success"]:
             self._show_status(f"✅  {result['message']}", "#059669", ok=True)
         else:
@@ -1275,8 +1284,20 @@ class GoogleSheetsSettingsCard(QFrame):
                     ("Genel Hesap", genel_url),
                 ]:
                     try:
+                        import ssl
                         req = urllib.request.Request(url, headers={"User-Agent": "NakitAkim/1.0"})
-                        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+                        try:
+                            import certifi
+                            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+                        except ImportError:
+                            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                            ssl_ctx.check_hostname = False
+                            ssl_ctx.verify_mode = ssl.CERT_NONE
+                        except Exception:
+                            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                            ssl_ctx.check_hostname = False
+                            ssl_ctx.verify_mode = ssl.CERT_NONE
+                        with urllib.request.urlopen(req, timeout=_TIMEOUT, context=ssl_ctx) as r:
                             results.append(f"\u2705  {name} — OK (HTTP {r.status})")
                     except Exception as e:
                         results.append(f"\u274c  {name} — {e}")
@@ -1315,9 +1336,10 @@ class ManuelTopluIsleCard(QFrame):
     'Manuel Toplu İşle' düğmesi. VOMSİS API kartından bağımsız çalışır.
     """
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid = userid
+        self._musterino = musterino
         self.setStyleSheet(
             "QFrame{background:white;border:2px solid #bbf7d0;"
             "border-radius:16px;}"
@@ -1431,6 +1453,7 @@ class ManuelTopluIsleCard(QFrame):
 
         dlg = ManuelTopluIsleDialog(
             userid=self._userid,
+            musterino=self._musterino,
             api_base=url,
             app_key=appkey,
             app_secret=seckey,
@@ -1625,6 +1648,18 @@ class VomsisCard(QFrame):
         self._webadmin_btn.clicked.connect(self._on_webadmin_cek)
         btn_row.addWidget(self._webadmin_btn)
 
+        # ── VOMSİS Excel Import ──────────────────────────────────────────────
+        self._excel_import_btn = QPushButton("📂  Excel Import")
+        self._excel_import_btn.setFixedHeight(38)
+        self._excel_import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._excel_import_btn.setStyleSheet(self._btn_style("#059669"))
+        self._excel_import_btn.setToolTip(
+            "VOMSİS banka hareketleri Excel dosyasını içe aktarır.\n"
+            "Şablon için dialog içinde 'Şablon İndir' butonunu kullanın."
+        )
+        self._excel_import_btn.clicked.connect(self._on_excel_import)
+        btn_row.addWidget(self._excel_import_btn)
+
         btn_row.addStretch()
         root.addLayout(btn_row)
 
@@ -1775,6 +1810,110 @@ class VomsisCard(QFrame):
     def _on_webadmin_done(self, r: dict):
         # Artık kullanılmıyor — WebAdminSyncDialog içinde hallediliyor
         pass
+
+    # ── Excel Import — Seçim Dialogu ─────────────────────────────────────────
+
+    def _on_excel_import(self):
+        """Hangi verinin içe aktarılacağını soran küçük seçim dialogu."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("📂  Excel Import — Tür Seçin")
+        dlg.setFixedWidth(320)
+        dlg.setModal(True)
+        dlg.setStyleSheet("""
+            QDialog {
+                background: #f8fafc;
+                border-radius: 12px;
+            }
+            QLabel {
+                background: transparent;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QPushButton {
+                border: none;
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 14px 20px;
+                text-align: left;
+            }
+            QPushButton:hover { opacity: 0.88; }
+        """)
+
+        vlay = QVBoxLayout(dlg)
+        vlay.setContentsMargins(22, 20, 22, 20)
+        vlay.setSpacing(12)
+
+        # Başlık
+        title = QLabel("İçe aktarmak istediğiniz veri türünü seçin:")
+        title.setStyleSheet("font-size:13px;color:#374151;font-weight:600;")
+        title.setWordWrap(True)
+        vlay.addWidget(title)
+
+        vlay.addSpacing(4)
+
+        # ── Banka Hareketleri ──
+        banka_btn = QPushButton("🏦  Banka Hareketleri Çek")
+        banka_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #1e40af, stop:1 #1d4ed8);
+                color: white;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #1e3a8a, stop:1 #1e40af);
+            }
+        """)
+        banka_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        banka_btn.setFixedHeight(52)
+        banka_btn.clicked.connect(lambda: (dlg.accept(), self._on_banka_excel_import()))
+        vlay.addWidget(banka_btn)
+
+        # ── Pos Hareketleri ──
+        pos_btn = QPushButton("💳  Pos Hareketleri Çek")
+        pos_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #059669, stop:1 #047857);
+                color: white;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #047857, stop:1 #065f46);
+            }
+        """)
+        pos_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        pos_btn.setFixedHeight(52)
+        pos_btn.clicked.connect(lambda: (dlg.accept(), self._on_pos_excel_import()))
+        vlay.addWidget(pos_btn)
+
+        vlay.addSpacing(4)
+
+        # ── İptal ──
+        iptal_btn = QPushButton("✕  İptal")
+        iptal_btn.setStyleSheet("""
+            QPushButton {
+                background: #e2e8f0; color: #475569;
+                font-size:12px; font-weight:600;
+                padding: 8px; text-align:center;
+            }
+            QPushButton:hover { background: #cbd5e1; }
+        """)
+        iptal_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        iptal_btn.clicked.connect(dlg.reject)
+        vlay.addWidget(iptal_btn)
+
+        dlg.exec()
+
+    def _on_banka_excel_import(self):
+        """VOMSİS Banka Hareketleri Excel Import dialog'unu açar."""
+        dlg = WomsisExcelImportDialog(userid=self._userid, parent=self)
+        dlg.exec()
+
+    def _on_pos_excel_import(self):
+        """VOMSİS POS Hareketleri Excel Import dialog'unu açar."""
+        dlg = WomsisPosExcelImportDialog(userid=self._userid, parent=self)
+        dlg.exec()
 
     # ── Manuel Toplu İşle ───────────────────────────────────────────────────
 
@@ -3666,10 +3805,15 @@ class KrediKartCard(QFrame):
 # ── Ana Ayarlar Ekranı ────────────────────────────────────────────────────────
 
 class AyarlarScreen(QWidget):
+    # Herhangi bir import kartı veri çekince bu sinyal tetiklenir
+    # main_window bunu dash.refresh()'e bağlar → dashboard otomatik güncellenir
+    data_changed = pyqtSignal()
+
     def __init__(self, user: dict, parent=None):
         super().__init__(parent)
         self._user = user
-        self._userid = user.get("GercekUserId", user.get("Kayitno", 1))
+        self._userid    = user.get("GercekUserId", user.get("Kayitno", 1))
+        self._musterino = user.get("GercekUserId", user.get("Kayitno", 1))
         self._setup_ui()
 
     def _setup_ui(self):
@@ -3730,7 +3874,7 @@ class AyarlarScreen(QWidget):
         self._gsheets_settings_card = GoogleSheetsSettingsCard()
         self._content_layout.addWidget(self._gsheets_settings_card)
 
-        self._manuel_toplu_card = ManuelTopluIsleCard(self._userid)
+        self._manuel_toplu_card = ManuelTopluIsleCard(self._userid, musterino=self._musterino)
         self._content_layout.addWidget(self._manuel_toplu_card)
 
         # Eklentiler kartı
@@ -3762,6 +3906,16 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._veritabani_card)
 
         self._content_layout.addStretch()
+
+        # Kart sinyallerini AyarlarScreen.data_changed'e bağla
+        # → Herhangi bir import bitince dashboard otomatik güncellenir
+        for card in [
+            self._vomsis_card, self._moy_card,
+            self._vergi_muhtasar_card, self._kredi_kart_card,
+            self._efatura_card, self._yonetim_card,
+        ]:
+            if hasattr(card, 'data_changed'):
+                card.data_changed.connect(self.data_changed)
 
         # Aktif tab
         self._switch_tab("eklentiler")
@@ -4540,7 +4694,8 @@ class AyarlarScreen(QWidget):
     def __init__(self, user: dict, parent=None):
         super().__init__(parent)
         self._user = user
-        self._userid = user.get("GercekUserId", user.get("Kayitno", 1))
+        self._userid    = user.get("GercekUserId", user.get("Kayitno", 1))
+        self._musterino = user.get("GercekUserId", user.get("Kayitno", 1))
         self._setup_ui()
 
     def _setup_ui(self):
@@ -4605,7 +4760,7 @@ class AyarlarScreen(QWidget):
         self._gsheets_settings_card = GoogleSheetsSettingsCard()
         self._content_layout.addWidget(self._gsheets_settings_card)
 
-        self._manuel_toplu_card = ManuelTopluIsleCard(self._userid)
+        self._manuel_toplu_card = ManuelTopluIsleCard(self._userid, musterino=self._musterino)
         self._content_layout.addWidget(self._manuel_toplu_card)
 
         # Eklentiler kartı
@@ -5211,6 +5366,833 @@ class WebAdminConfigCard(QFrame):
             self._cert_status.setStyleSheet(
                 "font-size:11px;color:#64748b;background:#f8fafc;"
                 "border-radius:6px;padding:4px 8px;"
+            )
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── VOMSİS Excel Import — Worker (modül seviyesinde olmalı, PyQt6 gereği) ────
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WomsisExcelWorker(QThread):
+    """
+    Excel dosyasını arka planda işler.
+    NOT: PyQt6'da pyqtSignal'ların doğru çalışması için
+    sınıf MUTLAKA modül seviyesinde tanımlanmalıdır.
+    """
+    satir_done   = pyqtSignal(str, int, int, str)   # sayfa, eklenen, atlanan, durum
+    header_error = pyqtSignal(str, object, object)  # sayfa, bulunan_list, eksik_list
+    progress     = pyqtSignal(str)                  # canlı durum mesajı
+    finished     = pyqtSignal(dict)
+
+    ZORUNLU_KOLONLAR = ["HAREKET ID", "TARİH", "AÇIKLAMA", "TUTAR"]
+
+    def __init__(self, filepath: str, userid: int):
+        super().__init__()
+        self._path   = filepath
+        self._userid = userid
+
+    def run(self):
+        try:
+            import openpyxl
+        except ImportError:
+            self.finished.emit({
+                "success": False,
+                "message": "openpyxl yüklü değil. pip install openpyxl",
+                "toplam": 0, "eklenen": 0, "atlanan": 0, "hata": 1,
+            })
+            return
+
+        from db.database import get_connection
+
+        try:
+            wb = openpyxl.load_workbook(self._path, data_only=True)
+        except Exception as e:
+            self.finished.emit({
+                "success": False,
+                "message": f"Excel dosyası açılamadı: {e}",
+                "toplam": 0, "eklenen": 0, "atlanan": 0, "hata": 1,
+            })
+            return
+
+        conn = get_connection()
+        g_toplam = g_eklenen = g_atlanan = g_hata = 0
+
+        try:
+            for sheet_name in wb.sheetnames:
+                ws  = wb[sheet_name]
+                ins = skip = err = 0
+
+                # ── Başlık Satırı Bul & Doğrula ──────────────────────────────
+                header_row = None
+                col_map    = {}
+                for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=8, values_only=True), 1):
+                    if row and any(str(v).strip() == "HAREKET ID" for v in row if v):
+                        header_row = r_idx
+                        col_map = {
+                            str(v).strip(): i
+                            for i, v in enumerate(row) if v and str(v).strip()
+                        }
+                        break
+
+                if header_row is None:
+                    self.header_error.emit(sheet_name, [], self.ZORUNLU_KOLONLAR)
+                    self.satir_done.emit(sheet_name, 0, 0, "❌ Başlık satırı bulunamadı")
+                    g_hata += 1
+                    continue
+
+                bulunan_kolonlar = list(col_map.keys())
+                eksik_kolonlar   = [k for k in self.ZORUNLU_KOLONLAR if k not in col_map]
+                if eksik_kolonlar:
+                    self.header_error.emit(sheet_name, bulunan_kolonlar, eksik_kolonlar)
+                    self.satir_done.emit(
+                        sheet_name, 0, 0,
+                        f"❌ Eksik kolon: {', '.join(eksik_kolonlar)}"
+                    )
+                    g_hata += 1
+                    continue
+
+                self.progress.emit(f"📂  {sheet_name} işleniyor...")
+
+                # ── Veri Satırları ────────────────────────────────────────────
+                for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                    if not row or all(v is None for v in row):
+                        continue
+
+                    def _get(key, default=None, _row=row, _map=col_map):
+                        idx = _map.get(key)
+                        return _row[idx] if idx is not None and idx < len(_row) else default
+
+                    hareket_id  = _get("HAREKET ID")
+                    tarih_raw   = _get("TARİH", "")
+                    aciklama    = str(_get("AÇIKLAMA", "") or "")
+                    tutar_val   = _get("TUTAR", 0)
+                    banka_sube  = str(_get("BANKA/ŞUBE", "") or sheet_name)
+                    karsi_unvan = str(_get("KARŞI TARAF ÜNVAN", "") or "")
+                    dekont_no   = str(_get("DEKONT NO", "") or "")
+
+                    g_toplam += 1
+
+                    # Tutar parse
+                    try:
+                        tutar = float(str(tutar_val).replace(",", ".").replace(" ", ""))
+                    except Exception:
+                        err += 1; g_hata += 1; continue
+
+                    gelir_gider = "gelir" if tutar >= 0 else "gider"
+                    tutar_abs   = abs(tutar)
+
+                    # Tarih dönüşümü DD/MM/YYYY → YYYY-MM-DD
+                    tarih_str = ""
+                    if tarih_raw:
+                        t = str(tarih_raw).strip()
+                        for fmt in ("%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d", "%Y/%m/%d"):
+                            try:
+                                tarih_str = datetime.datetime.strptime(t[:10], fmt).strftime("%Y-%m-%d")
+                                break
+                            except Exception:
+                                continue
+                        if not tarih_str:
+                            tarih_str = t
+
+                    # womsisKey
+                    womsis_key = str(hareket_id) if hareket_id else f"{sheet_name}_{tarih_str}_{tutar_abs}"
+
+                    # ── Mükerrer Kontrol (3 kademe) ───────────────────────────
+                    # Kademe 1: HAREKET ID (womsiskey)
+                    exists = None
+                    try:
+                        exists = conn.execute(
+                            "SELECT id FROM hareketler WHERE womsisKey=? AND userid=? LIMIT 1",
+                            (womsis_key, self._userid)
+                        ).fetchone()
+                    except Exception:
+                        exists = None
+
+                    # Kademe 2: DEKONT NO + TARİH
+                    if not exists and dekont_no and dekont_no not in ("-", ""):
+                        try:
+                            exists = conn.execute(
+                                """SELECT id FROM womsis_banka
+                                   WHERE userid=? AND tarih=?
+                                     AND (womsiskey=? OR aciklama LIKE ?)
+                                   LIMIT 1""",
+                                (self._userid, tarih_str,
+                                 dekont_no, f"%{dekont_no}%")
+                            ).fetchone()
+                        except Exception:
+                            exists = None
+
+                    # Kademe 3: TARİH + AÇIKLAMA + TUTAR
+                    if not exists and tarih_str and aciklama:
+                        try:
+                            exists = conn.execute(
+                                """SELECT id FROM womsis_banka
+                                   WHERE userid=? AND tarih=? AND aciklama=?
+                                     AND ABS(tutar::numeric - ?) < 0.01
+                                   LIMIT 1""",
+                                (self._userid, tarih_str, aciklama, tutar_abs)
+                            ).fetchone()
+                        except Exception:
+                            exists = None
+
+
+                    if exists:
+                        skip += 1; g_atlanan += 1
+                        if (ins + skip + err) % 50 == 0:
+                            self.progress.emit(
+                                f"⏳ {sheet_name}  —  "
+                                f"✅ {ins} eklendi   "
+                                f"⏭️ {skip} atlandı   "
+                                f"❌ {err} hata"
+                            )
+                        continue
+
+                    # ── Kayıt Ekle ────────────────────────────────────────────
+                    try:
+                        conn.execute(
+                            """INSERT INTO womsis_banka
+                               (tarih, aciklama, gelirgider, tutar,
+                                kaynak, womsiskey, userid, sube, faturaunvan)
+                               VALUES (?,?,?,?,?,?,?,?,?)""",
+                            (tarih_str, aciklama, gelir_gider, tutar_abs,
+                             "vomsis_excel", womsis_key, self._userid,
+                             banka_sube, karsi_unvan)
+                        )
+                        ins += 1; g_eklenen += 1
+                    except Exception:
+                        err += 1; g_hata += 1
+
+                    # Her 50 satırda bir canlı güncelleme
+                    if (ins + skip + err) % 50 == 0:
+                        self.progress.emit(
+                            f"⏳ {sheet_name}  —  "
+                            f"✅ {ins} eklendi   "
+                            f"⏭️ {skip} atlandı   "
+                            f"❌ {err} hata"
+                        )
+
+                conn.commit()
+                durum = "✅ Tamam" if err == 0 else f"⚠️ {err} hata"
+                self.satir_done.emit(sheet_name, ins, skip, durum)
+
+        except Exception as e:
+            conn.rollback()
+            self.finished.emit({
+                "success": False, "message": str(e),
+                "toplam": g_toplam, "eklenen": g_eklenen,
+                "atlanan": g_atlanan, "hata": g_hata,
+            })
+            return
+        finally:
+            conn.close()
+
+        self.finished.emit({
+            "success": True,
+            "message": f"{g_eklenen:,} hareket eklendi, {g_atlanan:,} mükerrer atlandı.",
+            "toplam": g_toplam, "eklenen": g_eklenen,
+            "atlanan": g_atlanan, "hata": g_hata,
+        })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── VOMSİS Excel Import Dialog ───────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WomsisExcelImportDialog(QDialog):
+    """
+    VOMSİS banka hareketleri Excel dosyasını içe aktarır.
+    • Beklenen format önizlemesi (şablon tablosu) gösterir
+    • Şablon Excel dosyası indirir
+    • FileDialog ile seçilen dosyayı parse edip hareketler tablosuna yazar
+    """
+
+    # Beklenen Excel kolon başlıkları (4. satırda olması beklenen)
+    BEKLENEN_KOLONLAR = [
+        "HAREKET ID", "HRKT KODU", "BANKA/ŞUBE", "HESAP ADI", "MHSB KODU",
+        "HESAP NO", "IBAN", "HESAP TÜRÜ", "DEKONT NO", "TARİH",
+        "İŞLEM SAATİ", "KARŞI TARAF ÜNVAN", "AÇIKLAMA", "TUTAR", "BAKİYE",
+        "KARŞI TARAF VKN", "KARŞI TARAF IBAN", "NOT", "NOT OLUŞTURAN", "ETİKET",
+    ]
+
+    ORNEK_SATIRLAR = [
+        ["13289", "INT", "Enpara / Enpara", "", "-", "94240595",
+         "TR630015700000000094240595", "TL", "196000227989...", "30/06/2026",
+         "23:17:11", "KARŞI FİRMA A.Ş.", "EFT Açıklaması", "1500.00", "100000",
+         "-", "TR...", "-", "-", "-"],
+        ["13290", "FST", "İş Bankası / Sultanhamam", "", "-", "1667134",
+         "TR460006400000110481667134", "TL", "110481667134...", "29/06/2026",
+         "14:30:00", "ÜMİT ÇOLAK", "FAST transferi", "-430.00", "19090.93",
+         "-", "TR...", "-", "-", "-"],
+    ]
+
+    def __init__(self, userid: int, parent=None):
+        super().__init__(parent)
+        self._userid = userid
+        self._import_worker = None
+
+        self.setWindowTitle("📂  VOMSİS Excel Import")
+        self.setMinimumSize(1050, 680)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog { background: #f8fafc; }
+            QLabel  { background: transparent; font-family: 'Segoe UI', Arial, sans-serif; }
+        """)
+        self._build()
+
+    # ── UI İnşa ──────────────────────────────────────────────────────────────
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(14)
+
+        # ── Başlık ──────────────────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        ic = QLabel("📂")
+        ic.setStyleSheet("font-size:24px;")
+        hdr.addWidget(ic)
+        ttl = QLabel("VOMSİS Banka Hareketleri — Excel Import")
+        ttl.setStyleSheet("font-size:16px;font-weight:700;color:#1e293b;")
+        hdr.addWidget(ttl)
+        hdr.addStretch()
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(
+            "QPushButton{background:#fee2e2;color:#dc2626;border:none;"
+            "border-radius:8px;font-size:15px;font-weight:700;}"
+            "QPushButton:hover{background:#fca5a5;}"
+        )
+        close_btn.clicked.connect(self.accept)
+        hdr.addWidget(close_btn)
+        root.addLayout(hdr)
+
+        # ── Açıklama chip ────────────────────────────────────────────────────
+        desc = QLabel(
+            "ℹ️  VOMSİS sisteminden indirilen Excel dosyasını seçin. "
+            "Her sayfa ayrı bir banka hesabı olarak işlenir. "
+            "HAREKET ID ile mükerrer kayıt kontrolü yapılır."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet(
+            "font-size:12px;color:#475569;background:#eff6ff;"
+            "border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;"
+        )
+        root.addWidget(desc)
+
+        # ── Sekme başlıkları ─────────────────────────────────────────────────
+        tab_row = QHBoxLayout()
+        tab_row.setSpacing(0)
+
+        self._tab_sablon = QPushButton("📋  Beklenen Format")
+        self._tab_sablon.setCheckable(True)
+        self._tab_sablon.setChecked(True)
+        self._tab_sablon.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tab_sablon.setFixedHeight(34)
+
+        self._tab_sonuc = QPushButton("📊  Import Sonuçları")
+        self._tab_sonuc.setCheckable(True)
+        self._tab_sonuc.setChecked(False)
+        self._tab_sonuc.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tab_sonuc.setFixedHeight(34)
+
+        for btn in (self._tab_sablon, self._tab_sonuc):
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #e2e8f0; color: #475569; border: none;
+                    border-radius: 0; font-size: 12px; font-weight: 600;
+                    padding: 0 18px;
+                }
+                QPushButton:checked {
+                    background: #1e40af; color: white;
+                }
+                QPushButton:hover:!checked { background: #cbd5e1; }
+            """)
+        self._tab_sablon.setStyleSheet(
+            self._tab_sablon.styleSheet() + "QPushButton{border-radius: 8px 0 0 8px;}"
+        )
+        self._tab_sonuc.setStyleSheet(
+            self._tab_sonuc.styleSheet() + "QPushButton{border-radius: 0 8px 8px 0;}"
+        )
+        self._tab_sablon.clicked.connect(lambda: self._switch_tab(0))
+        self._tab_sonuc.clicked.connect(lambda: self._switch_tab(1))
+        tab_row.addWidget(self._tab_sablon)
+        tab_row.addWidget(self._tab_sonuc)
+        tab_row.addStretch()
+        root.addLayout(tab_row)
+
+        # ── Stack ────────────────────────────────────────────────────────────
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+
+        # Sayfa 0 — Şablon önizleme
+        self._stack.addWidget(self._build_sablon_page())
+
+        # Sayfa 1 — Import sonuçları
+        self._stack.addWidget(self._build_sonuc_page())
+
+        # ── Alt buton çubuğu ─────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#e2e8f0;")
+        root.addWidget(sep)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        self._sablon_indir_btn = QPushButton("📥  Şablon Excel İndir")
+        self._sablon_indir_btn.setFixedHeight(40)
+        self._sablon_indir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sablon_indir_btn.setStyleSheet(self._btn_style("#0891b2"))
+        self._sablon_indir_btn.clicked.connect(self._on_sablon_indir)
+        btn_row.addWidget(self._sablon_indir_btn)
+
+        btn_row.addStretch()
+
+        self._dosya_sec_btn = QPushButton("📂  Dosya Seç & Import Et")
+        self._dosya_sec_btn.setFixedHeight(40)
+        self._dosya_sec_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dosya_sec_btn.setStyleSheet(self._btn_style("#059669"))
+        self._dosya_sec_btn.clicked.connect(self._on_dosya_sec)
+        btn_row.addWidget(self._dosya_sec_btn)
+
+        root.addLayout(btn_row)
+
+        # ── İlerleme barı (gizli) ────────────────────────────────────────────
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)   # marquee mod
+        self._progress.setFixedHeight(6)
+        self._progress.setTextVisible(False)
+        self._progress.setStyleSheet(
+            "QProgressBar{background:#e2e8f0;border:none;border-radius:3px;}"
+            "QProgressBar::chunk{background:#059669;border-radius:3px;}"
+        )
+        self._progress.hide()
+        root.addWidget(self._progress)
+
+    def _build_sablon_page(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet("background:transparent;")
+        vlay = QVBoxLayout(page)
+        vlay.setContentsMargins(0, 0, 0, 0)
+        vlay.setSpacing(10)
+
+        lbl = QLabel("📋  Beklenen Excel Yapısı (Her sayfa = bir banka hesabı):")
+        lbl.setStyleSheet("font-size:12px;font-weight:700;color:#1e293b;")
+        vlay.addWidget(lbl)
+
+        # Satır 1-3: Meta bilgi
+        meta_lbl = QLabel(
+            "Satır 1: OLUŞTURMA TARİHİ  •  Satır 2: FİRMA  •  "
+            "Satır 3: FİLTRENEN TARİH ARALIĞI  •  Satır 4: KOLON BAŞLIKLARI  •  "
+            "Satır 5+: Hareket verileri"
+        )
+        meta_lbl.setWordWrap(True)
+        meta_lbl.setStyleSheet(
+            "font-size:11px;color:#64748b;background:#fef9c3;"
+            "border:1px solid #fde68a;border-radius:6px;padding:8px 12px;"
+        )
+        vlay.addWidget(meta_lbl)
+
+        # Şablon tablosu
+        tbl = QTableWidget(len(self.ORNEK_SATIRLAR) + 1, len(self.BEKLENEN_KOLONLAR))
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setHorizontalHeaderLabels(self.BEKLENEN_KOLONLAR)
+        tbl.verticalHeader().setVisible(False)
+        tbl.setAlternatingRowColors(True)
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        tbl.horizontalHeader().setStretchLastSection(True)
+        tbl.setStyleSheet("""
+            QTableWidget {
+                background: white; alternate-background-color: #f0f9ff;
+                gridline-color: #e2e8f0; font-size: 11px;
+                border: 1.5px solid #bfdbfe; border-radius: 8px;
+            }
+            QTableWidget::item { padding: 4px 8px; color: #1e293b; }
+            QTableWidget::item:selected { background: #dbeafe; color: #1e40af; }
+            QHeaderView::section {
+                background: #1e40af; color: white;
+                font-size: 10px; font-weight: 700;
+                padding: 6px 4px; border: none;
+                border-bottom: 1px solid #1d4ed8;
+                border-right: 1px solid #1d4ed8;
+            }
+        """)
+
+        # Zorunlu kolon açıklamaları (ilk satır)
+        zorunlu = {
+            "HAREKET ID": "✅ Zorunlu (mükerrer kontrol)",
+            "TARİH": "✅ Zorunlu (DD/MM/YYYY)",
+            "AÇIKLAMA": "✅ Zorunlu",
+            "TUTAR": "✅ Zorunlu (+gelir / -gider)",
+            "BANKA/ŞUBE": "💡 Önerilen",
+            "HESAP NO": "💡 Önerilen",
+            "IBAN": "💡 Önerilen",
+            "KARŞI TARAF ÜNVAN": "💡 Önerilen",
+        }
+        for c_idx, col in enumerate(self.BEKLENEN_KOLONLAR):
+            aciklama = zorunlu.get(col, "— İsteğe bağlı")
+            item = QTableWidgetItem(aciklama)
+            if "Zorunlu" in aciklama:
+                item.setForeground(QBrush(QColor("#059669")))
+                f = item.font(); f.setBold(True); item.setFont(f)
+            elif "Önerilen" in aciklama:
+                item.setForeground(QBrush(QColor("#d97706")))
+            else:
+                item.setForeground(QBrush(QColor("#94a3b8")))
+            tbl.setItem(0, c_idx, item)
+
+        # Örnek veri satırları
+        for r_idx, row_data in enumerate(self.ORNEK_SATIRLAR):
+            for c_idx, val in enumerate(row_data):
+                item = QTableWidgetItem(str(val))
+                # TUTAR kolonunu renklendir
+                if c_idx == 13:
+                    try:
+                        t = float(val)
+                        item.setForeground(QBrush(QColor("#059669" if t >= 0 else "#dc2626")))
+                        f = item.font(); f.setBold(True); item.setFont(f)
+                    except Exception:
+                        pass
+                tbl.setItem(r_idx + 1, c_idx, item)
+
+        tbl.resizeRowsToContents()
+        vlay.addWidget(tbl, 1)
+
+        # Alan eşleştirme özeti
+        eslestirme = QLabel(
+            "🔗  Alan Eşleştirme:  "
+            "HAREKET ID → womsisKey (mükerrer kontrol)  │  "
+            "TARİH → tarih (YYYY-MM-DD'ye çevrilir)  │  "
+            "AÇIKLAMA → aciklama  │  "
+            "|TUTAR| → alinan_tutar1  │  "
+            "TUTAR>0 → gelir, <0 → gider  │  "
+            "BANKA/ŞUBE → sube alanı  │  "
+            "KARŞI TARAF ÜNVAN → faturaUnvan"
+        )
+        eslestirme.setWordWrap(True)
+        eslestirme.setStyleSheet(
+            "font-size:11px;color:#1e40af;background:#eff6ff;"
+            "border:1px solid #bfdbfe;border-radius:6px;padding:8px 12px;"
+        )
+        vlay.addWidget(eslestirme)
+
+        return page
+
+    def _build_sonuc_page(self) -> QWidget:
+        page = QWidget()
+        page.setStyleSheet("background:transparent;")
+        vlay = QVBoxLayout(page)
+        vlay.setContentsMargins(0, 0, 0, 0)
+        vlay.setSpacing(10)
+
+        # Durum etiketi
+        self._sonuc_lbl = QLabel("Henüz import yapılmadı.")
+        self._sonuc_lbl.setWordWrap(True)
+        self._sonuc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sonuc_lbl.setStyleSheet(
+            "font-size:13px;color:#64748b;background:#f1f5f9;"
+            "border-radius:10px;padding:20px;"
+        )
+        vlay.addWidget(self._sonuc_lbl)
+
+        # Log tablosu
+        self._log_tbl = QTableWidget(0, 4)
+        self._log_tbl.setHorizontalHeaderLabels(["Sayfa/Hesap", "Eklenen", "Atlanan", "Durum"])
+        self._log_tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._log_tbl.verticalHeader().setVisible(False)
+        self._log_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._log_tbl.setAlternatingRowColors(True)
+        self._log_tbl.setStyleSheet("""
+            QTableWidget {
+                background: white; alternate-background-color: #f0fdf4;
+                gridline-color: #e2e8f0; font-size: 12px;
+                border: 1.5px solid #bbf7d0; border-radius: 8px;
+            }
+            QTableWidget::item { padding: 6px 10px; }
+            QHeaderView::section {
+                background: #059669; color: white;
+                font-size: 11px; font-weight: 700; padding: 7px;
+                border: none; border-right: 1px solid #047857;
+            }
+        """)
+        vlay.addWidget(self._log_tbl, 1)
+
+        # Özet çipler — değer label'ları direkt saklanıyor
+        self._ozet_row = QHBoxLayout()
+        self._ozet_row.setSpacing(10)
+
+        chip_toplam,  self._lbl_toplam  = self._make_chip("📦 Toplam",   "0", "#1e40af", "#eff6ff")
+        chip_eklenen, self._lbl_eklenen = self._make_chip("✅ Eklenen",  "0", "#059669", "#f0fdf4")
+        chip_atlanan, self._lbl_atlanan = self._make_chip("⏭️ Atlanan",  "0", "#d97706", "#fffbeb")
+        chip_hata,    self._lbl_hata    = self._make_chip("❌ Hata",      "0", "#dc2626", "#fef2f2")
+
+        for chip in (chip_toplam, chip_eklenen, chip_atlanan, chip_hata):
+            self._ozet_row.addWidget(chip)
+        self._ozet_row.addStretch()
+        vlay.addLayout(self._ozet_row)
+
+        return page
+
+    def _make_chip(self, label: str, value: str, color: str, bg: str):
+        """(QFrame, val_QLabel) döndürür — label direkt saklanarak güvenilir güncelleme."""
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame{{background:{bg};border:1.5px solid {color}40;"
+            f"border-radius:10px;padding:2px;}}"
+        )
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(14, 8, 14, 8)
+        lay.setSpacing(2)
+        lbl = QLabel(label)
+        lbl.setStyleSheet(f"font-size:10px;font-weight:600;color:{color};")
+        val = QLabel(value)
+        val.setStyleSheet(f"font-size:22px;font-weight:800;color:{color};")
+        val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(lbl)
+        lay.addWidget(val)
+        frame.setFixedWidth(140)
+        return frame, val  # frame ve değer label'ı birlikte döndür
+
+    def _set_chips(self, toplam: str, eklenen: str, atlanan: str, hata: str):
+        """4 chip değerini tek çağrıyla günceller."""
+        self._lbl_toplam.setText(toplam)
+        self._lbl_eklenen.setText(eklenen)
+        self._lbl_atlanan.setText(atlanan)
+        self._lbl_hata.setText(hata)
+
+    def _btn_style(self, color: str) -> str:
+        return (
+            f"QPushButton{{background:{color};color:white;border:none;"
+            f"border-radius:9px;font-size:13px;font-weight:600;"
+            f"padding:0 18px;letter-spacing:.4px;}}"
+            f"QPushButton:hover{{background:{color}cc;}}"
+            f"QPushButton:disabled{{background:#cbd5e1;color:#94a3b8;}}"
+        )
+
+    def _switch_tab(self, idx: int):
+        self._tab_sablon.setChecked(idx == 0)
+        self._tab_sonuc.setChecked(idx == 1)
+        self._stack.setCurrentIndex(idx)
+
+    # ── Şablon Excel İndir ────────────────────────────────────────────────────
+
+    def _on_sablon_indir(self):
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        except ImportError:
+            QMessageBox.warning(self, "Hata", "openpyxl kütüphanesi yüklü değil.\npip install openpyxl")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Şablon Excel Kaydet",
+            "vomsis_banka_hareketi_sablon.xlsx",
+            "Excel Dosyaları (*.xlsx)"
+        )
+        if not path:
+            return
+
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "BANKA-HESAP_NO"
+
+            # Meta satırlar
+            ws.append(["OLUŞTURMA TARİHİ", "07/07/2026 12:00:00"])
+            ws.append(["FİRMA", "FİRMA ADI"])
+            ws.append(["FİLTRENEN TARİH ARALIĞI", "01/01/2026-30/06/2026"])
+
+            # Kolon başlıkları
+            ws.append(self.BEKLENEN_KOLONLAR)
+
+            # Başlık satırı stili
+            hdr_fill  = PatternFill("solid", fgColor="1E40AF")
+            hdr_font  = Font(bold=True, color="FFFFFF", size=10)
+            hdr_align = Alignment(horizontal="center", vertical="center")
+            thin = Side(style="thin", color="1D4ED8")
+            hdr_border = Border(left=thin, right=thin, bottom=thin)
+            for cell in ws[4]:
+                cell.fill   = hdr_fill
+                cell.font   = hdr_font
+                cell.alignment = hdr_align
+                cell.border = hdr_border
+
+            # Örnek veri satırları
+            for row_data in self.ORNEK_SATIRLAR:
+                ws.append(row_data)
+
+            # Sütun genişlikleri
+            col_widths = [12, 8, 30, 15, 10, 14, 32, 8, 28, 12,
+                          10, 30, 40, 14, 14, 14, 32, 14, 14, 14]
+            for i, w in enumerate(col_widths, 1):
+                ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+            # Satır yüksekliği (başlık)
+            ws.row_dimensions[4].height = 20
+
+            # Not sayfası
+            ws2 = wb.create_sheet("AÇIKLAMALAR")
+            notlar = [
+                ("Alan", "Açıklama", "Zorunlu?"),
+                ("HAREKET ID", "Her hareket için benzersiz ID (mükerrer önleme)", "EVET"),
+                ("TARİH", "DD/MM/YYYY formatında tarih", "EVET"),
+                ("AÇIKLAMA", "İşlem açıklaması", "EVET"),
+                ("TUTAR", "Pozitif = Gelir, Negatif = Gider", "EVET"),
+                ("BANKA/ŞUBE", "Banka adı ve şube bilgisi", "ÖNERİLEN"),
+                ("HESAP NO", "Banka hesap numarası", "ÖNERİLEN"),
+                ("IBAN", "IBAN numarası", "ÖNERİLEN"),
+                ("KARŞI TARAF ÜNVAN", "Karşı taraf şirket/kişi adı", "ÖNERİLEN"),
+                ("KARŞI TARAF VKN", "Vergi/TC numarası", "İSTEĞE BAĞLI"),
+                ("BAKİYE", "İşlem sonrası hesap bakiyesi", "İSTEĞE BAĞLI"),
+                ("ETİKET", "İşlem etiketi", "İSTEĞE BAĞLI"),
+            ]
+            ws2.append([])
+            for row in notlar:
+                ws2.append(list(row))
+            # Not başlıkları
+            for cell in ws2[2]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="059669")
+
+            wb.save(path)
+            QMessageBox.information(self, "✅ Şablon İndirildi",
+                                    f"Şablon başarıyla kaydedildi:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Şablon oluşturulamadı:\n{e}")
+
+    # ── Dosya Seç & Import ────────────────────────────────────────────────────
+
+    def _on_dosya_sec(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "VOMSİS Excel Dosyası Seç",
+            "", "Excel Dosyaları (*.xlsx *.xls)"
+        )
+        if not path:
+            return
+        self._start_import(path)
+
+    def _start_import(self, path: str):
+        self._dosya_sec_btn.setEnabled(False)
+        self._sablon_indir_btn.setEnabled(False)
+        self._progress.show()
+        self._switch_tab(1)
+        self._sonuc_lbl.setText(f"⏳  Import ediliyor...\n{path}")
+        self._sonuc_lbl.setStyleSheet(
+            "font-size:12px;color:#1e40af;"
+            "background:#eff6ff;border:1px solid #bfdbfe;"
+            "border-radius:8px;padding:12px;"
+        )
+        self._log_tbl.setRowCount(0)
+        self._set_chips("0", "0", "0", "0")
+
+        self._worker = WomsisExcelWorker(path, self._userid)
+        self._worker.satir_done.connect(self._on_satir_done)
+        self._worker.header_error.connect(self._on_header_error)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_import_done)
+        self._worker.start()
+
+
+    def _on_progress(self, msg: str):
+        """Worker'dan gelen canlı durum mesajını gösterir."""
+        self._sonuc_lbl.setText(msg)
+        self._sonuc_lbl.setStyleSheet(
+            "font-size:12px;color:#1e40af;"
+            "background:#eff6ff;border:1px solid #bfdbfe;"
+            "border-radius:8px;padding:12px;"
+        )
+
+    def _on_header_error(self, sayfa: str, bulunan: object, eksik: object):
+        """
+        Worker başlık hatası bildirdiğinde çağrılır.
+        Hata detayını gösterir ve boş şablon Excel'i indirmeyi teklif eder.
+        """
+        if not eksik:
+            return
+
+        # Hata mesajı oluştur
+        if not bulunan:
+            baslik = f"'{sayfa}' sayfasında başlık satırı bulunamadı!"
+            detay  = (
+                "Excel dosyasında 'HAREKET ID' başlıklı kolon satırı tespit edilemedi.\n"
+                "Dosya VOMSİS formatında olmayabilir."
+            )
+        else:
+            baslik = f"'{sayfa}' sayfasında zorunlu kolonlar eksik!"
+            detay  = (
+                f"Eksik kolonlar: {', '.join(eksik)}\n\n"
+                f"Dosyada bulunan kolonlar:\n"
+                + "  ".join(f"• {k}" for k in bulunan[:10])
+                + (f"  ... (+{len(bulunan)-10} daha)" if len(bulunan) > 10 else "")
+            )
+
+        # Mesaj kutusu — şablon indir seçeneğiyle
+        msg = QMessageBox(self)
+        msg.setWindowTitle("⚠️  Başlık Hatası")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText(f"<b>{baslik}</b>")
+        msg.setInformativeText(
+            detay + "\n\nDoğru formatı görmek için şablon Excel'i indirebilirsiniz."
+        )
+        msg.setStyleSheet(
+            "QMessageBox { background: #fff; font-family: 'Segoe UI'; }"
+            "QLabel { color: #1e293b; font-size: 13px; }"
+            "QPushButton { background: #1e40af; color: white; border-radius: 6px;"
+            "              padding: 6px 16px; font-weight: 600; }"
+            "QPushButton:hover { background: #1d4ed8; }"
+        )
+        sablon_btn = msg.addButton("📥  Şablon Excel İndir", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton("Kapat", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+
+        if msg.clickedButton() == sablon_btn:
+            self._on_sablon_indir()
+
+    def _on_satir_done(self, sayfa: str, eklenen: int, atlanan: int, durum: str):
+        row = self._log_tbl.rowCount()
+        self._log_tbl.insertRow(row)
+        items = [sayfa, str(eklenen), str(atlanan), durum]
+        colors = [None, "#059669", "#d97706", None]
+        for c, (txt, clr) in enumerate(zip(items, colors)):
+            item = QTableWidgetItem(txt)
+            if clr:
+                item.setForeground(QBrush(QColor(clr)))
+                f = item.font(); f.setBold(True); item.setFont(f)
+            if "Tamam" in txt:
+                item.setForeground(QBrush(QColor("#059669")))
+            elif "hata" in txt.lower() or "⚠️" in txt:
+                item.setForeground(QBrush(QColor("#dc2626")))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._log_tbl.setItem(row, c, item)
+        self._log_tbl.scrollToBottom()
+
+    def _on_import_done(self, result: dict):
+        self._progress.hide()
+        self._dosya_sec_btn.setEnabled(True)
+        self._sablon_indir_btn.setEnabled(True)
+
+        self._set_chips(
+            f"{result.get('toplam',  0):,}",
+            f"{result.get('eklenen', 0):,}",
+            f"{result.get('atlanan', 0):,}",
+            f"{result.get('hata',    0):,}",
+        )
+
+        if result["success"]:
+            self._sonuc_lbl.setText(f"✅  {result['message']}")
+            self._sonuc_lbl.setStyleSheet(
+                "font-size:13px;font-weight:700;color:#059669;"
+                "background:#f0fdf4;border:1.5px solid #bbf7d0;"
+                "border-radius:10px;padding:16px;"
+            )
+        else:
+            self._sonuc_lbl.setText(f"❌  {result['message']}")
+            self._sonuc_lbl.setStyleSheet(
+                "font-size:13px;font-weight:700;color:#dc2626;"
+                "background:#fef2f2;border:1.5px solid #fca5a5;"
+                "border-radius:10px;padding:16px;"
             )
 
 
@@ -6296,3 +7278,903 @@ class VeriTabaniCard(QFrame):
 
     def refresh(self):
         self._load()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── VOMSİS POS Excel Import — Worker + Dialog ────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WomsisPosExcelWorker(QThread):
+    """
+    POS Excel dosyasını arka planda işler → womsi_pos tablosuna yazar.
+    PyQt6 gereği modül seviyesinde tanımlanmıştır.
+
+    Hem kendi şablonumuzdaki büyük harfli başlıkları (İŞLEM TARİHİ, İŞLEM TUTARI…)
+    hem de gerçek VOMSİS çıktısındaki başlıkları (İşlem Tarihi, Brüt Tutar, Terminal No…)
+    case-insensitive normalize ederek eşler.
+    """
+    satir_done   = pyqtSignal(str, int, int, str)   # sayfa, eklenen, atlanan, durum
+    header_error = pyqtSignal(str, object, object)  # sayfa, bulunan_list, eksik_list
+    skipped_row  = pyqtSignal(dict)                 # atlanan satır detayı
+    progress     = pyqtSignal(str)
+    finished     = pyqtSignal(dict)
+
+    # Zorunlu olan canonical (normalize) kolon adları
+    ZORUNLU_KANONLAR = ["islemtarihi", "islemtutari", "nettutar"]
+
+    # Normalize edilmiş başlık → DB alan adı eşlemesi
+    # (normalize = küçük harf + boşluk/noktalama silinmiş)
+    KOLON_MAP = {
+        # Şablon formatı (büyük harf)
+        "islemtarihi":         "islemtarihi",
+        "islemtutari":         "islemtutari",
+        "nettutar":            "nettutar",
+        "isyeriucrettutari":   "isyeriucretitutar",
+        "isyeriucretitutar":   "isyeriucretitutar",
+        "posno":               "posno",
+        "kartno":              "kartno",
+        "brand":               "brand",
+        "marka":               "brand",
+        "islemtipi":           "islemtipi",
+        "aciklama":            "aciklama",
+        "isyerino":            "isyerino",
+        "carihesap":           "carihesap",
+        "hesabagecistarihi":   "hesabagecistarihi",
+        # Gerçek VOMSİS POS Excel dosyası başlıkları
+        "islemtarihi":         "islemtarihi",       # İşlem Tarihi
+        "isyerinumarasi":      "isyerino",          # İşyeri Numarası
+        "terminalno":          "posno",             # Terminal No
+        "valor":               "hesabagecistarihi", # Valör
+        "islem":               "aciklama",          # İşlem
+        "bruttutar":           "islemtutari",       # Brüt Tutar
+        "kartnumarasi":        "kartno",            # Kart Numarası
+        "altkarttip":          "brand",             # Alt Kart Tipi
+        "altkarttipi":         "brand",             # Alt Kart Tipi (normalize edilmiş)
+        "altkarttıpı":         "brand",
+        "komisyon":            "isyeriucretitutar", # Komisyon
+        "komisyonoran":        "",                  # Komisyon Oranı — atla
+        "komisyonorani":       "",                  # Komisyon Oranı (normalize edilmiş)
+        "kur":                 "",                  # Kur — atla
+        "onayno":              "carihesap",         # Onay No → cariHesap
+    }
+
+    def __init__(self, filepath: str, userid: int):
+        super().__init__()
+        self._path   = filepath
+        self._userid = userid
+
+    @staticmethod
+    def _normalize(s: str) -> str:
+        """Başlığı küçük harfe çevirir, boşluk/noktalama/özel karakter siler."""
+        import unicodedata
+        s = str(s).strip().lower()
+        # Türkçe karakterleri ASCII karşılıklarına çevir
+        tr_map = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosucgiosu")
+        s = s.translate(tr_map)
+        # Boşluk ve noktalama sil
+        s = "".join(c for c in s if c.isalnum())
+        return s
+
+    def run(self):
+        try:
+            import openpyxl
+        except ImportError:
+            self.finished.emit({
+                "success": False,
+                "message": "openpyxl yüklü değil. pip install openpyxl",
+                "toplam": 0, "eklenen": 0, "atlanan": 0, "hata": 1,
+            })
+            return
+
+        from db.database import get_connection
+        from services.fiziksel_pos_service import ensure_tables
+        ensure_tables()
+
+        try:
+            wb = openpyxl.load_workbook(self._path, data_only=True)
+        except Exception as e:
+            self.finished.emit({
+                "success": False,
+                "message": f"Excel dosyası açılamadı: {e}",
+                "toplam": 0, "eklenen": 0, "atlanan": 0, "hata": 1,
+            })
+            return
+
+        conn = get_connection()
+        g_toplam = g_eklenen = g_atlanan = g_hata = 0
+
+        try:
+            for sheet_name in wb.sheetnames:
+                ws  = wb[sheet_name]
+                ins = skip = err = 0
+
+                # ── Başlık Satırı Bul ─────────────────────────────────────────
+                # İlk 10 satırda normalize başlık kontrolü yap
+                header_row = None
+                col_map    = {}   # db_alan_adi → kolon_indeksi (0-tabanlı)
+
+                for r_idx, row in enumerate(
+                    ws.iter_rows(min_row=1, max_row=10, values_only=True), 1
+                ):
+                    if not row:
+                        continue
+                    # Herhangi bir hücre normalize edilince 'islemtarihi' oluyorsa başlık satırı
+                    norm_vals = [
+                        self._normalize(str(v)) for v in row if v is not None
+                    ]
+                    if "islemtarihi" in norm_vals:
+                        header_row = r_idx
+                        for i, v in enumerate(row):
+                            if v is None:
+                                continue
+                            norm = self._normalize(str(v))
+                            db_alan = self.KOLON_MAP.get(norm, "")
+                            if db_alan:  # boş string → atla
+                                # İlk eşleşme kazanır
+                                if db_alan not in col_map:
+                                    col_map[db_alan] = i
+                        break
+
+                if header_row is None:
+                    bulunan = [
+                        str(v) for row in ws.iter_rows(
+                            min_row=1, max_row=3, values_only=True
+                        ) for v in (row or []) if v
+                    ]
+                    self.header_error.emit(
+                        sheet_name, bulunan[:12],
+                        ["islemtarihi", "islemtutari", "nettutar"]
+                    )
+                    self.satir_done.emit(
+                        sheet_name, 0, 0, "❌ Başlık satırı bulunamadı"
+                    )
+                    g_hata += 1
+                    continue
+
+                eksik_kanonlar = [
+                    k for k in self.ZORUNLU_KANONLAR if k not in col_map
+                ]
+                if eksik_kanonlar:
+                    bulunan_kolonlar = list(col_map.keys())
+                    self.header_error.emit(
+                        sheet_name, bulunan_kolonlar, eksik_kanonlar
+                    )
+                    self.satir_done.emit(
+                        sheet_name, 0, 0,
+                        f"❌ Eksik kolon: {', '.join(eksik_kanonlar)}"
+                    )
+                    g_hata += 1
+                    continue
+
+                self.progress.emit(f"📂  {sheet_name} işleniyor...")
+
+                # ── Veri Satırları ────────────────────────────────────────────
+                for row in ws.iter_rows(
+                    min_row=header_row + 1, values_only=True
+                ):
+                    if not row or all(v is None for v in row):
+                        continue
+
+                    def _get(db_alan, default=None, _row=row, _map=col_map):
+                        idx = _map.get(db_alan)
+                        if idx is None or idx >= len(_row):
+                            return default
+                        return _row[idx]
+
+                    islem_tarihi_raw = _get("islemtarihi",       "")
+                    islem_tutari_raw = _get("islemtutari",       0)
+                    net_tutar_raw    = _get("nettutar",          0)
+                    isyeri_ucret_raw = _get("isyeriucretitutar", 0)
+                    posno            = str(_get("posno",    "") or "")
+                    kartno           = str(_get("kartno",   "") or "")
+                    brand            = str(_get("brand",    "") or "")
+                    islem_tipi       = str(_get("islemtipi", "") or "")
+                    aciklama         = str(_get("aciklama",  "") or "")
+                    isyerino         = str(_get("isyerino",  "") or "")
+                    carihesap        = str(_get("carihesap", "") or "")
+                    gecis_tarihi_raw = _get("hesabagecistarihi", "")
+
+                    g_toplam += 1
+
+                    # ── Tutar parse ───────────────────────────────────────────
+                    def _parse_tutar(v):
+                        if v is None:
+                            return 0.0
+                        try:
+                            return float(
+                                str(v)
+                                .replace("\xa0", "")
+                                .replace(" ", "")
+                                .replace(",", ".")
+                            )
+                        except Exception:
+                            return 0.0
+
+                    islem_tutari = _parse_tutar(islem_tutari_raw)
+                    net_tutar    = _parse_tutar(net_tutar_raw)
+                    isyeri_ucret = _parse_tutar(isyeri_ucret_raw)
+
+                    # ── Tarih parse ───────────────────────────────────────────
+                    def _parse_tarih(raw):
+                        if not raw:
+                            return ""
+                        t = str(raw).strip()
+                        for fmt in (
+                            "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d",
+                            "%d.%m.%Y %H:%M", "%d/%m/%Y %H:%M",
+                            "%Y-%m-%d %H:%M:%S",
+                        ):
+                            try:
+                                return datetime.datetime.strptime(
+                                    t[:len(fmt)], fmt
+                                ).strftime("%Y-%m-%d")
+                            except Exception:
+                                continue
+                        return t[:10]
+
+                    islem_tarihi = _parse_tarih(islem_tarihi_raw)
+                    gecis_tarihi = _parse_tarih(gecis_tarihi_raw)
+
+                    if not islem_tarihi:
+                        err += 1; g_hata += 1
+                        continue
+
+                    # ── Mükerrer Kontrol ──────────────────────────────────────
+                    exists = None
+                    try:
+                        exists = conn.execute(
+                            """SELECT id FROM womsi_pos
+                               WHERE userid=? AND islemTarihi=?
+                                 AND ABS(islemTutari - ?) < 0.01
+                                 AND posNo=?
+                               LIMIT 1""",
+                            (self._userid, islem_tarihi,
+                             abs(islem_tutari), posno)
+                        ).fetchone()
+                    except Exception:
+                        exists = None
+
+                    if exists:
+                        skip += 1; g_atlanan += 1
+                        # Atlanan satır detayını bildir
+                        self.skipped_row.emit({
+                            "sayfa":      sheet_name,
+                            "tarih":      islem_tarihi,
+                            "tutar":      islem_tutari,
+                            "net_tutar":  net_tutar,
+                            "posno":      posno,
+                            "kartno":     kartno,
+                            "brand":      brand,
+                            "islem_tipi": islem_tipi,
+                            "aciklama":   aciklama,
+                            "neden":      "Mükerrer — DB'de mevcut",
+                        })
+                        if (ins + skip + err) % 50 == 0:
+                            self.progress.emit(
+                                f"⏳ {sheet_name}  —  "
+                                f"✅ {ins} eklendi   "
+                                f"⏭️ {skip} atlandı   "
+                                f"❌ {err} hata"
+                            )
+                        continue
+
+                    # ── Kayıt Ekle ────────────────────────────────────────────
+                    try:
+                        conn.execute(
+                            """INSERT INTO womsi_pos
+                               (userid, isyeriNo, cariHesap, hesabaGecisTarihi,
+                                islemTutari, islemTarihi, posNo, isyeriUcretiTutar,
+                                netTutar, brand, kartNo, islemTipi, aciklama)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                self._userid,
+                                isyerino,
+                                carihesap,
+                                gecis_tarihi,
+                                islem_tutari,
+                                islem_tarihi,
+                                posno,
+                                isyeri_ucret,
+                                net_tutar,
+                                brand,
+                                kartno,
+                                islem_tipi,
+                                aciklama,
+                            )
+                        )
+                        ins += 1; g_eklenen += 1
+                    except Exception as ex:
+                        err += 1; g_hata += 1
+
+                    if (ins + skip + err) % 50 == 0:
+                        self.progress.emit(
+                            f"⏳ {sheet_name}  —  "
+                            f"✅ {ins} eklendi   "
+                            f"⏭️ {skip} atlandı   "
+                            f"❌ {err} hata"
+                        )
+
+                conn.commit()
+                durum = "✅ Tamam" if err == 0 else f"⚠️ {err} hata"
+                self.satir_done.emit(sheet_name, ins, skip, durum)
+                g_atlanan += skip
+                g_hata    += err
+
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            self.finished.emit({
+                "success": False,
+                "message": f"İşlem hatası: {e}",
+                "toplam": g_toplam, "eklenen": g_eklenen,
+                "atlanan": g_atlanan, "hata": g_hata,
+            })
+            return
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        basarili = g_hata == 0
+        self.finished.emit({
+            "success": basarili,
+            "message": (
+                f"{g_eklenen} POS hareketi eklendi"
+                + (f", {g_atlanan} atlandı" if g_atlanan else "")
+                + (f", {g_hata} hata" if g_hata else "")
+                + "."
+            ),
+            "toplam": g_toplam, "eklenen": g_eklenen,
+            "atlanan": g_atlanan, "hata": g_hata,
+        })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── VOMSİS POS Excel Import Dialog ───────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WomsisPosExcelImportDialog(QDialog):
+    """
+    WomsisExcelImportDialog'ın POS versiyonu.
+    Aynı UI/UX, womsi_pos tablosuna yazar.
+    Zorunlu kolonlar: İŞLEM TARİHİ, İŞLEM TUTARI, NET TUTAR
+    """
+
+    def __init__(self, userid: int, parent=None):
+        super().__init__(parent)
+        self._userid  = userid
+        self._worker: WomsisPosExcelWorker | None = None
+        self.setWindowTitle("💳  VOMSİS POS Hareketleri — Excel Import")
+        self.setMinimumSize(800, 580)
+        self.resize(950, 640)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog { background: #f8fafc; }
+            QLabel  { background: transparent; font-family: 'Segoe UI', Arial, sans-serif; }
+        """)
+        self._build()
+
+    # ── UI ───────────────────────────────────────────────────────────────────
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Üst banner ──
+        banner = QFrame()
+        banner.setFixedHeight(56)
+        banner.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #059669, stop:1 #047857);"
+        )
+        b_lay = QHBoxLayout(banner)
+        b_lay.setContentsMargins(20, 0, 20, 0)
+        b_lbl = QLabel("💳  VOMSİS POS Hareketleri — Excel Import")
+        b_lbl.setStyleSheet("color:white;font-size:15px;font-weight:700;")
+        b_lay.addWidget(b_lbl)
+        b_lay.addStretch()
+        root.addWidget(banner)
+
+        # ── Tab çubuğu ──
+        tab_bar = QFrame()
+        tab_bar.setFixedHeight(40)
+        tab_bar.setStyleSheet("background:#f1f5f9;border-bottom:2px solid #e2e8f0;")
+        t_lay = QHBoxLayout(tab_bar)
+        t_lay.setContentsMargins(16, 0, 16, 0)
+        t_lay.setSpacing(0)
+
+        def _tab_btn(text, checked=False):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setChecked(checked)
+            b.setStyleSheet("""
+                QPushButton {
+                    background:transparent;border:none;
+                    font-size:12px;font-weight:600;
+                    color:#64748b;padding:0 16px;
+                }
+                QPushButton:checked {
+                    color:#059669;
+                    border-bottom:2px solid #059669;
+                }
+                QPushButton:hover:!checked { color:#374151; }
+            """)
+            return b
+
+        self._tab_sablon = _tab_btn("📋  Şablon & Yükle", checked=True)
+        self._tab_sonuc  = _tab_btn("📊  Sonuçlar")
+        t_lay.addWidget(self._tab_sablon)
+        t_lay.addWidget(self._tab_sonuc)
+        t_lay.addStretch()
+        root.addWidget(tab_bar)
+
+        # ── Sayfa yığını ──
+        self._stack = QStackedWidget()
+        root.addWidget(self._stack, 1)
+
+        self._stack.addWidget(self._build_sablon_page())
+        self._stack.addWidget(self._build_sonuc_page())
+
+        self._tab_sablon.clicked.connect(lambda: self._switch_tab(0))
+        self._tab_sonuc.clicked.connect(lambda: self._switch_tab(1))
+
+    def _build_sablon_page(self) -> QWidget:
+        page = QWidget()
+        vlay = QVBoxLayout(page)
+        vlay.setContentsMargins(24, 20, 24, 20)
+        vlay.setSpacing(16)
+
+        # Bilgi kutusu
+        info = QFrame()
+        info.setStyleSheet(
+            "background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:10px;"
+        )
+        i_lay = QVBoxLayout(info)
+        i_lay.setContentsMargins(16, 12, 16, 12)
+        i_lbl = QLabel(
+            "📋  <b>POS Hareketleri Excel Şablonu</b><br>"
+            "Zorunlu kolonlar: <b>İŞLEM TARİHİ · İŞLEM TUTARI · NET TUTAR</b><br>"
+            "İsteğe bağlı: POS NO · KART NO · BRAND · İŞLEM TİPİ · "
+            "İŞYERİ ÜCRET TUTARI · AÇIKLAMA · HESABA GEÇİŞ TARİHİ"
+        )
+        i_lbl.setStyleSheet("font-size:12px;color:#065f46;")
+        i_lbl.setWordWrap(True)
+        i_lbl.setTextFormat(Qt.TextFormat.RichText)
+        i_lay.addWidget(i_lbl)
+        vlay.addWidget(info)
+
+        # Şablon indirme butonu
+        self._sablon_indir_btn = QPushButton("⬇️  Şablon Excel İndir")
+        self._sablon_indir_btn.setFixedHeight(36)
+        self._sablon_indir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sablon_indir_btn.setStyleSheet(self._btn_style("#0891b2"))
+        self._sablon_indir_btn.clicked.connect(self._on_sablon_indir)
+        vlay.addWidget(self._sablon_indir_btn)
+
+        # Dosya seçimi
+        dosya_row = QHBoxLayout()
+        self._dosya_lbl = QLabel("Henüz dosya seçilmedi.")
+        self._dosya_lbl.setStyleSheet(
+            "font-size:12px;color:#475569;background:#f1f5f9;"
+            "border-radius:8px;padding:8px 14px;"
+        )
+        self._dosya_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        dosya_row.addWidget(self._dosya_lbl)
+
+        self._dosya_sec_btn = QPushButton("📂  Dosya Seç")
+        self._dosya_sec_btn.setFixedHeight(36)
+        self._dosya_sec_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dosya_sec_btn.setStyleSheet(self._btn_style("#059669"))
+        self._dosya_sec_btn.clicked.connect(self._on_dosya_sec)
+        dosya_row.addWidget(self._dosya_sec_btn)
+        vlay.addLayout(dosya_row)
+
+        # İlerleme
+        self._progress = QLabel("")
+        self._progress.setStyleSheet(
+            "font-size:12px;color:#0891b2;background:#f0f9ff;"
+            "border-radius:8px;padding:8px 14px;"
+        )
+        self._progress.hide()
+        vlay.addWidget(self._progress)
+
+        vlay.addStretch()
+
+        # Kapat
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        kapat = QPushButton("✕  Kapat")
+        kapat.setStyleSheet(self._btn_style("#64748b"))
+        kapat.clicked.connect(self.reject)
+        btn_row.addWidget(kapat)
+        vlay.addLayout(btn_row)
+        return page
+
+    def _build_sonuc_page(self) -> QWidget:
+        page = QWidget()
+        vlay = QVBoxLayout(page)
+        vlay.setContentsMargins(24, 20, 24, 20)
+        vlay.setSpacing(12)
+
+        # ── Sonuç Mesajı ──
+        self._sonuc_lbl = QLabel("")
+        self._sonuc_lbl.setStyleSheet(
+            "font-size:13px;font-weight:600;color:#065f46;"
+            "background:#f0fdf4;border-radius:8px;padding:10px;"
+        )
+        self._sonuc_lbl.setWordWrap(True)
+        vlay.addWidget(self._sonuc_lbl)
+
+        # ── İç Alt-Tab Çubuğu ──
+        inner_tab_bar = QFrame()
+        inner_tab_bar.setFixedHeight(34)
+        inner_tab_bar.setStyleSheet(
+            "background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;"
+        )
+        it_lay = QHBoxLayout(inner_tab_bar)
+        it_lay.setContentsMargins(6, 3, 6, 3)
+        it_lay.setSpacing(4)
+
+        def _itab(text, checked=False):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setChecked(checked)
+            b.setFixedHeight(26)
+            b.setStyleSheet("""
+                QPushButton {
+                    background: transparent; border: none;
+                    font-size: 11px; font-weight: 600;
+                    color: #64748b; padding: 0 12px; border-radius: 6px;
+                }
+                QPushButton:checked {
+                    background: #059669; color: white;
+                }
+                QPushButton:hover:!checked { background: #f1f5f9; color: #374151; }
+            """)
+            return b
+
+        self._itab_ozet    = _itab("📋  Sayfa Özeti", checked=True)
+        self._itab_atlanan = _itab("⏭️  Atlanan Kayıtlar")
+        it_lay.addWidget(self._itab_ozet)
+        it_lay.addWidget(self._itab_atlanan)
+        it_lay.addStretch()
+        vlay.addWidget(inner_tab_bar)
+
+        # ── İç Stack ──
+        self._inner_stack = QStackedWidget()
+        vlay.addWidget(self._inner_stack, 1)
+
+        self._itab_ozet.clicked.connect(lambda: self._switch_inner_tab(0))
+        self._itab_atlanan.clicked.connect(lambda: self._switch_inner_tab(1))
+
+        # ── İç Sayfa 0: Sayfa Özet Tablosu ──
+        p0 = QWidget()
+        p0_lay = QVBoxLayout(p0)
+        p0_lay.setContentsMargins(0, 0, 0, 0)
+        self._log_tbl = QTableWidget()
+        self._log_tbl.setColumnCount(4)
+        self._log_tbl.setHorizontalHeaderLabels(["Sayfa", "Eklenen", "Atlanan", "Durum"])
+        self._log_tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._log_tbl.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self._log_tbl.verticalHeader().setVisible(False)
+        self._log_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._log_tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._log_tbl.setAlternatingRowColors(True)
+        self._log_tbl.setStyleSheet("""
+            QTableWidget {
+                background: white; border: 1px solid #d1fae5;
+                border-radius: 8px;
+            }
+            QTableWidget::item { padding: 6px 10px; }
+            QHeaderView::section {
+                background: #059669; color: white;
+                font-size: 11px; font-weight: 700; padding: 7px;
+                border: none; border-right: 1px solid #047857;
+            }
+        """)
+        p0_lay.addWidget(self._log_tbl)
+        self._inner_stack.addWidget(p0)
+
+        # ── İç Sayfa 1: Atlanan Kayıtlar Tablosu ──
+        p1 = QWidget()
+        p1_lay = QVBoxLayout(p1)
+        p1_lay.setContentsMargins(0, 0, 0, 0)
+        p1_lay.setSpacing(6)
+
+        info_lbl = QLabel(
+            "⚠️  Atlanan kayıtlar — DB'de aynı İşlem Tarihi + Tutar + POS No kombinasyonu "
+            "zaten mevcut olduğu için tekrar eklenmedi."
+        )
+        info_lbl.setWordWrap(True)
+        info_lbl.setStyleSheet(
+            "background:#fffbeb;color:#92400e;border-radius:6px;"
+            "padding:8px 12px;font-size:11px;border:1.5px solid #fde68a;"
+        )
+        p1_lay.addWidget(info_lbl)
+
+        self._atlanan_tbl = QTableWidget()
+        self._atlanan_tbl.setColumnCount(9)
+        self._atlanan_tbl.setHorizontalHeaderLabels([
+            "Sayfa", "İşlem Tarihi", "Brüt Tutar", "Net Tutar",
+            "POS No", "Kart No", "Brand", "İşlem Tipi", "Neden"
+        ])
+        hdr = self._atlanan_tbl.horizontalHeader()
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)
+        self._atlanan_tbl.verticalHeader().setVisible(False)
+        self._atlanan_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._atlanan_tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._atlanan_tbl.setAlternatingRowColors(True)
+        self._atlanan_tbl.setSortingEnabled(True)
+        self._atlanan_tbl.setStyleSheet("""
+            QTableWidget {
+                background: white; border: 1px solid #fde68a;
+                border-radius: 8px;
+            }
+            QTableWidget::item { padding: 5px 8px; font-size: 11px; }
+            QTableWidget::item:alternate { background: #fffbeb; }
+            QHeaderView::section {
+                background: #d97706; color: white;
+                font-size: 11px; font-weight: 700; padding: 7px;
+                border: none; border-right: 1px solid #b45309;
+            }
+        """)
+        p1_lay.addWidget(self._atlanan_tbl, 1)
+        self._inner_stack.addWidget(p1)
+
+        # ── Chip'ler ──
+        self._chip_row = QHBoxLayout()
+        self._chip_row.setSpacing(10)
+        chip_toplam,  self._lbl_toplam  = self._make_chip("📦 Toplam",   "0", "#1e40af", "#eff6ff")
+        chip_eklenen, self._lbl_eklenen = self._make_chip("✅ Eklenen",  "0", "#059669", "#f0fdf4")
+        chip_atlanan, self._lbl_atlanan = self._make_chip("⏭️ Atlanan",  "0", "#d97706", "#fffbeb")
+        chip_hata,    self._lbl_hata    = self._make_chip("❌ Hata",      "0", "#dc2626", "#fef2f2")
+        for chip in (chip_toplam, chip_eklenen, chip_atlanan, chip_hata):
+            self._chip_row.addWidget(chip)
+        self._chip_row.addStretch()
+        vlay.addLayout(self._chip_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        kapat = QPushButton("✕  Kapat")
+        kapat.setStyleSheet(self._btn_style("#64748b"))
+        kapat.clicked.connect(self.reject)
+        btn_row.addWidget(kapat)
+        vlay.addLayout(btn_row)
+        return page
+
+    def _make_chip(self, label, value, color, bg):
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame{{background:{bg};border:1.5px solid {color}40;"
+            f"border-radius:10px;padding:2px;}}"
+        )
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(14, 8, 14, 8)
+        lay.setSpacing(2)
+        lbl = QLabel(label)
+        lbl.setStyleSheet(f"font-size:10px;font-weight:600;color:{color};")
+        val = QLabel(value)
+        val.setStyleSheet(f"font-size:22px;font-weight:800;color:{color};")
+        val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(lbl)
+        lay.addWidget(val)
+        frame.setFixedWidth(140)
+        return frame, val
+
+    def _set_chips(self, toplam, eklenen, atlanan, hata):
+        self._lbl_toplam.setText(toplam)
+        self._lbl_eklenen.setText(eklenen)
+        self._lbl_atlanan.setText(atlanan)
+        self._lbl_hata.setText(hata)
+
+    def _switch_inner_tab(self, idx: int):
+        self._itab_ozet.setChecked(idx == 0)
+        self._itab_atlanan.setChecked(idx == 1)
+        self._inner_stack.setCurrentIndex(idx)
+
+    def _btn_style(self, color):
+        return (
+            f"QPushButton{{background:{color};color:white;border:none;"
+            f"border-radius:9px;font-size:13px;font-weight:600;"
+            f"padding:0 18px;letter-spacing:.4px;}}"
+            f"QPushButton:hover{{background:{color}cc;}}"
+            f"QPushButton:disabled{{background:#cbd5e1;color:#94a3b8;}}"
+        )
+
+    def _switch_tab(self, idx):
+        self._tab_sablon.setChecked(idx == 0)
+        self._tab_sonuc.setChecked(idx == 1)
+        self._stack.setCurrentIndex(idx)
+
+    # ── Şablon İndir ─────────────────────────────────────────────────────────
+
+    def _on_sablon_indir(self):
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+        except ImportError:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Hata", "openpyxl yüklü değil.\npip install openpyxl")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "POS Şablon Excel Kaydet",
+            "vomsis_pos_hareketi_sablon.xlsx",
+            "Excel Dosyaları (*.xlsx)"
+        )
+        if not path:
+            return
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "POS Hareketleri"
+
+        headers = [
+            "İŞLEM TARİHİ", "İŞLEM TUTARI", "NET TUTAR",
+            "İŞYERİ ÜCRET TUTARI", "POS NO", "KART NO",
+            "BRAND", "İŞLEM TİPİ", "AÇIKLAMA",
+            "İŞYERİ NO", "CARİ HESAP", "HESABA GEÇİŞ TARİHİ",
+        ]
+        fill   = PatternFill("solid", fgColor="059669")
+        font   = Font(bold=True, color="FFFFFF", size=10)
+        align  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        for ci, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=ci, value=h)
+            cell.fill  = fill
+            cell.font  = font
+            cell.alignment = align
+            ws.column_dimensions[cell.column_letter].width = max(16, len(h) + 4)
+
+        ws.row_dimensions[1].height = 24
+
+        # Örnek veri
+        ws.append([
+            "2024-01-15", 1500.00, 1455.00, 45.00,
+            "POS001", "4111111111111111", "VISA",
+            "SATIŞ", "Satış işlemi",
+            "12345678", "", "2024-01-16",
+        ])
+
+        wb.save(path)
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "Şablon İndirildi", f"✅  Şablon kaydedildi:\n{path}")
+
+    # ── Dosya Seç & Import ────────────────────────────────────────────────────
+
+    def _on_dosya_sec(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "POS Excel Dosyası Seç", "",
+            "Excel Dosyaları (*.xlsx *.xls)"
+        )
+        if not path:
+            return
+        self._dosya_lbl.setText(path)
+        self._start_import(path)
+
+    def _start_import(self, path: str):
+        self._dosya_sec_btn.setEnabled(False)
+        self._sablon_indir_btn.setEnabled(False)
+        self._progress.setText("⏳  İçe aktarma başlatılıyor...")
+        self._progress.show()
+        self._set_chips("0", "0", "0", "0")
+        self._log_tbl.setRowCount(0)
+        self._atlanan_tbl.setRowCount(0)   # atlanan listeyi sıfırla
+        self._itab_atlanan.setText("⏭️  Atlanan Kayıtlar")  # badge sıfırla
+        self._switch_inner_tab(0)          # özet tablosundan başla
+        self._switch_tab(1)
+
+        self._worker = WomsisPosExcelWorker(path, self._userid)
+        self._worker.satir_done.connect(self._on_satir_done)
+        self._worker.header_error.connect(self._on_header_error)
+        self._worker.skipped_row.connect(self._on_skipped_row)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_import_done)
+        self._worker.start()
+
+    def _on_progress(self, msg: str):
+        self._progress.setText(msg)
+        self._progress.show()
+
+    def _on_satir_done(self, sayfa: str, eklenen: int, atlanan: int, durum: str):
+        ri = self._log_tbl.rowCount()
+        self._log_tbl.insertRow(ri)
+        self._log_tbl.setRowHeight(ri, 28)
+        for ci, val in enumerate([sayfa, str(eklenen), str(atlanan), durum]):
+            item = QTableWidgetItem(val)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            if ci == 3 and "❌" in durum:
+                item.setForeground(QBrush(QColor("#dc2626")))
+            elif ci == 3:
+                item.setForeground(QBrush(QColor("#059669")))
+            self._log_tbl.setItem(ri, ci, item)
+
+    def _on_header_error(self, sayfa: str, bulunan: object, eksik: object):
+        from PyQt6.QtWidgets import QMessageBox
+        eksik_str   = ", ".join(eksik) if eksik else "?"
+        bulunan_str = ", ".join(bulunan[:8]) if bulunan else "Yok"
+        QMessageBox.warning(
+            self, "Başlık Hatası",
+            f"'{sayfa}' sayfasında zorunlu kolonlar eksik:\n\n"
+            f"❌ Eksik: {eksik_str}\n"
+            f"📋 Bulunan: {bulunan_str}\n\n"
+            "Şablon Excel'i indirip kullanın."
+        )
+
+    def _on_skipped_row(self, info: dict):
+        """Atlanan her satırı _atlanan_tbl'a ekler ve inner tab badge'i günceller."""
+        ri = self._atlanan_tbl.rowCount()
+        self._atlanan_tbl.insertRow(ri)
+        self._atlanan_tbl.setRowHeight(ri, 26)
+
+        def _fmt_tutar(v):
+            try:
+                return (
+                    f"{float(v):,.2f}"
+                    .replace(",", "X").replace(".", ",").replace("X", ".")
+                )
+            except (TypeError, ValueError):
+                return str(v or "")
+
+        vals = [
+            info.get("sayfa",      ""),
+            info.get("tarih",      ""),
+            _fmt_tutar(info.get("tutar",      0)),
+            _fmt_tutar(info.get("net_tutar",  0)),
+            info.get("posno",      ""),
+            info.get("kartno",     ""),
+            info.get("brand",      ""),
+            info.get("islem_tipi", ""),
+            info.get("neden",      "Mükerrer"),
+        ]
+        CLR_MAP = {
+            0: "#64748b",   # sayfa
+            2: "#dc3545",   # brüt tutar — kırmızı
+            3: "#28a745",   # net tutar — yeşil
+            8: "#d97706",   # neden — turuncu
+        }
+        for ci, txt in enumerate(vals):
+            it = QTableWidgetItem(str(txt))
+            it.setTextAlignment(
+                (Qt.AlignmentFlag.AlignRight if ci in (2, 3) else Qt.AlignmentFlag.AlignCenter)
+                | Qt.AlignmentFlag.AlignVCenter
+            )
+            if ci in CLR_MAP:
+                it.setForeground(QColor(CLR_MAP[ci]))
+            self._atlanan_tbl.setItem(ri, ci, it)
+
+        # Inner tab badge güncelle — kaç tane atlandı
+        count = self._atlanan_tbl.rowCount()
+        self._itab_atlanan.setText(f"⏭️  Atlanan Kayıtlar ({count:,})")
+
+    def _on_import_done(self, result: dict):
+        self._progress.hide()
+        self._dosya_sec_btn.setEnabled(True)
+        self._sablon_indir_btn.setEnabled(True)
+
+        self._set_chips(
+            f"{result.get('toplam',  0):,}",
+            f"{result.get('eklenen', 0):,}",
+            f"{result.get('atlanan', 0):,}",
+            f"{result.get('hata',    0):,}",
+        )
+
+        if result["success"]:
+            self._sonuc_lbl.setText(f"✅  {result['message']}")
+            self._sonuc_lbl.setStyleSheet(
+                "font-size:13px;font-weight:600;color:#065f46;"
+                "background:#f0fdf4;border-radius:8px;padding:10px;"
+            )
+        else:
+            self._sonuc_lbl.setText(f"❌  {result['message']}")
+            self._sonuc_lbl.setStyleSheet(
+                "font-size:13px;font-weight:600;color:#7f1d1d;"
+                "background:#fef2f2;border-radius:8px;padding:10px;"
+            )

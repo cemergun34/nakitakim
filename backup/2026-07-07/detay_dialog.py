@@ -190,7 +190,7 @@ class IslemTablosu(QTableWidget):
             ("Kategori", "kategori"), ("Kaynak", "nerden_geliyor"),
         ],
         "faturalar": [
-            ("Tarih", "tarih"), ("Ünvan", "unvan"), ("Açıklama", "aciklama"),
+            ("Tarih", "tarih"), ("Ünvan", "unvan"),
             ("Fatura No", "faturano"), ("Vergi No", "vergino"),
             ("Tutar", "toplam"), ("Fatura Modu", "faturaMod"),
             ("Form No", "formNo"), ("Kaynak", "kaynak"),
@@ -373,9 +373,9 @@ class IslemTablosu(QTableWidget):
             )
             vlay.addWidget(lbl)
         else:
-            basliklar = ["Tarih", "Unvan", "Açıklama", "Fatura No", "Tutar",
+            basliklar = ["Tarih", "Unvan", "Fatura No", "Tutar",
                          "Tip", "Fatura Modu", "Form No", "Kaynak"]
-            keys_     = ["tarih", "unvan", "aciklama", "faturano", "toplam",
+            keys_     = ["tarih", "unvan", "faturano", "toplam",
                          "gelirgidermod", "faturamod", "formno", "kaynak"]
 
             tbl = QTableWidget(len(faturalar), len(basliklar))
