@@ -44,6 +44,13 @@ class ParsedInvoice:
     tarih: str = ""           # YYYY-MM-DD
     genel_toplam: str = ""    # PayableAmount
 
+    # Fatura tipi — cbc:InvoiceTypeCode
+    # UBL-TR standart kodları: 380=SATIS, 381=IADE, 389=IPTAL
+    # Bazı e-Arşiv XML'lerinde metin değer gelir ("SATIS", "IADE", "IPTAL")
+    # Parser normalize ederek sayısal koda çevirir.
+    fatura_tipi: str = ""     # Normalize edilmiş: "380", "381", "389" veya boş
+    profil_id: str = ""       # cbc:ProfileID: TEMELFATURA / TICARIFATURA / EARSIVFATURA
+
     # Tedarikçi (faturayı kesen — AccountingSupplierParty)
     unvan: str = ""
     vergi_no: str = ""
@@ -59,6 +66,31 @@ class ParsedInvoice:
     alici_mersis_no: str = ""
 
     urunler: list[UrunSatiri] = field(default_factory=list)
+
+    # ── Fatura tipi yardımcı özellikleri ────────────────────────────────────
+    @property
+    def is_satis(self) -> bool:
+        """Satış faturası mı? (InvoiceTypeCode=380 veya boş/bilinmeyen)"""
+        return self.fatura_tipi in ("", "380")
+
+    @property
+    def is_iade(self) -> bool:
+        """İade faturası mı? (InvoiceTypeCode=381)"""
+        return self.fatura_tipi == "381"
+
+    @property
+    def is_iptal(self) -> bool:
+        """İptal faturası mı? (InvoiceTypeCode=389)"""
+        return self.fatura_tipi == "389"
+
+    @property
+    def fatura_tipi_adi(self) -> str:
+        """Fatura tipi insan-okunabilir adı."""
+        return {
+            "380": "SATIŞ",
+            "381": "İADE",
+            "389": "İPTAL",
+        }.get(self.fatura_tipi, self.fatura_tipi or "SATIŞ")
 
     def meta_dict(self, mod: str) -> dict:
         """
@@ -200,6 +232,25 @@ def parse_invoice_xml(xml_path: str) -> ParsedInvoice:
     date_el = root.find("cbc:IssueDate", NS)
     if date_el is not None and date_el.text:
         result.tarih = date_el.text.strip()
+
+    # ── Fatura Tipi (InvoiceTypeCode) ────────────────────────────────────────
+    # UBL-TR sayısal kodlar: 380=Satış, 381=İade, 389=İptal
+    # e-Arşiv XML'lerinde metin değer gelebilir: SATIS, IADE, IPTAL
+    # Her iki format normalize edilerek sayısal koda çevrilir.
+    _TIP_NORMALIZE = {
+        "SATIS": "380",  "SATIŞ": "380",
+        "IADE":  "381",  "İADE":  "381",
+        "IPTAL": "389",  "İPTAL": "389",
+    }
+    type_el = root.find("cbc:InvoiceTypeCode", NS)
+    if type_el is not None and type_el.text:
+        raw_tip = type_el.text.strip()
+        result.fatura_tipi = _TIP_NORMALIZE.get(raw_tip.upper(), raw_tip)
+
+    # ── Profil ID (ProfileID) ─────────────────────────────────────────────────
+    profil_el = root.find("cbc:ProfileID", NS)
+    if profil_el is not None and profil_el.text:
+        result.profil_id = profil_el.text.strip()
 
     # ── Tedarikçi (AccountingSupplierParty) ─────────────────────────────────
     supplier_wrapper = root.find("cac:AccountingSupplierParty", NS)

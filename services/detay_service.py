@@ -436,27 +436,37 @@ def get_fatura_sube_ozet(userid: int, musterino: int, yil: int,
     şube bazlı özet döndürür.
 
     Faturanın form_no'su eşleşmiyorsa '(Şubesiz)' grubuna düşer.
+
+    DÜZELTME: CTE ile her formno'ya karşılık gelen şubeyi önce MIN ile
+    tekil hale getirip sonra JOIN yapıyoruz. Böylece genel_hesap_hareketleri'nde
+    aynı form_id'e birden fazla satır olsa bile SUM(f.toplam) çarpılmıyor.
     """
-    _mod_col = _col("gelirGiderMod", "gelirgidermod")
+    _mod_col  = _col("gelirGiderMod", "gelirgidermod")
+    _fno_col  = _col("formNo", "formno")
     conn = get_connection()
     try:
         rows = conn.execute(f"""
+            WITH sube_map AS (
+                SELECT form_id,
+                       MIN(sube) AS sube
+                FROM genel_hesap_hareketleri
+                WHERE userid    = ?
+                  AND musteri_no = ?
+                GROUP BY form_id
+            )
             SELECT
-                COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
-                COUNT(DISTINCT f.id)           AS kayit_sayisi,
+                COALESCE(sm.sube, '(Şubesiz)')         AS sube_adi,
+                COUNT(f.id)                             AS kayit_sayisi,
                 {_round_sql("SUM(CAST(f.toplam AS REAL))")} AS toplam_gelir,
-                0                              AS toplam_gider
+                0                                       AS toplam_gider
             FROM faturalar f
-            LEFT JOIN genel_hesap_hareketleri g
-                ON g.form_id = f.{_col("formNo", "formno")}
-               AND g.userid  = f.userid
-               AND g.musteri_no = ?
-            WHERE f.userid = ?
+            LEFT JOIN sube_map sm ON sm.form_id = f.{_fno_col}
+            WHERE f.userid    = ?
               AND {left4("f.tarih")} = ?
-              AND f.{_mod_col} = ?
-            GROUP BY COALESCE(g.sube, '(Şubesiz)')
+              AND f.{_mod_col}  = ?
+            GROUP BY COALESCE(sm.sube, '(Şubesiz)')
             ORDER BY toplam_gelir DESC
-        """, (musterino, userid, str(yil), mod)).fetchall()
+        """, (userid, musterino, userid, str(yil), mod)).fetchall()
         return list(rows)
     finally:
         conn.close()

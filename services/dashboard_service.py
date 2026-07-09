@@ -378,8 +378,8 @@ def get_bankalar_toplam(userid: int) -> dict:
     try:
         row = conn.execute("""
             SELECT
-                COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gelir' THEN CAST(tutar AS REAL) ELSE 0 END), 0) AS gelir,
-                COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gider' THEN CAST(tutar AS REAL) ELSE 0 END), 0) AS gider,
+                COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gelir' THEN tutar ELSE 0 END), 0) AS gelir,
+                COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gider' THEN tutar ELSE 0 END), 0) AS gider,
                 COUNT(*) AS kayit
             FROM womsis_banka
             WHERE userid = ?
@@ -392,6 +392,7 @@ def get_bankalar_toplam(userid: int) -> dict:
         return {"gelir": 0.0, "gider": 0.0, "net": 0.0, "kayit": 0}
     finally:
         conn.close()
+
 
 
 def get_all_dashboard_data(userid: int, musterino: int, yil: Optional[int] = None) -> dict:

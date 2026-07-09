@@ -354,11 +354,13 @@ class ExcelOzetBuilder:
         return "\n".join(satirlar)
 
     def yaz(self, wb, baslik: str, simdi: str,
-            hdr_color: str = "1E3A8A") -> None:
+            hdr_color: str = "1E3A8A",
+            monthly_data: list = None) -> None:
         """
         Workbook'a index=0 olarak ÖZET sheet'ini ekler.
         Sütunlar: Sheet Adı | Kayıt | Gelir (₺) | Gider (₺) | Fark (₺)
         Tutar bilgisi olmayan satırlarda para sütunları boş kalır.
+        monthly_data: [{'ay': int, 'toplam_gelir': float, 'toplam_gider': float}, ...]
         """
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
@@ -491,6 +493,122 @@ class ExcelOzetBuilder:
 
         ws.freeze_panes = "A5"
         ws.sheet_view.showGridLines = False
+
+        # ── AYLIK GELİR-GİDER TABLOSU + GRAFİK ──────────────────────────────
+        if monthly_data:
+            try:
+                from openpyxl.chart import BarChart, Reference
+                from openpyxl.chart.series import SeriesLabel
+
+                AY_ADLARI = ["Oca", "Şub", "Mar", "Nis", "May", "Haz",
+                             "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
+
+                # Boş satır bırak, sonra tablo başlığı
+                r += 1  # boşluk
+                tablo_baslik_row = r
+                ws.cell(row=r, column=1, value="Aylık Gelir-Gider Karşılaştırması")
+                ws.cell(row=r, column=1).font  = _f(bold=True, size=12, color=hdr_color)
+                ws.cell(row=r, column=1).fill  = _fill("EFF6FF")
+                ws.merge_cells(f"A{r}:E{r}")
+                r += 1
+
+                # Tablo başlık satırı
+                tablo_hdr_row = r
+                for ci, hdr in enumerate(["Ay", "Gelir (₺)", "Gider (₺)", "Net (₺)"], 1):
+                    cell = ws.cell(row=r, column=ci, value=hdr)
+                    cell.font      = _f(bold=True, size=10, color="FFFFFFFF")
+                    cell.fill      = _fill(hdr_color)
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.border    = _border()
+                r += 1
+
+                # Ay verilerini 12 ay olarak normalize et
+                ay_map = {int(m.get("ay", 0)): m for m in monthly_data}
+                tablo_veri_baslangic = r
+
+                for ay_no in range(1, 13):
+                    m = ay_map.get(ay_no, {})
+                    gelir_v = float(m.get("toplam_gelir") or 0)
+                    gider_v = float(m.get("toplam_gider") or 0)
+                    net_v   = gelir_v - gider_v
+                    ay_adi  = AY_ADLARI[ay_no - 1]
+
+                    ws.cell(row=r, column=1, value=ay_adi)
+                    ws.cell(row=r, column=1).font      = _f(bold=True)
+                    ws.cell(row=r, column=1).alignment = Alignment(horizontal="center", vertical="center")
+                    ws.cell(row=r, column=1).border    = _border()
+                    ws.cell(row=r, column=1).fill      = _fill("F8FAFC")
+
+                    for ci, (val, is_net) in enumerate([(gelir_v, False), (gider_v, False), (net_v, True)], 2):
+                        cell = ws.cell(row=r, column=ci, value=val)
+                        cell.number_format = "#,##0.00"
+                        cell.alignment     = Alignment(horizontal="right", vertical="center")
+                        cell.border        = _border()
+                        if is_net:
+                            cell.font = _f(bold=True,
+                                           color="FF047857" if val >= 0 else "FFDC2626")
+                            cell.fill = _fill("F0FDF4" if val >= 0 else "FFF1F2")
+                        else:
+                            cell.font = _f(color="FF065F46" if ci == 2 else "FF991B1B")
+                            cell.fill = _fill("F0FDF4" if ci == 2 else "FFF1F2")
+                    r += 1
+
+                tablo_veri_bitis = r - 1
+
+                # Sütun genişlikleri
+                ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width, 10)
+                ws.column_dimensions["B"].width = max(ws.column_dimensions["B"].width, 18)
+                ws.column_dimensions["C"].width = max(ws.column_dimensions["C"].width, 18)
+                ws.column_dimensions["D"].width = max(ws.column_dimensions["D"].width, 18)
+
+                # ── BarChart oluştur ──
+                chart = BarChart()
+                chart.type        = "col"          # dikey bar
+                chart.grouping    = "clustered"    # yanyana
+                chart.title       = "Aylık Gelir / Gider Karşılaştırması"
+                chart.y_axis.title = "Tutar (₺)"
+                chart.x_axis.title = "Ay"
+                chart.style       = 10
+                chart.width       = 22             # cm
+                chart.height      = 12             # cm
+
+                # Gelir serisi (kolon B)
+                gelir_ref = Reference(ws,
+                    min_col=2, max_col=2,
+                    min_row=tablo_veri_baslangic,
+                    max_row=tablo_veri_bitis)
+                chart.add_data(gelir_ref)
+                chart.series[0].title       = SeriesLabel(v="Gelir")
+                chart.series[0].graphicalProperties.solidFill  = "10B981"
+                chart.series[0].graphicalProperties.line.solidFill = "059669"
+
+                # Gider serisi (kolon C)
+                gider_ref = Reference(ws,
+                    min_col=3, max_col=3,
+                    min_row=tablo_veri_baslangic,
+                    max_row=tablo_veri_bitis)
+                chart.add_data(gider_ref)
+                chart.series[1].title       = SeriesLabel(v="Gider")
+                chart.series[1].graphicalProperties.solidFill  = "EF4444"
+                chart.series[1].graphicalProperties.line.solidFill = "DC2626"
+
+                # X ekseni etiketleri (Oca..Ara)
+                cats = Reference(ws,
+                    min_col=1, max_col=1,
+                    min_row=tablo_veri_baslangic,
+                    max_row=tablo_veri_bitis)
+                chart.set_categories(cats)
+
+                # Grafiği pivot tablonun hemen altına yap
+                grafik_anchor = f"A{r + 1}"
+                ws.add_chart(chart, grafik_anchor)
+
+            except Exception as _chart_err:
+                # Grafik oluşturulamazsa sessizce atla, tablo kalır
+                ws.cell(row=r, column=1,
+                        value=f"(Grafik oluşturulamadı: {_chart_err})")
+                ws.cell(row=r, column=1).font = _f(size=9, color="FFDC2626", italic=True)
+
 
 
 class DashboardScreen(QWidget):
@@ -644,25 +762,49 @@ class DashboardScreen(QWidget):
         filter_bar.setSpacing(10)
 
         ilk_lbl = QLabel("İlk Tarih:")
-        ilk_lbl.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 12px;")
+        ilk_lbl.setStyleSheet("color: white; font-size: 12px; font-weight: 600;")
         filter_bar.addWidget(ilk_lbl)
 
         self.ilk_tarih = QDateEdit()
         self.ilk_tarih.setCalendarPopup(True)
         self.ilk_tarih.setDate(QDate(self._yil, 1, 1))
         self.ilk_tarih.setFixedHeight(34)
-        self.ilk_tarih.setStyleSheet(self._input_style())
+        self.ilk_tarih.setStyleSheet("""
+            QDateEdit {
+                background: #1A1A1A;
+                border: 1.5px solid #444;
+                border-radius: 8px;
+                padding: 0 10px;
+                font-size: 12px;
+                color: white;
+                font-weight: 600;
+            }
+            QDateEdit::drop-down { border: none; width: 20px; }
+            QDateEdit:focus { border-color: #2563EB; }
+        """)
         filter_bar.addWidget(self.ilk_tarih)
 
         son_lbl = QLabel("Son Tarih:")
-        son_lbl.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 12px;")
+        son_lbl.setStyleSheet("color: white; font-size: 12px; font-weight: 600;")
         filter_bar.addWidget(son_lbl)
 
         self.son_tarih = QDateEdit()
         self.son_tarih.setCalendarPopup(True)
         self.son_tarih.setDate(QDate.currentDate())
         self.son_tarih.setFixedHeight(34)
-        self.son_tarih.setStyleSheet(self._input_style())
+        self.son_tarih.setStyleSheet("""
+            QDateEdit {
+                background: #1A1A1A;
+                border: 1.5px solid #444;
+                border-radius: 8px;
+                padding: 0 10px;
+                font-size: 12px;
+                color: white;
+                font-weight: 600;
+            }
+            QDateEdit::drop-down { border: none; width: 20px; }
+            QDateEdit:focus { border-color: #2563EB; }
+        """)
         filter_bar.addWidget(self.son_tarih)
 
         filter_bar.addStretch()
@@ -670,18 +812,18 @@ class DashboardScreen(QWidget):
         self.excel_btn = QPushButton("📥 EXCEL İNDİR")
         self.excel_btn.setFixedHeight(34)
         self.excel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.excel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {COLORS['btn_excel']};
+        self.excel_btn.setStyleSheet("""
+            QPushButton {
+                background: #000000;
                 color: white;
                 font-size: 12px;
                 font-weight: 700;
-                border: none;
+                border: 1.5px solid #444;
                 border-radius: 8px;
                 padding: 0 18px;
                 letter-spacing: 1px;
-            }}
-            QPushButton:hover {{ background: #047857; }}
+            }
+            QPushButton:hover { background: #1A1A1A; border-color: #2563EB; }
         """)
         self.excel_btn.clicked.connect(self._export_excel)
         filter_bar.addWidget(self.excel_btn)
@@ -1039,6 +1181,34 @@ class DashboardScreen(QWidget):
         prog.setWindowTitle("Excel Export")
         prog.setWindowModality(QtC.WindowModality.WindowModal)
         prog.setMinimumWidth(340)
+        prog.setStyleSheet("""
+            QProgressDialog {
+                background-color: #0A0A0A;
+                color: white;
+                border: 1px solid #333;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: white;
+                font-size: 13px;
+                font-weight: 600;
+                background: transparent;
+            }
+            QProgressBar {
+                background-color: #1F1F1F;
+                border: 1px solid #444;
+                border-radius: 6px;
+                height: 14px;
+                text-align: center;
+                color: white;
+                font-size: 11px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2563EB, stop:1 #7C3AED);
+                border-radius: 5px;
+            }
+        """)
         prog.show()
     
         try:
@@ -1608,11 +1778,31 @@ class DashboardScreen(QWidget):
             # ═══════════════════════════════════════════════════════════════════
             prog.setLabelText("11/11 Özet sayfası...")
             prog.setValue(10)
+
+            # Aylık gelir-gider verisi (grafik için)
+            from db.db_compat import yr, mo
+            try:
+                monthly_rows = conn.execute(f"""
+                    SELECT
+                        {mo('tarih_date')} AS ay,
+                        SUM(gelir) AS toplam_gelir,
+                        SUM(gider) AS toplam_gider
+                    FROM genel_hesap_hareketleri
+                    WHERE userid=%s AND musteri_no=%s AND {yr('tarih_date')}=%s
+                    GROUP BY {mo('tarih_date')}
+                    ORDER BY {mo('tarih_date')}
+                """, (uid, mno, str(yil))).fetchall()
+                monthly_data = [{"ay": int(r["ay"]), "toplam_gelir": float(r["toplam_gelir"] or 0),
+                                 "toplam_gider": float(r["toplam_gider"] or 0)} for r in monthly_rows]
+            except Exception:
+                monthly_data = []
+
             ozet.yaz(
                 wb,
                 baslik=f"Dashboard Raporu — {yil}  ({ilk_goster} / {son_goster})",
                 simdi=simdi,
                 hdr_color="FF1E3A8A",
+                monthly_data=monthly_data,
             )
     
             conn.close()
@@ -1632,12 +1822,30 @@ class DashboardScreen(QWidget):
                 + ozet.ozet_str()
             )
             msg.setStyleSheet("""
-                QMessageBox { background-color: white; }
-                QLabel { color: #1F2937; font-size: 12px; font-weight: 500;
-                          min-width: 380px; min-height: 40px; }
-                QPushButton { background-color: #2563EB; color: white; border: none;
-                              border-radius: 6px; padding: 6px 18px;
-                              font-size: 11px; font-weight: bold; }
+                QMessageBox {
+                    background-color: #0A0A0A;
+                    border: 1px solid #333;
+                    border-radius: 10px;
+                }
+                QLabel {
+                    color: white;
+                    font-size: 12px;
+                    font-weight: 500;
+                    min-width: 420px;
+                    min-height: 40px;
+                    background: transparent;
+                    line-height: 1.6;
+                }
+                QPushButton {
+                    background-color: #2563EB;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 8px 24px;
+                    font-size: 12px;
+                    font-weight: bold;
+                    min-width: 80px;
+                }
                 QPushButton:hover { background-color: #1D4ED8; }
             """)
             msg.exec()

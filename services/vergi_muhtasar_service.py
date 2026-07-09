@@ -16,6 +16,23 @@ from db.database import get_connection
 from db.db_config import get_mode
 
 
+def _fix_pg_sequence(conn) -> None:
+    """
+    PostgreSQL modunda SERIAL sequence'ı tablodaki MAX(id) ile senkronize eder.
+    SQLite→PG migration'da explicit ID'ler girildiğinde sequence geride kalabilir;
+    bu fonksiyon INSERT öncesi çağrılarak 'duplicate key' hatasını önler.
+    """
+    if get_mode() != "postgres":
+        return
+    try:
+        conn.execute(
+            "SELECT setval('\"VergiMuhtasar_id_seq\"', "
+            "COALESCE((SELECT MAX(id) FROM vergimuhtasar), 0) + 1, false)"
+        )
+    except Exception:
+        pass  # sequence adı farklıysa veya hata oluşursa sessizce devam et
+
+
 def _mno_col() -> str:
     """PostgreSQL: musteri_no, SQLite: musterino"""
     return "musteri_no" if get_mode() == "postgres" else "musterino"
@@ -69,7 +86,11 @@ def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "", yil:
 
         if musterino is not None:
             where += f" AND {_mno_col()} = ?"
-            params.append(str(musterino))
+            # PostgreSQL musteri_no sütunu INTEGER; string geçilmemeli
+            try:
+                params.append(int(musterino))
+            except (ValueError, TypeError):
+                params.append(musterino)
 
         if donem:
             where  += " AND donem = ?"
@@ -302,6 +323,13 @@ def toplu_yukle_csv(
     guncellen = 0
     conn = get_connection()
     try:
+        # PostgreSQL sequence senkronizasyonu: migration'dan gelen explicit ID'ler
+        # sequence'ı geri bırakabilir; INSERT öncesi düzelt.
+        _fix_pg_sequence(conn)
+
+        # PostgreSQL'de musteri_no sütun adı farklı olabilir
+        mno_col = _mno_col()
+
         for val in insert_values:
             # Mevcut kaydı kontrol et
             existing = conn.execute(
@@ -321,7 +349,7 @@ def toplu_yukle_csv(
             else:
                 conn.execute(
                     f"INSERT INTO {TABLE} "
-                    f"(userid, musteri_no, hesapkodu, ack, donem, gaytutar, vergkestutar) "
+                    f"(userid, {mno_col}, hesapkodu, ack, donem, gaytutar, vergkestutar) "
                     f"VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (val["userid"], val["musteri_no"], val["hesapkodu"],
                      val["ack"], val["donem"], val["gaytutar"], val["vergkestutar"])

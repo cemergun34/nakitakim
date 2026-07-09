@@ -192,8 +192,8 @@ class IslemTablosu(QTableWidget):
         "faturalar": [
             ("Tarih", "tarih"), ("Ünvan", "unvan"), ("Açıklama", "aciklama"),
             ("Fatura No", "faturano"), ("Vergi No", "vergino"),
-            ("Tutar", "toplam"), ("Fatura Modu", "faturaMod"),
-            ("Form No", "formNo"), ("Kaynak", "kaynak"),
+            ("Tutar", "toplam"), ("Fatura Modu", "faturamod"),
+            ("Form No", "formno"), ("Kaynak", "kaynak"),
         ],
     }
 
@@ -437,22 +437,17 @@ class IslemTablosu(QTableWidget):
 
     def _show_fatura_preview(self, row_data):
         """
-        XSLT transform ile orijinal e-fatura görünümünü
-        QWebEngineView (Chromium motoru) içinde gösterir.
+        E-fatura XML önizlemesini gösterir.
+        - lxml mevcutsa: gömülü XSLT ile HTML dönüşümü yapılır
+        - PyQt6.QtWebEngineWidgets mevcutsa: uygulama içinde gösterilir
+        - Aksi hâlde: sistem tarayıcısında açılır (webbrowser fallback)
         """
         import os, base64, tempfile
         import xml.etree.ElementTree as ET
-        from PyQt6.QtWidgets import (
-            QMessageBox, QDialog, QVBoxLayout, QHBoxLayout,
-            QLabel, QPushButton
-        )
-        from PyQt6.QtCore import QUrl
-        from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        from PyQt6.QtWidgets import QMessageBox
 
         xml_path  = row_data.get("xml_dosya")
         fatura_no = row_data.get("faturano") or row_data.get("faturaNo") or "?"
-        kaynak    = row_data.get("kaynak") or ""
 
         # ── 1. XML kayıt kontrolü ────────────────────────────────────────────
         if not xml_path or str(xml_path).strip().lower() in ("none", "null", ""):
@@ -472,9 +467,8 @@ class IslemTablosu(QTableWidget):
             QMessageBox.critical(self, "Hata", f"XML okunamadı:\n{exc}")
             return
 
-        # ── 3. XSLT bul + dönüştür ──────────────────────────────────────────
+        # ── 3. lxml mevcutsa XSLT dönüşümü dene ────────────────────────────
         html_bytes = None
-        xslt_filename = "style.xslt"
         try:
             from lxml import etree as let
             _NS = {
@@ -484,7 +478,7 @@ class IslemTablosu(QTableWidget):
             xml_root = let.fromstring(xml_bytes)
             hits = xml_root.xpath(
                 ".//cac:AdditionalDocumentReference"
-                "[cbc:DocumentType=\'XSLT\']"
+                "[cbc:DocumentType='XSLT']"
                 "/cac:Attachment/cbc:EmbeddedDocumentBinaryObject",
                 namespaces=_NS,
             )
@@ -494,13 +488,12 @@ class IslemTablosu(QTableWidget):
                 transform = let.XSLT(xslt_root)
                 result    = transform(xml_root)
                 html_bytes = bytes(result)
-                # XSLT dosya adını da al (href olarak kullanacağız)
-                fname = hits[0].attrib.get("filename", "style.xslt")
-                xslt_filename = fname if fname else "style.xslt"
+        except ImportError:
+            pass  # lxml kurulu değil, fallback HTML kullan
         except Exception as exc:
             print(f"[EFatura] XSLT dönüşüm hatası: {exc}")
 
-        # ── 4. Fallback: XSLT yoksa kendi HTML şablonumuzu yaz ──────────────
+        # ── 4. Fallback: kendi HTML şablonumuzu oluştur ──────────────────────
         if not html_bytes:
             try:
                 NS = {
@@ -553,11 +546,11 @@ class IslemTablosu(QTableWidget):
                     le    = tx(line, "LineExtensionAmount")
                     bg    = "#ffffff" if i % 2 == 0 else "#f8faff"
                     rows_html += (
-                        f"<tr style=\'background:{bg}\'>"
-                        f"<td style=\'padding:8px\'>{urun}</td>"
-                        f"<td style=\'padding:8px;text-align:center\'>{qty}</td>"
-                        f"<td style=\'padding:8px;text-align:right\'>{fn(bp)}</td>"
-                        f"<td style=\'padding:8px;text-align:right;font-weight:bold\'>{fn(le)}</td>"
+                        f"<tr style='background:{bg}'>"
+                        f"<td style='padding:8px'>{urun}</td>"
+                        f"<td style='padding:8px;text-align:center'>{qty}</td>"
+                        f"<td style='padding:8px;text-align:right'>{fn(bp)}</td>"
+                        f"<td style='padding:8px;text-align:right;font-weight:bold'>{fn(le)}</td>"
                         f"</tr>"
                     )
 
@@ -588,74 +581,88 @@ th{{background:#1e3a8a;color:white;padding:8px;text-align:left;font-size:11px}}
                 html_bytes = html_str.encode("utf-8")
             except Exception as fallback_exc:
                 QMessageBox.critical(
-                    self, 
-                    "Hata", 
-                    f"Fatura XML içeriği dönüştürülemedi ve ayrıştırılamadı:\n"
-                    f"1. XSLT Hatası: (Bkz. Konsol)\n"
-                    f"2. Ayrıştırma Hatası: {fallback_exc}"
+                    self,
+                    "Hata",
+                    f"Fatura XML içeriği dönüştürülemedi:\n{fallback_exc}"
                 )
                 return
 
-        # ── 5. Geçici dizine yaz (yerel dosya sistemi üzerinden aç - Workspace İçi) ─
+        # ── 5. Geçici HTML dosyasına yaz ─────────────────────────────────────
         workspace_tmp = os.path.expanduser("~/NakitAkim/data/tmp")
         os.makedirs(workspace_tmp, exist_ok=True)
-        tmp_dir = tempfile.mkdtemp(prefix="efatura_preview_", dir=workspace_tmp)
+        tmp_dir   = tempfile.mkdtemp(prefix="efatura_preview_", dir=workspace_tmp)
         html_file = os.path.join(tmp_dir, "fatura.html")
         with open(html_file, "wb") as fh:
             fh.write(html_bytes)
 
-        # ── 6. QWebEngineView ile QDialog içinde göster ──────────────────────
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"E-Fatura Ön İzleme  —  {fatura_no}")
-        dialog.setMinimumSize(1000, 820)
-        dialog.resize(1100, 900)
-        dialog.setStyleSheet("background:#1e3a8a;")
+        # ── 6. QWebEngineView mevcutsa uygulama içinde, değilse tarayıcıda aç ─
+        _webengine_ok = False
+        try:
+            from PyQt6.QtWebEngineWidgets import QWebEngineView
+            from PyQt6.QtWebEngineCore import QWebEngineSettings
+            _webengine_ok = True
+        except ImportError:
+            pass
 
-        dlg_layout = QVBoxLayout(dialog)
-        dlg_layout.setContentsMargins(0, 0, 0, 0)
-        dlg_layout.setSpacing(0)
+        if _webengine_ok:
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+            from PyQt6.QtCore import QUrl
 
-        # Header
-        hdr = QLabel()
-        hdr.setFixedHeight(48)
-        hdr.setText(f"  📄  E-Fatura Ön İzleme  —  {fatura_no}")
-        hdr.setStyleSheet(
-            "QLabel { background:#2563EB; color:white; font-size:13px; font-weight:700; padding-left:12px; }"
-        )
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"E-Fatura Ön İzleme  —  {fatura_no}")
+            dialog.setMinimumSize(1000, 820)
+            dialog.resize(1100, 900)
+            dialog.setStyleSheet("background:#1e3a8a;")
 
-        close_btn = QPushButton("✕  Kapat")
-        close_btn.setFixedSize(100, 34)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet(
-            "QPushButton{background:rgba(255,255,255,.22);color:white;"
-            "border:none;border-radius:7px;font-size:13px;font-weight:700;}"
-            "QPushButton:hover{background:rgba(255,255,255,.4);}"
-        )
-        close_btn.clicked.connect(dialog.reject)
+            dlg_layout = QVBoxLayout(dialog)
+            dlg_layout.setContentsMargins(0, 0, 0, 0)
+            dlg_layout.setSpacing(0)
 
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 12, 0)
-        top.setSpacing(0)
-        top.addWidget(hdr, 1)
-        top.addWidget(close_btn)
+            hdr = QLabel()
+            hdr.setFixedHeight(48)
+            hdr.setText(f"  📄  E-Fatura Ön İzleme  —  {fatura_no}")
+            hdr.setStyleSheet(
+                "QLabel { background:#2563EB; color:white; font-size:13px; font-weight:700; padding-left:12px; }"
+            )
 
-        hdr_widget = __import__("PyQt6.QtWidgets", fromlist=["QWidget"]).QWidget()
-        hdr_widget.setFixedHeight(48)
-        hdr_widget.setStyleSheet("background:#2563EB;")
-        hdr_widget.setLayout(top)
-        dlg_layout.addWidget(hdr_widget)
+            close_btn = QPushButton("✕  Kapat")
+            close_btn.setFixedSize(100, 34)
+            close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            close_btn.setStyleSheet(
+                "QPushButton{background:rgba(255,255,255,.22);color:white;"
+                "border:none;border-radius:7px;font-size:13px;font-weight:700;}"
+                "QPushButton:hover{background:rgba(255,255,255,.4);}"
+            )
+            close_btn.clicked.connect(dialog.reject)
 
-        # WebEngine
-        web = QWebEngineView()
-        web.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-        web.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
-        web.load(QUrl.fromLocalFile(html_file))
-        dlg_layout.addWidget(web, 1)
+            top = QHBoxLayout()
+            top.setContentsMargins(0, 0, 12, 0)
+            top.setSpacing(0)
+            top.addWidget(hdr, 1)
+            top.addWidget(close_btn)
 
-        dialog.exec()
+            from PyQt6.QtWidgets import QWidget as _QW
+            hdr_widget = _QW()
+            hdr_widget.setFixedHeight(48)
+            hdr_widget.setStyleSheet("background:#2563EB;")
+            hdr_widget.setLayout(top)
+            dlg_layout.addWidget(hdr_widget)
+
+            web = QWebEngineView()
+            web.settings().setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            web.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+            web.load(QUrl.fromLocalFile(html_file))
+            dlg_layout.addWidget(web, 1)
+
+            dialog.exec()
+        else:
+            # Tarayıcı fallback
+            webbrowser.open(f"file://{html_file}")
+
 
 
 # ─── ANA DETAY DİYALOĞU ──────────────────────────────────────────────────────
+
 
 class DetayDialog(QDialog):
     """

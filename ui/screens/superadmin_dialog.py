@@ -308,6 +308,69 @@ class _DbPanel(QScrollArea):
             "font-size:11px;color:#64748b;line-height:1.5;"
         ))
 
+        # ── Hızlı Doldurma — Bağlantı Dizisi ─────────────────────────────
+        cs_card = QFrame()
+        cs_card.setStyleSheet(
+            "QFrame{background:#0f172a;border:1.5px solid #6366f1;"
+            "border-radius:10px;}"
+        )
+        csl = QVBoxLayout(cs_card)
+        csl.setContentsMargins(14, 12, 14, 12)
+        csl.setSpacing(8)
+
+        cs_hdr = QHBoxLayout()
+        cs_ic = QLabel("⚡")
+        cs_ic.setStyleSheet("font-size:16px;")
+        cs_hdr.addWidget(cs_ic)
+        cs_t = QLabel("Hızlı Doldurma  —  Bağlantı Dizisi")
+        cs_t.setStyleSheet(
+            "font-size:12px;font-weight:700;color:#818cf8;"
+        )
+        cs_hdr.addWidget(cs_t)
+        cs_hdr.addStretch()
+        csl.addLayout(cs_hdr)
+
+        cs_hint = QLabel(
+            "Neon / Supabase / psql  →  bağlantı satırını yapıştır, tüm alanlar otomatik dolar"
+        )
+        cs_hint.setStyleSheet("font-size:10px;color:#475569;")
+        csl.addWidget(cs_hint)
+
+        cs_row = QHBoxLayout(); cs_row.setSpacing(8)
+        self._cs_edit = QLineEdit()
+        self._cs_edit.setFixedHeight(38)
+        self._cs_edit.setPlaceholderText(
+            "postgresql://user:pass@host:5432/dbname?sslmode=require  —  veya  host=... port=... user=... password=..."
+        )
+        self._cs_edit.setStyleSheet(
+            "QLineEdit{background:#1e293b;color:#e2e8f0;"
+            "border:1.5px solid #6366f1;border-radius:8px;"
+            "padding:0 12px;font-size:11px;}"
+            "QLineEdit:focus{border-color:#818cf8;}"
+        )
+        self._cs_edit.returnPressed.connect(self._parse_connection_string)
+        cs_row.addWidget(self._cs_edit)
+
+        cs_btn = QPushButton("✔  Uygula")
+        cs_btn.setFixedHeight(38); cs_btn.setFixedWidth(95)
+        cs_btn.setStyleSheet(
+            "QPushButton{background:#6366f1;color:#fff;border:none;"
+            "border-radius:8px;font-size:12px;font-weight:700;}"
+            "QPushButton:hover{background:#818cf8;}"
+            "QPushButton:pressed{background:#4f46e5;}"
+        )
+        cs_btn.clicked.connect(self._parse_connection_string)
+        cs_row.addWidget(cs_btn)
+        csl.addLayout(cs_row)
+
+        self._cs_lbl = QLabel("")
+        self._cs_lbl.setStyleSheet("font-size:11px;color:#94a3b8;")
+        self._cs_lbl.setWordWrap(True)
+        csl.addWidget(self._cs_lbl)
+
+        pgl.addWidget(cs_card)
+        # ── bağlantı dizisi sonu ──────────────────────────────────────────────
+
         def _row(*cols):
             r = QHBoxLayout(); r.setSpacing(12)
             for w, s in cols:
@@ -474,6 +537,82 @@ class _DbPanel(QScrollArea):
         })
         save_config(cfg)
         self._save_lbl.setText("✅  Kaydedildi — uygulamayı yeniden başlatın")
+
+    # ─────────────────────────────────────────────────────────────────
+    def _parse_connection_string(self):
+        """Bağlantı dizisini parse edip formu otomatik doldurur.
+
+        Desteklenen formatlar:
+          1) postgresql://user:pass@host:port/dbname?sslmode=require
+          2) postgres://user:pass@host:port/dbname
+          3) host=X port=Y dbname=Z user=U password=P sslmode=S
+        """
+        raw = self._cs_edit.text().strip()
+        if not raw:
+            self._cs_lbl.setText("⚠️  Lütfen bir bağlantı dizisi yapıştırın.")
+            self._cs_lbl.setStyleSheet("font-size:11px;color:#f59e0b;")
+            return
+
+        host = port = db = user = pw = ssl = ""
+
+        # Format 1 & 2 : URL
+        if raw.startswith(("postgresql://", "postgres://")):
+            try:
+                from urllib.parse import urlparse, parse_qs, unquote
+                p = urlparse(raw)
+                host = p.hostname or ""
+                port = str(p.port or 5432)
+                db   = (p.path or "").lstrip("/")
+                user = unquote(p.username or "")
+                pw   = unquote(p.password or "")
+                qs   = parse_qs(p.query)
+                ssl  = qs.get("sslmode", ["require"])[0]
+            except Exception as e:
+                self._cs_lbl.setText(f"❌  URL parse hatası: {e}")
+                self._cs_lbl.setStyleSheet("font-size:11px;color:#f87171;")
+                return
+
+        # Format 3 : DSN key=value
+        elif "=" in raw:
+            import re
+            def _v(key):
+                m = re.search(rf"(?:^|\s){re.escape(key)}=([^\s]+)", raw)
+                return m.group(1) if m else ""
+            host = _v("host")
+            port = _v("port") or "5432"
+            db   = _v("dbname") or _v("database")
+            user = _v("user") or _v("username")
+            pw   = _v("password")
+            ssl  = _v("sslmode") or "require"
+        else:
+            self._cs_lbl.setText(
+                "❌  Tanınmayan format. "
+                "postgresql://user:pass@host:5432/db  veya  host=... user=... formatı kullanın."
+            )
+            self._cs_lbl.setStyleSheet("font-size:11px;color:#f87171;")
+            return
+
+        # Alanları doldur
+        if host: self._host.setText(host)
+        if port: self._port.setText(port)
+        if db:   self._db.setText(db)
+        if user: self._user.setText(user)
+        if pw:   self._pw.setText(pw)
+        if ssl:
+            idx = self._ssl.findText(ssl)
+            if idx >= 0: self._ssl.setCurrentIndex(idx)
+
+        dolu = [k for k, v in
+                [("Host", host), ("Port", port), ("Veritabanı", db),
+                 ("Kullanıcı", user), ("Şifre", pw)]
+                if v]
+        self._cs_lbl.setText(
+            f"✅  Dolduruldu: {', '.join(dolu)}  —  "
+            "Kontrol edip 'Kaydet'e basın."
+        )
+        self._cs_lbl.setStyleSheet(
+            "font-size:11px;font-weight:600;color:#34d399;"
+        )
 
     def _on_migrate(self):
         from db.db_config import load_config

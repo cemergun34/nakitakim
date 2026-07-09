@@ -68,6 +68,26 @@ def _to_pg_sql(sql: str) -> str:
     return ''.join(result)
 
 
+def _sanitize_pg_params(params):
+    """
+    PostgreSQL'e parametre geçmeden önce boş string'leri None'a çevirir.
+
+    SQLite'da "" (boş string) herhangi bir sütuna geçilebilir; ancak
+    PostgreSQL'de INTEGER veya REAL sütunlara "" geçildiğinde
+    "invalid input syntax for type integer/real" hatası fırlatır.
+    Bu fonksiyon tüm execute çağrılarında merkezi olarak bu sorunu çözer.
+    """
+    if not params:
+        return params
+    cleaned = []
+    for v in params:
+        if v == "":
+            cleaned.append(None)
+        else:
+            cleaned.append(v)
+    return type(params)(cleaned) if isinstance(params, tuple) else cleaned
+
+
 # ── PostgreSQL cursor wrapper (sqlite3.Cursor uyumlu) ────────────────────────
 
 class _CIRow(dict):
@@ -178,7 +198,7 @@ class _PgWrapper:
         sql = _to_pg_sql(sql)
         cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-        cur.execute(sql, params or ())
+        cur.execute(sql, _sanitize_pg_params(params))
 
         wrapper = _PgCursor(cur, self._conn)
         wrapper.rowcount = cur.rowcount
@@ -205,7 +225,7 @@ class _PgWrapper:
     def executemany(self, sql: str, params_list):
         sql = _to_pg_sql(sql)
         cur = self._conn.cursor()
-        cur.executemany(sql, params_list)
+        cur.executemany(sql, [_sanitize_pg_params(p) for p in params_list])
         cur.close()
 
     def executescript(self, script: str):

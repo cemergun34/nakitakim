@@ -31,7 +31,7 @@ CURRENT_YEAR = datetime.datetime.now().year
 
 class ImportWorker(QThread):
     progress = pyqtSignal(int, int, str, str)  # (current, total, dosya, durum)
-    finished = pyqtSignal(int, int, int, int)  # (basarili, atlandi, hatali, eslesmez)
+    finished = pyqtSignal(int, int, int, int, int)  # (basarili, atlandi, hatali, eslesmez, tip_filtresi)
 
     def __init__(self, paths: list[str], userid: int):
         super().__init__()
@@ -39,10 +39,13 @@ class ImportWorker(QThread):
         self.userid = userid
 
     def run(self):
-        basarili = atlandi = hatali = eslesmez = 0
+        basarili = atlandi = hatali = eslesmez = tip_filtresi = 0
         for i, path in enumerate(self.paths):
             res = import_xml(path, self.userid)
-            if res.get("skipped"):
+            if res.get("skipped") and res.get("skip_reason") == "tip_filtresi":
+                tip_filtresi += 1
+                durum = "tip_filtresi"
+            elif res.get("skipped"):
                 atlandi += 1
                 durum = "atlandi"
             elif res.get("no_match"):
@@ -55,13 +58,15 @@ class ImportWorker(QThread):
                 hatali += 1
                 durum = "hata"
             self.progress.emit(i + 1, len(self.paths), os.path.basename(path), durum)
-        self.finished.emit(basarili, atlandi, hatali, eslesmez)
+        self.finished.emit(basarili, atlandi, hatali, eslesmez, tip_filtresi)
 
 
 
 # ── E-Fatura Çek Kartı ───────────────────────────────────────────────────────
 
 class EFaturaCard(QFrame):
+    data_changed = pyqtSignal()   # Import bitince dashboard'u yenilemek için
+
     def __init__(self, userid: int, parent=None):
         super().__init__(parent)
         self.userid = userid
@@ -212,10 +217,17 @@ class EFaturaCard(QFrame):
 
     def _on_progress(self, current: int, total: int, dosya: str, durum: str):
         self.progress.setValue(current)
-        icon = {"ok": "✔", "atlandi": "⏩", "hata": "✖", "eslesmez": "❓"}.get(durum, "")
+        icon = {
+            "ok": "✔",
+            "atlandi": "⏩",
+            "hata": "✖",
+            "eslesmez": "❓",
+            "tip_filtresi": "⛔",
+        }.get(durum, "")
         self.status_lbl.setText(f"{icon}  {dosya}  ({current}/{total})")
 
-    def _on_import_done(self, basarili: int, atlandi: int, hatali: int, eslesmez: int):
+    def _on_import_done(self, basarili: int, atlandi: int, hatali: int,
+                        eslesmez: int, tip_filtresi: int):
         self.progress.hide()
         self.aktar_btn.setEnabled(True)
         parts = []
@@ -223,11 +235,29 @@ class EFaturaCard(QFrame):
             parts.append(f"✔ {basarili} aktarıldı")
         if atlandi:
             parts.append(f"⏩ {atlandi} zaten mevcuttu")
+        if tip_filtresi:
+            parts.append(f"⛔ {tip_filtresi} iptal/iade atlandı")
         if eslesmez:
             parts.append(f"❓ {eslesmez} VKN eşleşmedi")
         if hatali:
             parts.append(f"✖ {hatali} hatalı")
         self.status_lbl.setText("  ·  ".join(parts) if parts else "Tamamlandı")
+
+        # musterino alanı boş (NULL veya 0) olan tüm faturalara musterino=1 yaz
+        try:
+            conn = get_connection()
+            conn.execute(
+                "UPDATE faturalar SET musterino=1 WHERE userid=? AND (musterino IS NULL OR musterino=0)",
+                (self.userid,)
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+        # Yeni fatura aktarıldıysa dashboard'u yenile
+        if basarili > 0:
+            self.data_changed.emit()
 
 
 
@@ -295,14 +325,16 @@ class VomsisIsleWorker(QThread):
                 aciklama  = tx.get("description") or tx.get("explanation") or ""
                 tutar_raw = tx.get("amount") or tx.get("tryAmount") or 0
                 try:
-                    tutar = float(str(tutar_raw).replace(",", "."))
+                    tutar = round(float(str(tutar_raw).replace(",", ".")), 2)
                 except (ValueError, TypeError):
                     tutar = 0.0
                 yon       = tx.get("direction") or tx.get("transactionDirection") or ""
                 gelir_gider = "gelir" if str(yon).upper() in ("CREDIT", "ALACAK", "+") else "gider"
                 borc   = tutar if gelir_gider == "gelir" else 0.0
                 alacak = tutar if gelir_gider == "gider" else 0.0
-                vomsis_key = tx.get("id") or tx.get("transactionId") or ""
+                vomsis_key  = tx.get("id") or tx.get("transactionId") or ""
+                banka_sube  = tx.get("bankName") or tx.get("accountName") or tx.get("bank") or ""
+                karsi_unvan = tx.get("counterpartyName") or tx.get("receiverName") or tx.get("senderName") or ""
 
                 # Aynı VOMSİS kaydı zaten varsa atla
                 if vomsis_key:
@@ -315,10 +347,10 @@ class VomsisIsleWorker(QThread):
 
                 conn.execute(
                     """INSERT INTO womsis_banka
-                       (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey, userid)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey, userid, sube, faturaunvan)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (tarih_raw, aciklama, gelir_gider, abs(tutar), "vomsis",
-                     str(vomsis_key), self._userid)
+                     str(vomsis_key), self._userid, banka_sube, karsi_unvan)
                 )
                 count += 1
                 self.progress.emit(f"✔  {count} hareket işlendi...")
@@ -411,12 +443,14 @@ class TopluBankalarIsleWorker(QThread):
                         aciklama   = tx.get("description") or tx.get("explanation") or ""
                         tutar_raw  = tx.get("amount") or tx.get("tryAmount") or 0
                         try:
-                            tutar = float(str(tutar_raw).replace(",", "."))
+                            tutar = round(float(str(tutar_raw).replace(",", ".")), 2)
                         except (ValueError, TypeError):
                             tutar = 0.0
                         yon       = tx.get("direction") or tx.get("transactionDirection") or ""
                         gelir_gider = "gelir" if str(yon).upper() in ("CREDIT", "ALACAK", "+") else "gider"
-                        vomsis_key = tx.get("id") or tx.get("transactionId") or ""
+                        vomsis_key  = tx.get("id") or tx.get("transactionId") or ""
+                        banka_sube  = tx.get("bankName") or tx.get("accountName") or tx.get("bank") or ""
+                        karsi_unvan = tx.get("counterpartyName") or tx.get("receiverName") or tx.get("senderName") or ""
 
                         if vomsis_key:
                             exists = conn.execute(
@@ -428,10 +462,10 @@ class TopluBankalarIsleWorker(QThread):
 
                         conn.execute(
                             """INSERT INTO womsis_banka
-                               (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey, userid)
-                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                               (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey, userid, sube, faturaunvan)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (tarih_raw, aciklama, gelir_gider, abs(tutar), "vomsis",
-                             str(vomsis_key), self._userid)
+                             str(vomsis_key), self._userid, banka_sube, karsi_unvan)
                         )
                         total_inserted += 1
                     conn.commit()
@@ -5475,12 +5509,12 @@ class WomsisExcelWorker(QThread):
 
                     # Tutar parse
                     try:
-                        tutar = float(str(tutar_val).replace(",", ".").replace(" ", ""))
+                        tutar = round(float(str(tutar_val).replace(",", ".").replace(" ", "")), 2)
                     except Exception:
                         err += 1; g_hata += 1; continue
 
                     gelir_gider = "gelir" if tutar >= 0 else "gider"
-                    tutar_abs   = abs(tutar)
+                    tutar_abs   = round(abs(tutar), 2)
 
                     # Tarih dönüşümü DD/MM/YYYY → YYYY-MM-DD
                     tarih_str = ""
@@ -5499,42 +5533,39 @@ class WomsisExcelWorker(QThread):
                     womsis_key = str(hareket_id) if hareket_id else f"{sheet_name}_{tarih_str}_{tutar_abs}"
 
                     # ── Mükerrer Kontrol (3 kademe) ───────────────────────────
-                    # Kademe 1: HAREKET ID (womsiskey)
+                    # Kademe 1: HAREKET ID (womsiskey) — womsis_banka tablosunda ara
                     exists = None
                     try:
                         exists = conn.execute(
-                            "SELECT id FROM hareketler WHERE womsisKey=? AND userid=? LIMIT 1",
+                            "SELECT id FROM womsis_banka WHERE womsiskey=? AND userid=? LIMIT 1",
                             (womsis_key, self._userid)
                         ).fetchone()
                     except Exception:
                         exists = None
 
-                    # Kademe 2: DEKONT NO + TARİH
+
+                    # Kademe 2: DEKONT NO + TARİH + TUTAR
+                    # (Aynı DEKONT NO aynı günde farklı tutarlı işlemler olabilir,
+                    #  tutar da kontrol edilmezse yanlış mükerrer tespiti yapılır.)
                     if not exists and dekont_no and dekont_no not in ("-", ""):
                         try:
                             exists = conn.execute(
                                 """SELECT id FROM womsis_banka
                                    WHERE userid=? AND tarih=?
                                      AND (womsiskey=? OR aciklama LIKE ?)
+                                     AND ABS(tutar - ?) < 0.01
                                    LIMIT 1""",
                                 (self._userid, tarih_str,
-                                 dekont_no, f"%{dekont_no}%")
+                                 dekont_no, f"%{dekont_no}%",
+                                 tutar_abs)
                             ).fetchone()
                         except Exception:
                             exists = None
 
-                    # Kademe 3: TARİH + AÇIKLAMA + TUTAR
-                    if not exists and tarih_str and aciklama:
-                        try:
-                            exists = conn.execute(
-                                """SELECT id FROM womsis_banka
-                                   WHERE userid=? AND tarih=? AND aciklama=?
-                                     AND ABS(tutar::numeric - ?) < 0.01
-                                   LIMIT 1""",
-                                (self._userid, tarih_str, aciklama, tutar_abs)
-                            ).fetchone()
-                        except Exception:
-                            exists = None
+
+                    # Kademe 3 KALDIRILDI: tarih+açıklama+tutar eşleşmesi aynı gün
+                    # aynı tutarda birden fazla gerçek işlemi mükerrer sanıyordu.
+                    # HAREKET ID (Kademe 1) benzersiz tanımlayıcı olduğu için yeterli.
 
 
                     if exists:
@@ -6939,9 +6970,8 @@ class VeriTabaniCard(QFrame):
             "font-size:13px;font-weight:700;color:#0c4a6e;"
         ))
         pgl.addWidget(_mk_lbl(
-            "Supabase kullanıyorsanız: Settings → Database → Connection pooling → Session mode\n"
-            "Host: aws-0-eu-central-1.pooler.supabase.com  |  Port: 5432  "
-            "|  User: postgres.[proje-id]",
+            "Neon, Supabase veya başka bir PostgreSQL servisinin bağlantı cümleciğini\n"
+            "aşağıya yapıştırın — tüm alanlar otomatik dolar.",
             "font-size:11px;color:#0369a1;"
         ))
 
@@ -6951,6 +6981,42 @@ class VeriTabaniCard(QFrame):
             "QLineEdit:focus{border-color:#0ea5e9;}"
         )
         _LBL = "font-size:11px;font-weight:600;color:#000000;"
+
+        # ── Bağlantı Cümleciği (hızlı doldur) ──────────────────────────────
+        dsnc = QVBoxLayout()
+        dsnc.setSpacing(4)
+        dsnc.addWidget(_mk_lbl("Bağlantı Cümleciği (Connection String)", _LBL))
+        dsn_row = QHBoxLayout()
+        dsn_row.setSpacing(8)
+        self._dsn_inp = QLineEdit()
+        self._dsn_inp.setFixedHeight(36)
+        self._dsn_inp.setPlaceholderText(
+            "postgresql://kullanici:sifre@host:5432/dbadi?sslmode=require"
+        )
+        self._dsn_inp.setStyleSheet(_INP)
+        dsn_row.addWidget(self._dsn_inp, 1)
+        self._dsn_btn = QPushButton("⚡  Doldur")
+        self._dsn_btn.setFixedHeight(36)
+        self._dsn_btn.setFixedWidth(90)
+        self._dsn_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dsn_btn.setStyleSheet(
+            "QPushButton{background:#0ea5e9;color:white;border:none;"
+            "border-radius:8px;font-size:12px;font-weight:700;}"
+            "QPushButton:hover{background:#0284c7;}"
+        )
+        self._dsn_btn.clicked.connect(self._on_dsn_doldur)
+        dsn_row.addWidget(self._dsn_btn)
+        dsnc.addLayout(dsn_row)
+        self._dsn_hint = QLabel("")
+        self._dsn_hint.setStyleSheet("font-size:11px;color:#dc2626;")
+        dsnc.addWidget(self._dsn_hint)
+        pgl.addLayout(dsnc)
+
+        # Ayırıcı çizgi
+        _sep = QFrame()
+        _sep.setFrameShape(QFrame.Shape.HLine)
+        _sep.setStyleSheet("color:#bae6fd;")
+        pgl.addWidget(_sep)
 
         # Host + Port
         r1 = QHBoxLayout()
@@ -7158,14 +7224,63 @@ class VeriTabaniCard(QFrame):
         from db.db_config import load_config
         cfg = load_config()
         self._update_mod_ui(cfg.get("mode", "sqlite"))
-        self._host_inp.setText(cfg.get("pg_host", ""))
-        self._port_inp.setText(str(cfg.get("pg_port", 5432)))
-        self._db_inp.setText(cfg.get("pg_db", "postgres"))
-        self._user_inp.setText(cfg.get("pg_user", "postgres"))
-        self._pass_inp.setText(cfg.get("pg_pass", ""))
-        idx = self._ssl_combo.findText(cfg.get("pg_sslmode", "require"))
+        host    = cfg.get("pg_host", "")
+        port    = str(cfg.get("pg_port", 5432))
+        db      = cfg.get("pg_db", "postgres")
+        user    = cfg.get("pg_user", "postgres")
+        pw      = cfg.get("pg_pass", "")
+        sslmode = cfg.get("pg_sslmode", "require")
+        self._host_inp.setText(host)
+        self._port_inp.setText(port)
+        self._db_inp.setText(db)
+        self._user_inp.setText(user)
+        self._pass_inp.setText(pw)
+        idx = self._ssl_combo.findText(sslmode)
         if idx >= 0:
             self._ssl_combo.setCurrentIndex(idx)
+        # DSN alanını da hazır doldur
+        if host and user:
+            from urllib.parse import quote
+            pw_enc = quote(pw, safe="") if pw else ""
+            dsn = f"postgresql://{user}:{pw_enc}@{host}:{port}/{db}?sslmode={sslmode}"
+            self._dsn_inp.setText(dsn)
+
+    def _on_dsn_doldur(self):
+        """Bağlantı cümleciğini parse edip alanları doldurur ve otomatik kaydeder."""
+        from urllib.parse import urlparse, parse_qs
+        raw = self._dsn_inp.text().strip()
+        if not raw:
+            self._dsn_hint.setText("⚠  Lütfen bir bağlantı cümleciği girin.")
+            return
+        try:
+            # postgresql:// veya postgres:// her ikisini de destekle
+            if raw.startswith("postgres://"):
+                raw = "postgresql" + raw[8:]
+            parsed = urlparse(raw)
+            host = parsed.hostname or ""
+            port = str(parsed.port) if parsed.port else "5432"
+            db   = (parsed.path or "/").lstrip("/")
+            user = parsed.username or ""
+            pw   = parsed.password or ""
+            qs   = parse_qs(parsed.query)
+            ssl  = qs.get("sslmode", ["require"])[0]
+            if not host or not user:
+                raise ValueError("Host veya kullanıcı adı boş")
+            self._host_inp.setText(host)
+            self._port_inp.setText(port)
+            self._db_inp.setText(db)
+            self._user_inp.setText(user)
+            self._pass_inp.setText(pw)
+            idx = self._ssl_combo.findText(ssl)
+            self._ssl_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            # Modu postgres yap ve otomatik kaydet
+            self._update_mod_ui("postgres")
+            self._on_kaydet()
+            self._dsn_hint.setStyleSheet("font-size:11px;color:#059669;font-weight:600;")
+            self._dsn_hint.setText("✅  Alanlar dolduruldu ve kaydedildi.")
+        except Exception as e:
+            self._dsn_hint.setStyleSheet("font-size:11px;color:#dc2626;")
+            self._dsn_hint.setText(f"❌  Geçersiz format: {e}")
 
     def _on_mod(self, mod):
         self._update_mod_ui(mod)

@@ -28,8 +28,10 @@ from typing import Optional
 from db.database import get_connection
 from db.efatura_parser import parse_invoice_xml
 
-# Yüklenen XML dosyaları için kalıcı klasör
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "faturalar")
+# Yüklenen XML dosyaları için kalıcı klasör (realpath ile normalize edildi)
+UPLOAD_DIR = os.path.realpath(
+    os.path.join(os.path.dirname(__file__), "..", "data", "faturalar")
+)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
@@ -99,27 +101,52 @@ def _ensure_cari_hesap(conn, unvan: str, vergi_no: str, vergi_daire: str,
 # Ana servis fonksiyonları
 # ─────────────────────────────────────────────────────────────────────────────
 
-def import_xml(xml_path: str, userid: int, mod: str = None) -> dict:
+def import_xml(xml_path: str, userid: int, mod: str = None,
+               izin_verilen_tipler: tuple[str, ...] | None = None) -> dict:
     """
     Tek UBL-TR XML dosyasını parse edip veritabanına kaydeder.
     mod verilmezse VKN karsilastirmasi ile otomatik tespit edilir.
 
     Args:
-        xml_path: Diskteki XML dosyasinin tam yolu
-        userid:   Oturumdaki kullanici ID
-        mod:      'gelir' | 'gider' (verilmezse otomatik tespit)
+        xml_path:             Diskteki XML dosyasinin tam yolu
+        userid:               Oturumdaki kullanici ID
+        mod:                  'gelir' | 'gider' (verilmezse otomatik tespit)
+        izin_verilen_tipler:  İzin verilen InvoiceTypeCode değerleri.
+                              None veya boş ise varsayılan olarak yalnızca
+                              ("", "380") — yani SATIŞ faturaları — kabul edilir.
+                              Örn: ("380",) sadece satış
+                                   ("380", "381") satış + iade
+                                   ("380", "381", "389") hepsi
 
     Returns:
         {'success': bool, 'message': str, 'meta': dict | None}
+        Atlandıysa ek olarak: {'skipped': True, 'skip_reason': 'tip_filtresi'}
     """
     from services.sirket_service import detect_fatura_mod
+
+    # Varsayılan: sadece SATIŞ (380) ve TypeCode'u boş/tanımsız olanlar
+    if not izin_verilen_tipler:
+        izin_verilen_tipler = ("", "380")
 
     # 1 - XML parse
     parsed = parse_invoice_xml(xml_path)
     if not parsed.success:
         return {"success": False, "message": parsed.message}
 
-    # 2 - Mod otomatik tespit
+    # 2 - Fatura tipi filtresi — İPTAL (389) / İADE (381) kontrolü
+    if parsed.fatura_tipi not in izin_verilen_tipler:
+        tip_adi = parsed.fatura_tipi_adi  # "İPTAL", "İADE", vb.
+        return {
+            "success": True,
+            "skipped": True,
+            "skip_reason": "tip_filtresi",
+            "message": (
+                f"{tip_adi} faturası atlandı (Fatura No: {parsed.fatura_no}). "
+                f"Yalnızca SATIŞ faturaları aktarılır."
+            ),
+        }
+
+    # 3 - Mod otomatik tespit
     if mod not in ("gelir", "gider"):
         mod = detect_fatura_mod(
             xml_supplier_vkn=parsed.vergi_no       or "",
@@ -193,15 +220,41 @@ def import_xml(xml_path: str, userid: int, mod: str = None) -> dict:
         dest_path = os.path.join(UPLOAD_DIR, dest_name)
         shutil.copy2(xml_path, dest_path)
 
+        # 6b - GHH'dan formno ve sube bul (unvan eşleşmesiyle)
+        # XML'den gelen fatura unvanı, GHH.aciklama ile ILIKE eşleşirse
+        # o kaydın form_id'sini formno olarak, sube'sini kayıda yazarız.
+        found_formno = None
+        found_sube   = None
+        if unvan:
+            try:
+                ghh_row = conn.execute(
+                    """SELECT form_id, sube
+                       FROM genel_hesap_hareketleri
+                       WHERE userid = ?
+                         AND musteri_no = 1
+                         AND LOWER(TRIM(aciklama)) = LOWER(TRIM(?))
+                         AND form_id IS NOT NULL AND form_id != ''
+                       ORDER BY id DESC
+                       LIMIT 1""",
+                    (userid, unvan)
+                ).fetchone()
+                if ghh_row:
+                    found_formno = ghh_row[0]
+                    found_sube   = ghh_row[1]
+            except Exception:
+                pass  # GHH eşleşmesi olmasa da import devam etsin
+
         # 7 - INSERT (ON CONFLICT DO NOTHING — DB unique index ihlali race condition koruması)
         cur = conn.execute(
             """INSERT INTO faturalar
                (userid, unvan, vergino, vergiDairesi, toplam, fatura,
-                tarih, hash, gruplama, gelirGiderMod, faturano, kaynak, xml_dosya)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tarih, hash, gruplama, gelirGiderMod, faturano, kaynak, xml_dosya, musterino,
+                formNo)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                ON CONFLICT DO NOTHING""",
             (userid, unvan, vergi_no, vergi_daire, toplam, meta_json,
-             tarih, fatura_hash, gruplama, mod, fatura_no, "xml", dest_path)
+             tarih, fatura_hash, gruplama, mod, fatura_no, "xml", dest_path,
+             found_formno)
         )
         fatura_id = cur.lastrowid
 
