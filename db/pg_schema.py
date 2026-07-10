@@ -121,6 +121,26 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
+    ("womsis_banka", """
+        CREATE TABLE IF NOT EXISTS womsis_banka (
+            id              SERIAL PRIMARY KEY,
+            tarih           TEXT,
+            aciklama        TEXT,
+            gelirgider      TEXT,
+            tutar           NUMERIC,
+            kaynak          TEXT,
+            womsiskey       TEXT,
+            userid          INTEGER,
+            sube            TEXT,
+            faturaunvan     TEXT,
+            bakiye          NUMERIC,
+            iban            TEXT,
+            hesap_turu      TEXT,
+            dekont_no       TEXT,
+            created_at      TEXT DEFAULT NOW()::TEXT
+        )
+    """),
+
     ("genel_hesap_hareketleri", """
         CREATE TABLE IF NOT EXISTS genel_hesap_hareketleri (
             id              SERIAL PRIMARY KEY,

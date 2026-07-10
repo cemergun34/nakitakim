@@ -98,6 +98,24 @@ CREATE TABLE IF NOT EXISTS hareketler (
     userid          INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS womsis_banka (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tarih           TEXT,
+    aciklama        TEXT,
+    gelirgider      TEXT,
+    tutar           REAL,
+    kaynak          TEXT,
+    womsiskey       TEXT,
+    userid          INTEGER,
+    sube            TEXT,
+    faturaunvan     TEXT,
+    bakiye          REAL,
+    iban            TEXT,
+    hesap_turu      TEXT,
+    dekont_no       TEXT,
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS genel_hesap_hareketleri (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     tarih           TEXT,

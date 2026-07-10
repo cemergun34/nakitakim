@@ -19,12 +19,25 @@ def _year() -> int:
 
 # ─── KPI KARTI SORGULARI ──────────────────────────────────────────────────────
 
-def _get_genel_hesap_all(userid: int, musterino: int, yil: int) -> dict:
+def _get_genel_hesap_all(
+    userid: int, musterino: int, yil: int,
+    ilk_tarih: Optional[str] = None,
+    son_tarih: Optional[str] = None,
+) -> dict:
     """genel_hesap_hareketleri üzerindeki tüm KPI verilerini TEK sorguda alır.
-    6 ayrı network round-trip yerine 1 tane yapar.
+
+    ilk_tarih / son_tarih 'YYYY-MM-DD' formatında verilirse tarih aralığı filtresi uygulanır.
+    Verilmezse yil bazlı filtre kullanılır.
     """
     conn = get_connection()
     try:
+        if ilk_tarih and son_tarih:
+            where_clause = "tarih_date >= ? AND tarih_date <= ?"
+            params = (userid, musterino, ilk_tarih, son_tarih)
+        else:
+            where_clause = f"{yr('tarih_date')} = ?"
+            params = (userid, musterino, str(yil))
+
         row = conn.execute(f"""
             SELECT
                 -- Nakit Kasa (nerden_geliyor='kasa')
@@ -57,8 +70,8 @@ def _get_genel_hesap_all(userid: int, musterino: int, yil: int) -> dict:
             FROM genel_hesap_hareketleri
             WHERE userid = ?
               AND musteri_no = ?
-              AND {yr("tarih_date")} = ?
-        """, (userid, musterino, str(yil))).fetchone()
+              AND {where_clause}
+        """, params).fetchone()
         return dict(row) if row else {}
     finally:
         conn.close()
@@ -352,21 +365,36 @@ def get_subeler(userid: int) -> list:
         conn.close()
 
 
-def get_monthly_comparison(userid: int, musterino: int, yil: Optional[int] = None) -> list[dict]:
-    """Yıllık Gelir-Gider karşılaştırma grafiği için aylık toplamlar."""
+def get_monthly_comparison(
+    userid: int, musterino: int, yil: Optional[int] = None,
+    ilk_tarih: Optional[str] = None,
+    son_tarih: Optional[str] = None,
+) -> list[dict]:
+    """Gelir-Gider karşılaştırma grafiği için aylık toplamlar.
+
+    ilk_tarih/son_tarih 'YYYY-MM-DD' verilirse tarih aralığı filtrelenir,
+    verilmezse yıl bazlı çalışır.
+    """
     yil = yil or _year()
     conn = get_connection()
     try:
+        if ilk_tarih and son_tarih:
+            where_clause = "tarih_date >= ? AND tarih_date <= ?"
+            params = (userid, musterino, ilk_tarih, son_tarih)
+        else:
+            where_clause = f"{yr('tarih_date')} = ?"
+            params = (userid, musterino, str(yil))
+
         rows = conn.execute(f"""
             SELECT
                 {mo("tarih_date")} AS ay,
                 SUM(gelir) AS toplam_gelir,
                 SUM(gider) AS toplam_gider
             FROM genel_hesap_hareketleri
-            WHERE userid = ? AND musteri_no = ? AND {yr("tarih_date")} = ?
+            WHERE userid = ? AND musteri_no = ? AND {where_clause}
             GROUP BY {mo("tarih_date")}
             ORDER BY {mo("tarih_date")}
-        """, (userid, musterino, str(yil))).fetchall()
+        """, params).fetchall()
         return list(rows)
     finally:
         conn.close()
@@ -395,20 +423,29 @@ def get_bankalar_toplam(userid: int) -> dict:
 
 
 
-def get_all_dashboard_data(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
+def get_all_dashboard_data(
+    userid: int,
+    musterino: int,
+    yil: Optional[int] = None,
+    ilk_tarih: Optional[str] = None,
+    son_tarih: Optional[str] = None,
+) -> dict:
     """Tüm dashboard KPI verilerini minimum sorgu sayısıyla döndürür.
 
-    genel_hesap_hareketleri üzerinde TEK sorgu yapılır (_ghh cache).
-    Faturalar, sanal_pos, kredi_karti, monthly_chart ayrı birer sorgu.
-    Toplam: ~4 sorgu (önceden ~10 sorgu).
+    ilk_tarih / son_tarih 'YYYY-MM-DD' verilirse tarih aralığına göre filtreler.
+    Verilmezse yıl bazlı çalışır (eski davranış).
+    Toplam: ~4 sorgu.
     """
     yil = yil or _year()
 
     # 1 sorgu — genel_hesap_hareketleri'nin tüm KPI'larını tek seferde al
-    ghh = _get_genel_hesap_all(userid, musterino, yil)
+    ghh = _get_genel_hesap_all(userid, musterino, yil,
+                               ilk_tarih=ilk_tarih, son_tarih=son_tarih)
 
     return {
         "yil":            yil,
+        "ilk_tarih":      ilk_tarih,
+        "son_tarih":      son_tarih,
         "nakit_kasa":     get_nakit_kasa_toplam(userid, musterino, yil, _ghh=ghh),
         "gider":          get_gider_toplam(userid, musterino, yil, _ghh=ghh),
         "genel_hesap":    get_genel_hesap_toplam(userid, musterino, yil, _ghh=ghh),
@@ -419,7 +456,8 @@ def get_all_dashboard_data(userid: int, musterino: int, yil: Optional[int] = Non
         "sanal_pos":      get_sanal_pos_toplam(userid, yil),
         "kredi_karti":    get_kredi_karti_toplam(userid, yil),
         "bankalar":       get_bankalar_toplam(userid),
-        "monthly_chart":  get_monthly_comparison(userid, musterino, yil),
+        "monthly_chart":  get_monthly_comparison(userid, musterino, yil,
+                                                  ilk_tarih=ilk_tarih, son_tarih=son_tarih),
     }
 
 

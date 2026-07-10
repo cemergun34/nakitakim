@@ -273,15 +273,22 @@ class DashboardLoader(QThread):
     data_ready = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, userid: int, musterino: int, yil: int):
+    def __init__(self, userid: int, musterino: int, yil: int,
+                 ilk_tarih: str = None, son_tarih: str = None):
         super().__init__()
-        self.userid = userid
-        self.musterino = musterino
-        self.yil = yil
+        self.userid     = userid
+        self.musterino  = musterino
+        self.yil        = yil
+        self.ilk_tarih  = ilk_tarih
+        self.son_tarih  = son_tarih
 
     def run(self):
         try:
-            data = get_all_dashboard_data(self.userid, self.musterino, self.yil)
+            data = get_all_dashboard_data(
+                self.userid, self.musterino, self.yil,
+                ilk_tarih=self.ilk_tarih,
+                son_tarih=self.son_tarih,
+            )
             self.data_ready.emit(data)
         except Exception as e:
             self.error.emit(str(e))
@@ -757,55 +764,83 @@ class DashboardScreen(QWidget):
 
         vbox.addLayout(grid)
 
-        # ── Tarih filtresi + Excel ──────────────────────────────────────────────
+        # ── Tarih filtresi + Göster butonu + Excel ──────────────────────────────
         filter_bar = QHBoxLayout()
         filter_bar.setSpacing(10)
 
-        ilk_lbl = QLabel("İlk Tarih:")
+        _DE_STYLE = """
+            QDateEdit {
+                background: #1A1A1A;
+                border: 1.5px solid #555;
+                border-radius: 8px;
+                padding: 0 10px;
+                font-size: 12px;
+                color: white;
+                font-weight: 600;
+            }
+            QDateEdit:focus { border-color: #2563EB; }
+            QDateEdit::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1.5px solid #555;
+                border-top-right-radius: 8px;
+                border-bottom-right-radius: 8px;
+                background: #2A2A2A;
+            }
+            QDateEdit::down-arrow { image: none; width: 10px; height: 10px; }
+        """
+
+        ilk_lbl = QLabel("📅 İlk Tarih:")
         ilk_lbl.setStyleSheet("color: white; font-size: 12px; font-weight: 600;")
         filter_bar.addWidget(ilk_lbl)
 
         self.ilk_tarih = QDateEdit()
         self.ilk_tarih.setCalendarPopup(True)
         self.ilk_tarih.setDate(QDate(self._yil, 1, 1))
+        self.ilk_tarih.setDisplayFormat("dd.MM.yyyy")
         self.ilk_tarih.setFixedHeight(34)
-        self.ilk_tarih.setStyleSheet("""
-            QDateEdit {
-                background: #1A1A1A;
-                border: 1.5px solid #444;
-                border-radius: 8px;
-                padding: 0 10px;
-                font-size: 12px;
-                color: white;
-                font-weight: 600;
-            }
-            QDateEdit::drop-down { border: none; width: 20px; }
-            QDateEdit:focus { border-color: #2563EB; }
-        """)
+        self.ilk_tarih.setFixedWidth(135)
+        self.ilk_tarih.setStyleSheet(_DE_STYLE)
         filter_bar.addWidget(self.ilk_tarih)
 
-        son_lbl = QLabel("Son Tarih:")
+        son_lbl = QLabel("📅 Son Tarih:")
         son_lbl.setStyleSheet("color: white; font-size: 12px; font-weight: 600;")
         filter_bar.addWidget(son_lbl)
 
         self.son_tarih = QDateEdit()
         self.son_tarih.setCalendarPopup(True)
         self.son_tarih.setDate(QDate.currentDate())
+        self.son_tarih.setDisplayFormat("dd.MM.yyyy")
         self.son_tarih.setFixedHeight(34)
-        self.son_tarih.setStyleSheet("""
-            QDateEdit {
-                background: #1A1A1A;
-                border: 1.5px solid #444;
-                border-radius: 8px;
-                padding: 0 10px;
-                font-size: 12px;
-                color: white;
-                font-weight: 600;
-            }
-            QDateEdit::drop-down { border: none; width: 20px; }
-            QDateEdit:focus { border-color: #2563EB; }
-        """)
+        self.son_tarih.setFixedWidth(135)
+        self.son_tarih.setStyleSheet(_DE_STYLE)
         filter_bar.addWidget(self.son_tarih)
+
+        # —— Göster butonu
+        self.goster_btn = QPushButton("▶  GÖSTER")
+        self.goster_btn.setFixedHeight(34)
+        self.goster_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.goster_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #2563EB, stop:1 #1d4ed8);
+                color: white;
+                font-size: 12px;
+                font-weight: 700;
+                border: none;
+                border-radius: 8px;
+                padding: 0 18px;
+                letter-spacing: 1px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #1d4ed8, stop:1 #1e40af);
+            }
+            QPushButton:pressed { background: #1e40af; }
+        """)
+        self.goster_btn.clicked.connect(self._on_goster)
+        filter_bar.addWidget(self.goster_btn)
 
         filter_bar.addStretch()
 
@@ -853,10 +888,25 @@ class DashboardScreen(QWidget):
         if self._loader and self._loader.isRunning():
             return
 
-        self._loader = DashboardLoader(self._userid, self._musterino, self._yil)
+        ilk_str = self.ilk_tarih.date().toString("yyyy-MM-dd")
+        son_str  = self.son_tarih.date().toString("yyyy-MM-dd")
+
+        self._loader = DashboardLoader(
+            self._userid, self._musterino, self._yil,
+            ilk_tarih=ilk_str, son_tarih=son_str,
+        )
         self._loader.data_ready.connect(self._on_data_ready)
         self._loader.error.connect(self._on_error)
         self._loader.start()
+
+    def _on_goster(self):
+        """Göster butonuna basılınca kartları ve grafiği tarih aralığına göre yeniler."""
+        ilk = self.ilk_tarih.date().toString("dd.MM.yyyy")
+        son = self.son_tarih.date().toString("dd.MM.yyyy")
+        self.banner.setText(f"FİNANS DURUM BİLGİSİ  —  📅 {ilk}  /  {son}")
+        for card in self._cards.values():
+            card.set_value("Yükleniyor...")
+        self._load_data()
 
     def refresh(self):
         """Sol menüden sayfaya geçince veriler yeniden yüklenir."""
@@ -1177,7 +1227,7 @@ class DashboardScreen(QWidget):
             return
     
         # ── İlerleme dialogu ──
-        prog = QProgressDialog("Excel hazırlanıyor...", None, 0, 12, self)
+        prog = QProgressDialog("Excel hazırlanıyor...", None, 0, 13, self)
         prog.setWindowTitle("Excel Export")
         prog.setWindowModality(QtC.WindowModality.WindowModal)
         prog.setMinimumWidth(340)
@@ -1275,8 +1325,14 @@ class DashboardScreen(QWidget):
                     _rd = dict(_r) if not isinstance(_r, dict) else _r
                     for _hdr in para_sutunlar:
                         _val = float(get_val(_rd, _hdr) or 0)
-                        if "gider" in _hdr.lower() or "kesinti" in _hdr.lower() or "komisyon" in _hdr.lower():
-                            _gider_total += _val
+                        # Tutar sütunlarında: pozitif = gelir, negatif = gider
+                        if "tutar" in _hdr.lower() and "gider" not in _hdr.lower() and "kesinti" not in _hdr.lower() and "komisyon" not in _hdr.lower():
+                            if _val >= 0:
+                                _gelir_total += _val
+                            else:
+                                _gider_total += abs(_val)
+                        elif "gider" in _hdr.lower() or "kesinti" in _hdr.lower() or "komisyon" in _hdr.lower():
+                            _gider_total += abs(_val)
                         else:
                             _gelir_total += _val
                         _has_para = True
@@ -1447,7 +1503,9 @@ class DashboardScreen(QWidget):
             _ykl_col  = "yuklenmeTarihi" if not hasattr(conn, "server_version") else "yuklenmetarihi"
             from db.db_compat import left4
             rows = conn.execute(f"""
-                SELECT f.tarih AS Tarih, f.unvan AS Ünvan, f.vergino AS "Vergi No",
+                SELECT f.tarih AS Tarih, f.unvan AS Ünvan,
+                       f.{_fno_col} AS "Form No",
+                       f.vergino AS "Vergi No",
                        f.faturano AS "Fatura No",
                        CAST(f.toplam AS REAL) AS "Toplam (₺)",
                        COALESCE(
@@ -1466,7 +1524,7 @@ class DashboardScreen(QWidget):
                 title="Kesilen Faturalar",
                 baslik=f"Kesilen Faturalar — {yil}",
                 alt_yazi=f"Kayıt: {len(rows):,}  •  {simdi}",
-                headers=["Tarih","Ünvan","Açıklama","Vergi No","Fatura No","Toplam (₺)","Şube","Kaynak"],
+                headers=["Tarih","Ünvan","Form No","Açıklama","Vergi No","Fatura No","Toplam (₺)","Şube","Kaynak"],
                 rows_data=_rows_to_dicts(rows),
                 para_sutunlar={"Toplam (₺)"},
                 hdr_color="FF6D28D9",
@@ -1633,7 +1691,11 @@ class DashboardScreen(QWidget):
                     COALESCE(gelirgider, '')     AS gelirgider,
                     CAST(tutar AS REAL)          AS tutar,
                     COALESCE(faturaunvan, '')    AS faturaunvan,
-                    COALESCE(kaynak, '')         AS kaynak
+                    COALESCE(kaynak, '')         AS kaynak,
+                    COALESCE(iban, '')           AS iban,
+                    COALESCE(hesap_turu, '')     AS hesap_turu,
+                    COALESCE(dekont_no, '')      AS dekont_no,
+                    CAST(bakiye AS REAL)         AS bakiye
                 FROM womsis_banka
                 WHERE userid = ?
                 ORDER BY tarih DESC, id DESC
@@ -1641,21 +1703,30 @@ class DashboardScreen(QWidget):
             
             banka_export_rows = []
             for r in rows:
+                raw_tutar = float(get_val(r, "tutar") or 0)
+                gelirgider = get_val(r, "gelirgider") or ""
+                # Gider ise tutarı negatif yap
+                signed_tutar = -abs(raw_tutar) if gelirgider == "gider" else abs(raw_tutar)
+                raw_bakiye = get_val(r, "bakiye")
                 banka_export_rows.append({
                     "Tarih": get_val(r, "tarih") or "",
                     "Banka / Şube": get_val(r, "sube") or "(Şubesiz)",
                     "Açıklama": get_val(r, "aciklama") or "",
-                    "Tür": get_val(r, "gelirgider") or "",
-                    "Tutar (₺)": float(get_val(r, "tutar") or 0),
+                    "Tür": gelirgider,
+                    "Tutar (₺)": signed_tutar,
+                    "Bakiye (₺)": float(raw_bakiye) if raw_bakiye is not None else "",
                     "Karşı Taraf": get_val(r, "faturaunvan") or "",
-                    "Kaynak": get_val(r, "kaynak") or ""
+                    "Kaynak": get_val(r, "kaynak") or "",
+                    "IBAN": get_val(r, "iban") or "",
+                    "Hesap Türü": get_val(r, "hesap_turu") or "",
+                    "Dekont No": get_val(r, "dekont_no") or "",
                 })
                 
             _n, _g, _gd = _yeni_sheet(
                 title="Bankalar",
                 baslik=f"Banka Hareketleri — Tüm Dönem",
                 alt_yazi=f"Kayıt: {len(banka_export_rows):,}  •  {simdi}",
-                headers=["Tarih", "Banka / Şube", "Açıklama", "Tür", "Tutar (₺)", "Karşı Taraf", "Kaynak"],
+                headers=["Tarih", "Banka / Şube", "Açıklama", "Tür", "Tutar (₺)", "Bakiye (₺)", "Karşı Taraf", "Kaynak", "IBAN", "Hesap Türü", "Dekont No"],
                 rows_data=banka_export_rows,
                 para_sutunlar={"Tutar (₺)"},
                 hdr_color="FF374151",
@@ -1774,10 +1845,249 @@ class DashboardScreen(QWidget):
             ozet.kaydet("Kredi Kartları", kayit=_n, gelir=_g, gider=_gd)
     
             # ═══════════════════════════════════════════════════════════════════
-            # 11. ÖZET (ExcelOzetBuilder ile oluşturulur)
+            # 11. GENEL HESAP TABLOSU
             # ═══════════════════════════════════════════════════════════════════
-            prog.setLabelText("11/11 Özet sayfası...")
+            prog.setLabelText("11/12 Genel Hesap Tablosu...")
             prog.setValue(10)
+            rows = conn.execute("""
+                SELECT tarih_date AS Tarih, form_id AS "Form No",
+                       COALESCE(sube,'(Şubesiz)') AS Şube,
+                       COALESCE(aciklama,'') AS Açıklama,
+                       COALESCE(kategori,'') AS Kategori,
+                       COALESCE(teslim_sekli,'') AS "Teslim Şekli",
+                       COALESCE(odeme_sekli,'') AS "Ödeme Şekli",
+                       COALESCE(gelir,0) AS "Gelir (₺)",
+                       COALESCE(gider,0) AS "Gider (₺)",
+                       COALESCE(nerden_geliyor,'') AS Kaynak
+                FROM genel_hesap_hareketleri
+                WHERE userid=? AND musteri_no=? AND nerden_geliyor='genelHesap'
+                  AND tarih_date >= ? AND tarih_date <= ?
+                ORDER BY tarih_date ASC, id ASC
+            """, (uid, mno, ilk_str, son_str)).fetchall()
+            _n, _g, _gd = _yeni_sheet(
+                title="Genel Hesap",
+                baslik=f"Genel Hesap Tablosu — {ilk_goster} / {son_goster}",
+                alt_yazi=f"Kayıt: {len(rows):,}  •  {simdi}",
+                headers=["Tarih","Form No","Şube","Açıklama","Kategori",
+                         "Teslim Şekli","Ödeme Şekli","Gelir (₺)","Gider (₺)","Kaynak"],
+                rows_data=_rows_to_dicts(rows),
+                para_sutunlar={"Gelir (₺)", "Gider (₺)"},
+                hdr_color="FFEA580C",
+            )
+            ozet.kaydet("Genel Hesap", kayit=_n, gelir=_g, gider=_gd)
+
+            # ═══════════════════════════════════════════════════════════════════
+            # 12. GENELDE VAR KESİLENDE YOK
+            # ═══════════════════════════════════════════════════════════════════
+            prog.setLabelText("12/13 Genelde Var Kesilende Yok...")
+            prog.setValue(11)
+
+            # Form numarası olan ama kesilen faturası bulunmayan kayıtları doğrudan SQL ile çek
+            _gvky_filtered = conn.execute(f"""
+                SELECT tarih_date AS Tarih, form_id AS "Form No",
+                       COALESCE(sube,'(Şubesiz)') AS Şube,
+                       COALESCE(aciklama,'') AS Açıklama,
+                       COALESCE(kategori,'') AS Kategori,
+                       COALESCE(teslim_sekli,'') AS "Teslim Şekli",
+                       COALESCE(odeme_sekli,'') AS "Ödeme Şekli",
+                       COALESCE(gelir,0) AS "Gelir (₺)",
+                       COALESCE(gider,0) AS "Gider (₺)",
+                       COALESCE(nerden_geliyor,'') AS Kaynak
+                FROM genel_hesap_hareketleri
+                WHERE userid=? AND musteri_no=? AND nerden_geliyor='genelHesap'
+                  AND tarih_date >= ? AND tarih_date <= ?
+                  AND form_id IS NOT NULL AND TRIM(form_id) != ''
+                  AND form_id NOT IN (
+                      SELECT {_fno_col} FROM faturalar
+                      WHERE userid=? AND {_mod_col}='gelir'
+                        AND {_fno_col} IS NOT NULL AND TRIM({_fno_col}) != ''
+                  )
+                ORDER BY tarih_date ASC, id ASC
+            """, (uid, mno, ilk_str, son_str, uid)).fetchall()
+            _gvky_filtered = [dict(r) if not isinstance(r, dict) else r for r in _gvky_filtered]
+
+            # ── Sheet oluştur ──
+            _gvky_hdrs = ["Tarih","Form No","Şube","Açıklama","Kategori",
+                          "Teslim Şekli","Ödeme Şekli","Gelir (₺)","Gider (₺)","Kaynak"]
+            _gvky_para = {"Gelir (₺)", "Gider (₺)"}
+            _hdr_clr   = "FF7C3AED"  # mor
+            _s         = _stiller(_hdr_clr)
+
+            ws_gvky = wb.create_sheet(title="Genelde Var Kesilende Yok")
+
+            # Başlık
+            ws_gvky.append([f"Genelde Var Kesilende Yok — {ilk_goster} / {son_goster}"])
+            ws_gvky.cell(row=1, column=1).font = _s["font_title"]
+
+            # Gelir/Gider özet satırı (önceden hesapla)
+            _gvky_gelir_total = sum(float(_r.get("Gelir (₺)") or 0) for _r in _gvky_filtered)
+            _gvky_gider_total = sum(float(_r.get("Gider (₺)") or 0) for _r in _gvky_filtered)
+            _gvky_kalan = _gvky_gelir_total - _gvky_gider_total
+            _summary_txt = (f"Gelir Toplamı: {_gvky_gelir_total:,.2f} ₺   │   "
+                            f"Gider Toplamı: {_gvky_gider_total:,.2f} ₺   │   "
+                            f"Kalan: {_gvky_kalan:+,.2f} ₺")
+            ws_gvky.append([_summary_txt])
+            ws_gvky.cell(row=2, column=1).font = Font(name="Segoe UI", size=10, bold=True, color="FF1E3A8A")
+
+            ws_gvky.append([f"Fatura Kesilmemiş Kayıt: {len(_gvky_filtered):,}  •  {simdi}"])
+            ws_gvky.cell(row=3, column=1).font = _s["font_subtitle"]
+            ws_gvky.append([])  # boşluk
+
+            # Sütun başlıkları (5. satır)
+            ws_gvky.append(_gvky_hdrs)
+            for _ci, _hdr in enumerate(_gvky_hdrs, 1):
+                _cell = ws_gvky.cell(row=5, column=_ci)
+                _cell.font      = _s["font_header"]
+                _cell.fill      = _s["fill_header"]
+                _cell.alignment = Alignment(horizontal="center", vertical="center")
+                _cell.border    = _s["border_thin"]
+
+            # ── Veri satırları — ay bazlı gruplama ──
+            _cur_row   = 6
+            _cur_ay    = None  # "YYYY-MM"
+            _ay_gelir  = 0.0
+            _ay_gider  = 0.0
+
+            _AY_ADLARI = {1:"Ocak",2:"Şubat",3:"Mart",4:"Nisan",5:"Mayıs",6:"Haziran",
+                          7:"Temmuz",8:"Ağustos",9:"Eylül",10:"Ekim",11:"Kasım",12:"Aralık"}
+
+            def _yaz_ay_toplam(ay_str, ay_gelir, ay_gider):
+                nonlocal _cur_row
+                # ay_str örn: "2026-03"
+                try:
+                    _ay_no = int(ay_str.split("-")[1])
+                    _ay_yil = ay_str.split("-")[0]
+                    _ay_adi = f"── {_AY_ADLARI.get(_ay_no, ay_str)} {_ay_yil} Toplamı ──"
+                except Exception:
+                    _ay_adi = f"── {ay_str} Toplamı ──"
+                _ay_kalan = ay_gelir - ay_gider
+                _row_vals = []
+                for _h in _gvky_hdrs:
+                    if _h == "Tarih":
+                        _row_vals.append(_ay_adi)
+                    elif _h == "Gelir (₺)":
+                        _row_vals.append(ay_gelir)
+                    elif _h == "Gider (₺)":
+                        _row_vals.append(ay_gider)
+                    elif _h == "Açıklama":
+                        _row_vals.append(f"Kalan: {_ay_kalan:+,.2f} ₺")
+                    else:
+                        _row_vals.append("")
+                ws_gvky.append(_row_vals)
+                for _ci2, _h2 in enumerate(_gvky_hdrs, 1):
+                    _c2 = ws_gvky.cell(row=_cur_row, column=_ci2)
+                    _c2.font   = Font(name="Segoe UI", size=10, bold=True, color="FFFFFFFF")
+                    _c2.fill   = PatternFill(start_color=_hdr_clr, end_color=_hdr_clr, fill_type="solid")
+                    _c2.border = _s["border_thin"]
+                    if _h2 in _gvky_para:
+                        _c2.alignment     = Alignment(horizontal="right", vertical="center")
+                        _c2.number_format = "#,##0.00"
+                    else:
+                        _c2.alignment = Alignment(horizontal="left", vertical="center")
+                _cur_row += 1
+
+            for _rd in _gvky_filtered:
+                _tarih_str = str(_rd.get("Tarih") or "")
+                # "YYYY-MM" kısmını al
+                _this_ay = _tarih_str[:7] if len(_tarih_str) >= 7 else ""
+
+                # Ay değişti → önceki ayın toplamını yaz
+                if _cur_ay is not None and _this_ay != _cur_ay:
+                    _yaz_ay_toplam(_cur_ay, _ay_gelir, _ay_gider)
+                    _ay_gelir = 0.0
+                    _ay_gider = 0.0
+
+                _cur_ay = _this_ay
+
+                # Satır verisi
+                _row_vals = []
+                for _h in _gvky_hdrs:
+                    _v = _rd.get(_h)
+                    if _h in _gvky_para:
+                        _fv = float(_v or 0)
+                        _row_vals.append(_fv)
+                        if _h == "Gelir (₺)":
+                            _ay_gelir += _fv
+                        else:
+                            _ay_gider += _fv
+                    else:
+                        _row_vals.append(str(_v or ""))
+                ws_gvky.append(_row_vals)
+
+                for _ci3, _h3 in enumerate(_gvky_hdrs, 1):
+                    _c3 = ws_gvky.cell(row=_cur_row, column=_ci3)
+                    _c3.font   = _s["font_data"]
+                    _c3.border = _s["border_thin"]
+                    if _h3 in _gvky_para:
+                        _fv3 = float(_row_vals[_ci3 - 1] or 0)
+                        _c3.alignment     = Alignment(horizontal="right", vertical="center")
+                        _c3.number_format = "#,##0.00"
+                        if "gelir" in _h3.lower() and _fv3 > 0:
+                            _c3.fill = _s["fill_gelir"]
+                        elif "gider" in _h3.lower() and _fv3 > 0:
+                            _c3.fill = _s["fill_gider"]
+                    elif _ci3 == 1:
+                        _c3.alignment = Alignment(horizontal="center", vertical="center")
+                    else:
+                        _c3.alignment = Alignment(horizontal="left", vertical="center")
+                _cur_row += 1
+
+            # Son ayın toplamı
+            if _cur_ay is not None:
+                _yaz_ay_toplam(_cur_ay, _ay_gelir, _ay_gider)
+
+            # Genel toplam satırı
+            _gt_vals = []
+            for _h in _gvky_hdrs:
+                if _h == "Tarih":
+                    _gt_vals.append("GENEL TOPLAM")
+                elif _h == "Gelir (₺)":
+                    _gt_vals.append(_gvky_gelir_total)
+                elif _h == "Gider (₺)":
+                    _gt_vals.append(_gvky_gider_total)
+                elif _h == "Açıklama":
+                    _gt_vals.append(f"Kalan: {_gvky_kalan:+,.2f} ₺")
+                else:
+                    _gt_vals.append("")
+            ws_gvky.append(_gt_vals)
+            for _ci4, _h4 in enumerate(_gvky_hdrs, 1):
+                _c4 = ws_gvky.cell(row=_cur_row, column=_ci4)
+                _c4.font   = _s["font_total"]
+                _c4.fill   = _s["fill_total"]
+                _c4.border = _s["border_total"]
+                if _h4 in _gvky_para:
+                    _c4.alignment     = Alignment(horizontal="right", vertical="center")
+                    _c4.number_format = "#,##0.00"
+                else:
+                    _c4.alignment = Alignment(horizontal="left", vertical="center")
+
+            # Sütun genişlikleri
+            for _col in ws_gvky.columns:
+                _max_len   = 0
+                _col_ltr   = get_column_letter(_col[0].column)
+                for _cell in _col:
+                    if _cell.row <= 4:
+                        continue
+                    if _cell.value is not None:
+                        _sv = f"{_cell.value:,.2f}" if isinstance(_cell.value, float) else str(_cell.value)
+                        _max_len = max(_max_len, len(_sv))
+                ws_gvky.column_dimensions[_col_ltr].width = max(_max_len + 4, 12)
+
+            # AutoFilter
+            if _gvky_filtered:
+                ws_gvky.auto_filter.ref = f"A5:{get_column_letter(len(_gvky_hdrs))}{_cur_row - 1}"
+            ws_gvky.freeze_panes = "A6"
+
+            ozet.kaydet("Genelde Var Kesilende Yok",
+                        kayit=len(_gvky_filtered),
+                        gelir=_gvky_gelir_total,
+                        gider=_gvky_gider_total)
+
+            # ═══════════════════════════════════════════════════════════════════
+            # 13. ÖZET (ExcelOzetBuilder ile oluşturulur)
+            # ═══════════════════════════════════════════════════════════════════
+            prog.setLabelText("13/13 Özet sayfası...")
+            prog.setValue(12)
 
             # Aylık gelir-gider verisi (grafik için)
             from db.db_compat import yr, mo
@@ -2999,9 +3309,28 @@ class KrediKartiDialog(QDialog):
         "QComboBox::drop-down{border:none;width:18px;}"
     )
     _DES = (
-        "QDateEdit{background:white;border:1.5px solid #93c5fd;"
-        "border-radius:6px;padding:0 6px;font-size:12px;color:#1e293b;}"
-        "QDateEdit::drop-down{border:none;width:18px;}"
+        "QDateEdit{"
+        "  background:white;"
+        "  border:1.5px solid #93c5fd;"
+        "  border-radius:6px;"
+        "  padding:0 6px;"
+        "  font-size:12px;"
+        "  color:#1e293b;"
+        "}"
+        "QDateEdit:focus{"
+        "  border:1.5px solid #2563eb;"
+        "  background:#eff6ff;"
+        "}"
+        "QDateEdit::drop-down{"
+        "  subcontrol-origin:padding;"
+        "  subcontrol-position:top right;"
+        "  width:24px;"
+        "  border-left:1.5px solid #93c5fd;"
+        "  border-top-right-radius:6px;"
+        "  border-bottom-right-radius:6px;"
+        "  background:#dbeafe;"
+        "}"
+        "QDateEdit::down-arrow{image:none;width:10px;height:10px;}"
     )
 
     def __init__(self, userid: int, yil: int, parent=None):
@@ -3148,20 +3477,20 @@ class KrediKartiDialog(QDialog):
         self._ay_cb.currentIndexChanged.connect(self._on_ay_degis)
         filtre_lay.addWidget(self._ay_cb)
 
-        filtre_lay.addWidget(self._lbl("İlk Tarih:"))
+        filtre_lay.addWidget(self._lbl("📅 İlk Tarih:"))
         self._ilk_de = QDateEdit()
         self._ilk_de.setCalendarPopup(True)
         self._ilk_de.setDisplayFormat("dd.MM.yyyy")
-        self._ilk_de.setFixedSize(120, 30)
+        self._ilk_de.setFixedSize(130, 30)
         self._ilk_de.setStyleSheet(self._DES)
         self._ilk_de.setDate(QDate(self._yil, 1, 1))
         filtre_lay.addWidget(self._ilk_de)
 
-        filtre_lay.addWidget(self._lbl("Son Tarih:"))
+        filtre_lay.addWidget(self._lbl("📅 Son Tarih:"))
         self._son_de = QDateEdit()
         self._son_de.setCalendarPopup(True)
         self._son_de.setDisplayFormat("dd.MM.yyyy")
-        self._son_de.setFixedSize(120, 30)
+        self._son_de.setFixedSize(130, 30)
         self._son_de.setStyleSheet(self._DES)
         self._son_de.setDate(QDate.currentDate())
         filtre_lay.addWidget(self._son_de)
@@ -3340,11 +3669,12 @@ class KrediKartiDialog(QDialog):
         if not self._secili_banka:
             return
 
+        # Tablo hemen temizlenir — kullanıcı eski veri görmesin
+        self._ekstre_tbl.setRowCount(0)
+
         from services.dashboard_service import get_kredi_karti_ekstre_detay
-        ilk = self._ilk_de.date()
-        son = self._son_de.date()
-        ilk_str = f"{ilk.day():02d}.{ilk.month():02d}.{ilk.year()}"
-        son_str = f"{son.day():02d}.{son.month():02d}.{son.year()}"
+        ilk_str = self._ilk_de.date().toString("dd.MM.yyyy")
+        son_str = self._son_de.date().toString("dd.MM.yyyy")
 
         self._ekstre_rows = get_kredi_karti_ekstre_detay(
             userid=self._userid,
@@ -3512,29 +3842,51 @@ class SanalPosDialog(QDialog):
         filtre_row.setSpacing(10)
 
         _DE = (
-            "QDateEdit{background:white;border:1px solid #ced4da;"
-            "border-radius:4px;padding:3px 6px;font-size:12px;color:#212529;}"
-            "QDateEdit::drop-down{border:none;}"
+            "QDateEdit{"
+            "  background:white;"
+            "  border:1px solid #ced4da;"
+            "  border-radius:4px;"
+            "  padding:3px 6px;"
+            "  font-size:12px;"
+            "  color:#212529;"
+            "}"
+            "QDateEdit:focus{"
+            "  border:1px solid #6366f1;"
+            "  background:#f8f7ff;"
+            "}"
+            "QDateEdit::drop-down{"
+            "  subcontrol-origin:padding;"
+            "  subcontrol-position:top right;"
+            "  width:24px;"
+            "  border-left:1px solid #ced4da;"
+            "  border-top-right-radius:4px;"
+            "  border-bottom-right-radius:4px;"
+            "  background:#f0f0f0;"
+            "}"
+            "QDateEdit::down-arrow{"
+            "  image:none;"
+            "  width:10px;height:10px;"
+            "}"
         )
         today = date.today()
         jan1  = date(today.year, 1, 1)
 
-        filtre_row.addWidget(self._lbl("İlk Tarih:"))
+        filtre_row.addWidget(self._lbl("📅 İlk Tarih:"))
         self._ilk_de = QDateEdit()
         self._ilk_de.setCalendarPopup(True)
         self._ilk_de.setDisplayFormat("dd.MM.yyyy")
         self._ilk_de.setFixedHeight(30)
-        self._ilk_de.setFixedWidth(120)
+        self._ilk_de.setFixedWidth(130)
         self._ilk_de.setDate(QDate(jan1.year, jan1.month, jan1.day))
         self._ilk_de.setStyleSheet(_DE)
         filtre_row.addWidget(self._ilk_de)
 
-        filtre_row.addWidget(self._lbl("Son Tarih:"))
+        filtre_row.addWidget(self._lbl("📅 Son Tarih:"))
         self._son_de = QDateEdit()
         self._son_de.setCalendarPopup(True)
         self._son_de.setDisplayFormat("dd.MM.yyyy")
         self._son_de.setFixedHeight(30)
-        self._son_de.setFixedWidth(120)
+        self._son_de.setFixedWidth(130)
         self._son_de.setDate(QDate(today.year, today.month, today.day))
         self._son_de.setStyleSheet(_DE)
         filtre_row.addWidget(self._son_de)
@@ -3699,10 +4051,11 @@ class SanalPosDialog(QDialog):
         self._odeme_lbl.setText("...")
         self._fark_lbl.setText("...")
 
-        ilk_qd = self._ilk_de.date()
-        son_qd = self._son_de.date()
-        ilk_str = f"{ilk_qd.year():04d}-{ilk_qd.month():02d}-{ilk_qd.day():02d}"
-        son_str = f"{son_qd.year():04d}-{son_qd.month():02d}-{son_qd.day():02d}"
+        # Tablo hemen temizlenir — kullanıcı eski veri görmesin
+        self._tbl.setRowCount(0)
+
+        ilk_str = self._ilk_de.date().toString("yyyy-MM-dd")
+        son_str = self._son_de.date().toString("yyyy-MM-dd")
 
         result = get_sanal_pos_hareketleri_db(
             self._userid, self._musterino, ilk_str, son_str
@@ -4075,29 +4428,48 @@ class FizikselPosDialog(QDialog):
         fr = QHBoxLayout()
         fr.setSpacing(10)
         _DE = (
-            "QDateEdit{background:white;border:1px solid #ced4da;"
-            "border-radius:4px;padding:3px 6px;font-size:12px;color:#212529;}"
-            "QDateEdit::drop-down{border:none;}"
+            "QDateEdit{"
+            "  background:white;"
+            "  border:1px solid #ced4da;"
+            "  border-radius:4px;"
+            "  padding:3px 6px;"
+            "  font-size:12px;"
+            "  color:#212529;"
+            "}"
+            "QDateEdit:focus{"
+            "  border:1px solid #1a3a5c;"
+            "  background:#f0f4f8;"
+            "}"
+            "QDateEdit::drop-down{"
+            "  subcontrol-origin:padding;"
+            "  subcontrol-position:top right;"
+            "  width:24px;"
+            "  border-left:1px solid #ced4da;"
+            "  border-top-right-radius:4px;"
+            "  border-bottom-right-radius:4px;"
+            "  background:#f0f0f0;"
+            "}"
+            "QDateEdit::down-arrow{image:none;width:10px;height:10px;}"
         )
         today = date.today()
         jan1 = date(today.year, 1, 1)
 
-        fr.addWidget(self._lbl("İlk Tarih:"))
+        fr.addWidget(self._lbl("📅 İlk Tarih:"))
         self._ilk_de = QDateEdit()
         self._ilk_de.setCalendarPopup(True)
         self._ilk_de.setDisplayFormat("dd.MM.yyyy")
         self._ilk_de.setFixedHeight(30)
-        self._ilk_de.setFixedWidth(120)
+        self._ilk_de.setFixedWidth(130)
         self._ilk_de.setDate(QDate(jan1.year, jan1.month, jan1.day))
         self._ilk_de.setStyleSheet(_DE)
         fr.addWidget(self._ilk_de)
 
-        fr.addWidget(self._lbl("Son Tarih:"))
+        fr.addWidget(self._lbl("📅 Son Tarih:"))
         self._son_de = QDateEdit()
         self._son_de.setCalendarPopup(True)
         self._son_de.setDisplayFormat("dd.MM.yyyy")
         self._son_de.setFixedHeight(30)
-        self._son_de.setFixedWidth(120)
+        self._son_de.setFixedWidth(130)
         self._son_de.setDate(QDate(today.year, today.month, today.day))
         self._son_de.setStyleSheet(_DE)
         fr.addWidget(self._son_de)
@@ -4215,10 +4587,11 @@ class FizikselPosDialog(QDialog):
         self._isyeri_lbl.setText("...")
         self._net_lbl.setText("...")
 
-        ilk_qd = self._ilk_de.date()
-        son_qd = self._son_de.date()
-        ilk_str = f"{ilk_qd.year():04d}-{ilk_qd.month():02d}-{ilk_qd.day():02d}"
-        son_str = f"{son_qd.year():04d}-{son_qd.month():02d}-{son_qd.day():02d}"
+        # Tablo hemen temizlenir — kullanıcı eski veri görmesin
+        self._tbl.setRowCount(0)
+
+        ilk_str = self._ilk_de.date().toString("yyyy-MM-dd")
+        son_str = self._son_de.date().toString("yyyy-MM-dd")
 
         result = get_hareketler(self._userid, ilk_str, son_str)
         self._listele_btn.setEnabled(True)

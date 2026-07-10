@@ -5488,8 +5488,13 @@ class WomsisExcelWorker(QThread):
 
                 self.progress.emit(f"📂  {sheet_name} işleniyor...")
 
-                # ── Veri Satırları ────────────────────────────────────────────
-                for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                # ── Veri Satırları (Ters Çevrilerek) ──────────────────────────
+                all_rows = list(ws.iter_rows(min_row=header_row + 1, values_only=True))
+                all_rows.reverse()  # Eskiden yeniye doğru işle
+                
+                bakiye_onceki = None
+
+                for row in all_rows:
                     if not row or all(v is None for v in row):
                         continue
 
@@ -5501,20 +5506,51 @@ class WomsisExcelWorker(QThread):
                     tarih_raw   = _get("TARİH", "")
                     aciklama    = str(_get("AÇIKLAMA", "") or "")
                     tutar_val   = _get("TUTAR", 0)
-                    banka_sube  = str(_get("BANKA/ŞUBE", "") or sheet_name)
+                    # ── BANKA/ŞUBE: Aynı şube adına sahip birden fazla hesap
+                    # (örn. İŞ BANKASI-1667134 ve İŞ BANKASI-1667311 her ikisi de
+                    # 'Türkiye İş Bankası / Sultanhamam/istanbul' döndürür).
+                    # Çakışmayı önlemek için HESAP NO (sheet_name'in son kısmı)
+                    # eklenerek banka_sube eşsiz hale getirilir.
+                    _raw_sube   = str(_get("BANKA/ŞUBE", "") or "").strip()
+                    _hesap_no   = str(_get("HESAP NO", "") or "").strip()
+                    if not _raw_sube:
+                        _raw_sube = sheet_name
+                    if _hesap_no and _hesap_no not in _raw_sube:
+                        banka_sube = f"{_raw_sube} [{_hesap_no}]"
+                    else:
+                        banka_sube = _raw_sube
                     karsi_unvan = str(_get("KARŞI TARAF ÜNVAN", "") or "")
                     dekont_no   = str(_get("DEKONT NO", "") or "")
+                    iban_val    = str(_get("IBAN", "") or "")
+                    hesap_turu  = str(_get("HESAP TÜRÜ", "") or "")
+                    bakiye_val  = _get("BAKİYE")
 
                     g_toplam += 1
 
-                    # Tutar parse
+                    # Parse values
                     try:
-                        tutar = round(float(str(tutar_val).replace(",", ".").replace(" ", "")), 2)
+                        tutar_excel = round(float(str(tutar_val).replace(",", ".").replace(" ", "")), 2)
                     except Exception:
                         err += 1; g_hata += 1; continue
 
-                    gelir_gider = "gelir" if tutar >= 0 else "gider"
-                    tutar_abs   = round(abs(tutar), 2)
+                    bakiye_float = None
+                    if bakiye_val is not None and str(bakiye_val).strip() != "":
+                        try:
+                            bakiye_float = round(float(str(bakiye_val).replace(",", ".").replace(" ", "")), 2)
+                        except Exception:
+                            pass
+
+                    # Gelir/Gider ve Tutar Hesaplama
+                    # Bakiye varsa ve önceki bakiye biliniyorsa farktan hesapla, yoksa Tutar kolonuna güven.
+                    if bakiye_float is not None and bakiye_onceki is not None:
+                        fark = round(bakiye_float - bakiye_onceki, 2)
+                        gelir_gider = "gelir" if fark >= 0 else "gider"
+                        tutar_abs = abs(fark)
+                    else:
+                        gelir_gider = "gelir" if tutar_excel >= 0 else "gider"
+                        tutar_abs = abs(tutar_excel)
+
+                    bakiye_onceki = bakiye_float
 
                     # Tarih dönüşümü DD/MM/YYYY → YYYY-MM-DD
                     tarih_str = ""
@@ -5529,11 +5565,15 @@ class WomsisExcelWorker(QThread):
                         if not tarih_str:
                             tarih_str = t
 
-                    # womsisKey
-                    womsis_key = str(hareket_id) if hareket_id else f"{sheet_name}_{tarih_str}_{tutar_abs}"
+                    # womsisKey — HESAP NO prefix ile farklı hesaplar ayrışır
+                    # (Örn: 1667134_13245 ≠ 1667311_13245)
+                    _key_prefix = _hesap_no if _hesap_no else sheet_name
+                    if hareket_id:
+                        womsis_key = f"{_key_prefix}_{hareket_id}"
+                    else:
+                        womsis_key = f"{sheet_name}_{tarih_str}_{tutar_abs}"
 
                     # ── Mükerrer Kontrol (3 kademe) ───────────────────────────
-                    # Kademe 1: HAREKET ID (womsiskey) — womsis_banka tablosunda ara
                     exists = None
                     try:
                         exists = conn.execute(
@@ -5543,10 +5583,6 @@ class WomsisExcelWorker(QThread):
                     except Exception:
                         exists = None
 
-
-                    # Kademe 2: DEKONT NO + TARİH + TUTAR
-                    # (Aynı DEKONT NO aynı günde farklı tutarlı işlemler olabilir,
-                    #  tutar da kontrol edilmezse yanlış mükerrer tespiti yapılır.)
                     if not exists and dekont_no and dekont_no not in ("-", ""):
                         try:
                             exists = conn.execute(
@@ -5561,12 +5597,6 @@ class WomsisExcelWorker(QThread):
                             ).fetchone()
                         except Exception:
                             exists = None
-
-
-                    # Kademe 3 KALDIRILDI: tarih+açıklama+tutar eşleşmesi aynı gün
-                    # aynı tutarda birden fazla gerçek işlemi mükerrer sanıyordu.
-                    # HAREKET ID (Kademe 1) benzersiz tanımlayıcı olduğu için yeterli.
-
 
                     if exists:
                         skip += 1; g_atlanan += 1
@@ -5584,17 +5614,19 @@ class WomsisExcelWorker(QThread):
                         conn.execute(
                             """INSERT INTO womsis_banka
                                (tarih, aciklama, gelirgider, tutar,
-                                kaynak, womsiskey, userid, sube, faturaunvan)
-                               VALUES (?,?,?,?,?,?,?,?,?)""",
+                                kaynak, womsiskey, userid, sube, faturaunvan,
+                                bakiye, iban, hesap_turu, dekont_no)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (tarih_str, aciklama, gelir_gider, tutar_abs,
                              "vomsis_excel", womsis_key, self._userid,
-                             banka_sube, karsi_unvan)
+                             banka_sube, karsi_unvan,
+                             bakiye_float, iban_val, hesap_turu, dekont_no)
                         )
                         ins += 1; g_eklenen += 1
-                    except Exception:
+                    except Exception as e:
+                        print("Womsis DB Hata:", e)
                         err += 1; g_hata += 1
 
-                    # Her 50 satırda bir canlı güncelleme
                     if (ins + skip + err) % 50 == 0:
                         self.progress.emit(
                             f"⏳ {sheet_name}  —  "
