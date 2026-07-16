@@ -477,6 +477,7 @@ def get_fatura_detay_by_sube(userid: int, musterino: int, yil: int,
     """
     Belirli bir şubeye ait fatura listesi.
     Şube bilgisi genel_hesap_hareketleri.sube üzerinden JOIN ile gelir.
+    sube_adi=None        → tüm şubeler (filtre yok).
     sube_adi='(Şubesiz)' → eşleşmeyen faturalar.
     """
     _mod_col = _col("gelirGiderMod", "gelirgidermod")
@@ -485,7 +486,29 @@ def get_fatura_detay_by_sube(userid: int, musterino: int, yil: int,
     _ykl_col  = _col("yuklenmeTarihi", "yuklenmetarihi")
     conn = get_connection()
     try:
-        if sube_adi == "(Şubesiz)":
+        if sube_adi is None:
+            # Tüm şubeler — JOIN olmadan, tüm faturaları getir
+            rows = conn.execute(f"""
+                SELECT DISTINCT f.id, f.tarih, f.unvan, f.vergino,
+                       {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,
+                       {_col("f.faturano", "f.faturano")} AS faturano,
+                       f.toplam, f.{_mod_col} AS gelirgidermod,
+                       f.{_fmod_col} AS faturamod,
+                       f.{_fno_col} AS formno, f.kaynak,
+                       f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
+                       g.sube AS sube_adi, f.fatura
+                FROM faturalar f
+                LEFT JOIN genel_hesap_hareketleri g
+                    ON g.form_id = f.{_fno_col}
+                   AND g.userid  = f.userid
+                   AND g.musteri_no = ?
+                WHERE f.userid = ?
+                  AND {left4("f.tarih")} = ?
+                  AND f.{_mod_col} = ?
+                ORDER BY f.tarih DESC, f.id DESC
+                LIMIT 5000
+            """, (musterino, userid, str(yil), mod)).fetchall()
+        elif sube_adi == "(Şubesiz)":
             rows = conn.execute(f"""
                 SELECT DISTINCT f.id, f.tarih, f.unvan, f.vergino,
                        {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,

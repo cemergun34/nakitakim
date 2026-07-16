@@ -2977,6 +2977,12 @@ class BankalaBakiyeDialog(QDialog):
             padding: 6px 22px; font-weight: 700; font-size: 11px;
         }
         QPushButton#kapat_btn:hover { background: #1D4ED8; }
+        QPushButton#excel_btn {
+            background: #059669; color: white;
+            border: none; border-radius: 6px;
+            padding: 6px 18px; font-weight: 700; font-size: 11px;
+        }
+        QPushButton#excel_btn:hover { background: #047857; }
     """
 
     _SOL_COLS = ["Banka / Şube", "Kayıt", "Gelir (₺)", "Gider (₺)", "Net (₺)"]
@@ -3081,6 +3087,11 @@ class BankalaBakiyeDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
+        excel_btn = QPushButton("📥 Excel İndir")
+        excel_btn.setObjectName("excel_btn")
+        excel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        excel_btn.clicked.connect(self._export_excel)
+        btn_row.addWidget(excel_btn)
         kapat = QPushButton("  Kapat  ")
         kapat.setObjectName("kapat_btn")
         kapat.clicked.connect(self.accept)
@@ -3248,6 +3259,153 @@ class BankalaBakiyeDialog(QDialog):
             f"Gider: <b style='color:#DC2626'>{toplam_gider:,.2f} ₺</b>  "
             f"Net: <b style='color:{nc}'>{ns}{net:,.2f} ₺</b>"
         )
+
+    # ── Excel Export ──────────────────────────────────────────────────────────
+
+    def _export_excel(self):
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        import datetime
+
+        sube = self._secili_sube
+        rows = (
+            self._tum_data if sube is None
+            else [r for r in self._tum_data
+                  if (r.get("sube") or "(Şubesiz)") == sube]
+        )
+
+        dosya_adi = (
+            f"banka_hareketleri_{sube.replace('/', '-')}.xlsx"
+            if sube else "banka_hareketleri_tum.xlsx"
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Excel Olarak Kaydet", dosya_adi, "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Banka Hareketleri"
+
+            # Stiller
+            font_title   = Font(name="Segoe UI", size=13, bold=True,  color="FF1E3A8A")
+            font_sub     = Font(name="Segoe UI", size=9,  italic=True, color="FF4B5563")
+            font_header  = Font(name="Segoe UI", size=10, bold=True,  color="FFFFFFFF")
+            font_data    = Font(name="Segoe UI", size=10, color="FF1F2937")
+            font_total   = Font(name="Segoe UI", size=10, bold=True,  color="FF1F2937")
+            fill_header  = PatternFill(start_color="FF1E3A8A", end_color="FF1E3A8A", fill_type="solid")
+            fill_total   = PatternFill(start_color="FFEFF6FF", end_color="FFEFF6FF", fill_type="solid")
+            fill_gelir   = PatternFill(start_color="FFF0FDF4", end_color="FFF0FDF4", fill_type="solid")
+            fill_gider   = PatternFill(start_color="FFFFF5F5", end_color="FFFFF5F5", fill_type="solid")
+            border_thin  = Border(
+                left=Side(style="thin",  color="FFE5E7EB"),
+                right=Side(style="thin", color="FFE5E7EB"),
+                top=Side(style="thin",   color="FFE5E7EB"),
+                bottom=Side(style="thin",color="FFE5E7EB"),
+            )
+
+            simdi = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+            baslik = "Tüm Hareketler" if sube is None else sube
+
+            # Başlık satırları
+            ws.append([f"🏦 Bankalar — {baslik}"])
+            ws.cell(1, 1).font = font_title
+
+            ws.append([f"Oluşturulma: {simdi}  •  Kayıt: {len(rows):,}"])
+            ws.cell(2, 1).font = font_sub
+
+            ws.append([])  # boşluk
+
+            # Kolon başlıkları
+            headers = ["Tarih", "Açıklama", "Tür", "Tutar (₺)", "Karşı Taraf", "Kaynak", "Banka / Şube"]
+            ws.append(headers)
+            HDR_ROW = 4
+            for ci, _ in enumerate(headers, start=1):
+                cell = ws.cell(HDR_ROW, ci)
+                cell.font      = font_header
+                cell.fill      = fill_header
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border    = border_thin
+
+            # Veri satırları
+            toplam_gelir = toplam_gider = 0.0
+            for r in rows:
+                tur   = str(r.get("gelirgider", "") or "").lower()
+                tutar = float(r.get("tutar") or 0)
+                if tur == "gelir":
+                    toplam_gelir += tutar
+                else:
+                    toplam_gider += tutar
+
+                row_vals = [
+                    str(r.get("tarih", "") or ""),
+                    str(r.get("aciklama", "") or ""),
+                    str(r.get("gelirgider", "") or ""),
+                    tutar,
+                    str(r.get("faturaunvan", "") or ""),
+                    str(r.get("kaynak", "") or ""),
+                    str(r.get("sube", "") or "(Şubesiz)"),
+                ]
+                ws.append(row_vals)
+                ri = ws.max_row
+                bg = fill_gelir if tur == "gelir" else fill_gider
+                for ci in range(1, len(headers) + 1):
+                    cell = ws.cell(ri, ci)
+                    cell.font      = font_data
+                    cell.border    = border_thin
+                    cell.alignment = Alignment(vertical="center")
+                    cell.fill      = bg
+                    if ci == 4:  # Tutar
+                        cell.number_format = '#,##0.00 ₺'
+                        cell.alignment = Alignment(horizontal="right", vertical="center")
+
+            # Toplam satırı
+            net = toplam_gelir - toplam_gider
+            ws.append([])
+            tot_row = ws.max_row + 1
+            ws.cell(tot_row, 1, "TOPLAM")
+            ws.cell(tot_row, 3, "Gelir")
+            ws.cell(tot_row, 4, toplam_gelir)
+            ws.cell(tot_row + 1, 3, "Gider")
+            ws.cell(tot_row + 1, 4, toplam_gider)
+            ws.cell(tot_row + 2, 3, "Net")
+            ws.cell(tot_row + 2, 4, net)
+            for rr in [tot_row, tot_row + 1, tot_row + 2]:
+                for ci in range(1, 8):
+                    cell = ws.cell(rr, ci)
+                    cell.font   = font_total
+                    cell.fill   = fill_total
+                    cell.border = border_thin
+                    if ci == 4:
+                        cell.number_format = '#,##0.00 ₺'
+                        cell.alignment = Alignment(horizontal="right", vertical="center")
+
+            # Kolon genişlikleri
+            col_widths = [14, 42, 10, 16, 30, 14, 28]
+            for ci, w in enumerate(col_widths, start=1):
+                ws.column_dimensions[get_column_letter(ci)].width = w
+
+            # Satır yüksekliği (başlık)
+            ws.row_dimensions[HDR_ROW].height = 22
+
+            wb.save(path)
+
+            msg = QMessageBox(self)
+            msg.setWindowTitle("✅ Excel Hazır")
+            msg.setText(f"Excel dosyası başarıyla kaydedildi:\n{path}")
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.exec()
+
+        except Exception as exc:
+            import traceback
+            QMessageBox.critical(
+                self, "Hata",
+                f"Excel oluşturulurken hata:\n{exc}\n\n{traceback.format_exc()}"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

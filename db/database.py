@@ -193,21 +193,44 @@ class _PgWrapper:
 
     # ── Temel API ────────────────────────────────────────────────────────────
 
-    def execute(self, sql: str, params=()):
+    def execute(self, sql: str, params=(), _retry: bool = True):
+        import psycopg2
         import psycopg2.extras
-        sql = _to_pg_sql(sql)
-        cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-
-        cur.execute(sql, _sanitize_pg_params(params))
+        pg_sql = _to_pg_sql(sql)
+        try:
+            cur = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur.execute(pg_sql, _sanitize_pg_params(params))
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            # SSL kopukluğu veya bağlantı kesilmesi: yeniden bağlan ve tekrar dene
+            err_msg = str(exc).lower()
+            is_conn_err = any(k in err_msg for k in (
+                "ssl connection has been closed",
+                "connection is closed",
+                "server closed the connection",
+                "could not receive data from server",
+                "terminating connection",
+            ))
+            if _retry and is_conn_err:
+                print(f"[DB] Bağlantı koptu ({exc.__class__.__name__}), yeniden bağlanılıyor...")
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                _pg_local.conn = None
+                # Yeni bağlantı al ve wrapper'ı güncelle
+                new_wrapper = _get_pg_connection()
+                self._conn = new_wrapper._conn
+                return self.execute(sql, params, _retry=False)
+            raise
 
         wrapper = _PgCursor(cur, self._conn)
         wrapper.rowcount = cur.rowcount
 
         # lastrowid: psycopg2'de RETURNING yok ise lastval() dene
-        if sql.strip().upper().startswith("INSERT"):
+        if pg_sql.strip().upper().startswith("INSERT"):
             try:
                 # Önce RETURNING id var mı bak
-                if "RETURNING" in sql.upper():
+                if "RETURNING" in pg_sql.upper():
                     row = cur.fetchone()
                     if row:
                         wrapper.lastrowid = row[0]
@@ -307,6 +330,9 @@ def _get_sqlite_connection() -> sqlite3.Connection:
 
 _pg_local = threading.local()   # her thread için ayrı alan
 
+# Ping (SELECT 1) süresi sınırı — sık çağrılarda ağa gitmeyi önler
+_PG_PING_INTERVAL = 30.0   # saniye
+
 
 def _try_pg_connect(params: dict):
     """
@@ -333,6 +359,8 @@ def _try_pg_connect(params: dict):
 
 
 def _get_pg_connection() -> _PgWrapper:
+    import time
+
     try:
         import psycopg2
     except ImportError as exc:
@@ -343,11 +371,23 @@ def _get_pg_connection() -> _PgWrapper:
 
     from db.db_config import get_pg_params
 
-    # Mevcut bağlantı varsa sağlık kontrolü yap
+    # Mevcut bağlantı varsa hızlı yol: closed kontrolü + zaman aralıklı ping
     raw = getattr(_pg_local, "conn", None)
     if raw is not None and not raw.closed:
+        now = time.monotonic()
+        last_ping = getattr(_pg_local, "last_ping", 0.0)
+
+        if now - last_ping < _PG_PING_INTERVAL:
+            # Son ping yeni — ağa gitme, direkt kullan
+            return _PgWrapper(raw)
+
+        # Ping aralığı doldu — SSL katmanını gerçekten test et
         try:
             raw.rollback()
+            c = raw.cursor()
+            c.execute("SELECT 1")
+            c.close()
+            _pg_local.last_ping = now
             return _PgWrapper(raw)
         except Exception:
             try:
@@ -355,6 +395,7 @@ def _get_pg_connection() -> _PgWrapper:
             except Exception:
                 pass
             _pg_local.conn = None
+            _pg_local.last_ping = 0.0
 
     params = get_pg_params()
 

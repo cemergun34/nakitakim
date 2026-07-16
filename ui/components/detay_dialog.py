@@ -97,7 +97,8 @@ class DetayKarti(QFrame):
     ]
 
     def __init__(self, row: dict, index: int, gelir_field="toplam_gelir",
-                 gider_field="toplam_gider", tutar_field=None, parent=None):
+                 gider_field="toplam_gider", tutar_field=None,
+                 hepsi_mod: bool = False, parent=None):
         super().__init__(parent)
         self._row = row
         self._hovered = False
@@ -105,6 +106,46 @@ class DetayKarti(QFrame):
         self._c1, self._c2 = c1, c2
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(240, 120)
+
+        if hepsi_mod:
+            # Yatay kompakt görünüm (banner tarzı)
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(20, 8, 20, 8)
+            layout.setSpacing(24)
+
+            sube = str(row.get("sube_adi", "Hepsi"))
+            lbl_name = QLabel(sube)
+            lbl_name.setStyleSheet(
+                "color: white; font-size: 13px; font-weight: 700; background: transparent;"
+            )
+            layout.addWidget(lbl_name)
+            layout.addStretch()
+
+            gelir = float(row.get(gelir_field) or 0)
+            gider = float(row.get(gider_field) or 0)
+            net = gelir - gider
+            sign = "+" if net >= 0 else "-"
+            color = "white" if net >= 0 else "#FCA5A5"
+
+            for lbl_text, lbl_color, lbl_bg in [
+                (f"🟢 Gelir: {fmt_para(gelir)}", "#D1FAE5", "rgba(255,255,255,0.15)"),
+                (f"🔴 Gider: {fmt_para(gider)}", "#FEE2E2", "rgba(255,255,255,0.15)"),
+                (f"Net: {sign}{fmt_para(abs(net))}", color, "rgba(255,255,255,0.2)"),
+            ]:
+                pill = QLabel(lbl_text)
+                pill.setStyleSheet(
+                    f"color: {lbl_color}; font-size: 12px; font-weight: 700;"
+                    f"background: {lbl_bg}; border-radius: 6px; padding: 4px 10px;"
+                )
+                layout.addWidget(pill)
+
+            kayit = row.get("kayit_sayisi", 0)
+            lbl_hint = QLabel(f"{kayit} kayıt  •  Tıkla → hepsini gör")
+            lbl_hint.setStyleSheet(
+                "color: rgba(255,255,255,0.7); font-size: 10px; background: transparent;"
+            )
+            layout.addWidget(lbl_hint)
+            return
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 12)
@@ -703,7 +744,9 @@ class DetayDialog(QDialog):
         actual_rows = (num_cards + cols_per_row - 1) // cols_per_row if num_cards > 0 else 1
 
         self._ozet_width = actual_cols * card_w + (actual_cols - 1) * spacing + margin_x * 2
-        self._ozet_height = header_h + actual_rows * card_h + (actual_rows - 1) * spacing + margin_y * 2
+        # +1 satır "Hepsi" kartı için (72px yükseklik + spacing)
+        hepsi_h = 72 + spacing
+        self._ozet_height = header_h + hepsi_h + actual_rows * card_h + (actual_rows - 1) * spacing + margin_y * 2
         self.resize(self._ozet_width, self._ozet_height)
 
         root = QVBoxLayout(self)
@@ -769,6 +812,35 @@ class DetayDialog(QDialog):
         ozet_grid.setSpacing(16)
 
         cols_per_row = 4
+        # ── "Hepsi" (Tüm Şubeler) özel kartı ─────────────────────────────────
+        # Özet row'larından toplam hesapla
+        _hepsi_gelir = sum(float(r.get(gelir_field) or 0) for r in ozet_rows)
+        _hepsi_gider = sum(float(r.get(gider_field) or 0) for r in ozet_rows)
+        _hepsi_kayit = sum(int(r.get("kayit_sayisi") or 0) for r in ozet_rows)
+        _hepsi_row = {
+            "sube_adi": "⭐  Hepsi — Tüm Şubeler",
+            gelir_field: _hepsi_gelir,
+            gider_field: _hepsi_gider,
+            "kayit_sayisi": _hepsi_kayit,
+            "_hepsi": True,   # özel işaret
+        }
+        hepsi_kart = DetayKarti(_hepsi_row, 7,   # 7 → cyan-mavi renk
+                                gelir_field=gelir_field,
+                                gider_field=gider_field,
+                                tutar_field=tutar_field,
+                                hepsi_mod=True)
+        # "Hepsi" kartını tıklandığında None göndererek tetikle
+        hepsi_kart.clicked.connect(self._on_hepsi_kart_clicked)
+        # Grid'in ilk satırına tüm sütunları kapsayacak şekilde ekle;
+        # genişlik dinamik (Expanding), yükseklik 72px ile sınırlı
+        hepsi_kart.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        hepsi_kart.setMinimumWidth(0)
+        hepsi_kart.setMaximumWidth(16777215)  # QWIDGETSIZE_MAX
+        hepsi_kart.setFixedHeight(72)
+        ozet_grid.addWidget(hepsi_kart, 0, 0, 1, cols_per_row)
+
+        # Şube kartları bir alt satırdan başlasın (row_offset=1)
+        _row_offset = 1
         for idx, row in enumerate(ozet_rows):
             kart = DetayKarti(row, idx,
                               gelir_field=gelir_field,
@@ -776,7 +848,7 @@ class DetayDialog(QDialog):
                               tutar_field=tutar_field)
             kart.clicked.connect(self._on_kart_clicked)
             r, c = divmod(idx, cols_per_row)
-            ozet_grid.addWidget(kart, r, c)
+            ozet_grid.addWidget(kart, r + _row_offset, c)
 
         # Eğer boş sütunlar varsa, doldurucu ekle
         remainder = len(ozet_rows) % cols_per_row
@@ -785,7 +857,7 @@ class DetayDialog(QDialog):
                 spacer = QWidget()
                 spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
                 r_last = len(ozet_rows) // cols_per_row
-                ozet_grid.addWidget(spacer, r_last, remainder + i)
+                ozet_grid.addWidget(spacer, r_last + _row_offset, remainder + i)
 
         ozet_page.setWidget(ozet_inner)
         self._stack.addWidget(ozet_page)
@@ -1138,7 +1210,65 @@ class DetayDialog(QDialog):
         self._stack.setCurrentIndex(1)
         self.resize(1100, 680)
 
+    def _on_hepsi_kart_clicked(self, row: dict):
+        """Tüm şubeler kartına tıklandığında detay_fn(None) ile hepsini göster."""
+        gelir = float(row.get("toplam_gelir") or 0)
+        gider = float(row.get("toplam_gider") or 0)
+        kayit = int(row.get("kayit_sayisi") or 0)
+        net = gelir - gider
+
+        self._detay_sube_lbl.setText(f"⭐ Tüm Şubeler  ({kayit} kayıt)")
+        self._detay_gelir_lbl.setText(f"🟢 Gelir: {fmt_para(gelir)}")
+        self._detay_gider_lbl.setText(f"🔴 Gider: {fmt_para(gider)}")
+
+        if net >= 0:
+            self._detay_net_lbl.setText(f"💎 Net: +{fmt_para(net)}")
+            self._detay_net_lbl.setStyleSheet("""
+                color: #1E40AF; font-size: 13px; font-weight: 700;
+                padding: 8px 12px; background: #DBEAFE;
+                border-radius: 8px; border: 1px solid #BFDBFE;
+            """)
+        else:
+            self._detay_net_lbl.setText(f"⚠️ Net: -{fmt_para(abs(net))}")
+            self._detay_net_lbl.setStyleSheet("""
+                color: #B91C1C; font-size: 13px; font-weight: 700;
+                padding: 8px 12px; background: #FEE2E2;
+                border-radius: 8px; border: 1px solid #FCA5A5;
+            """)
+
+        # Filtreleri temizle
+        for le in self.filters:
+            le.blockSignals(True)
+            le.clear()
+            le.blockSignals(False)
+
+        self.combo_ay.blockSignals(True)
+        self.combo_ay.setCurrentIndex(0)   # Tüm Aylar
+        self.combo_ay.blockSignals(False)
+
+        self.combo_yil.blockSignals(True)
+        if self._default_yil is not None:
+            idx_y = self.combo_yil.findData(self._default_yil)
+            self.combo_yil.setCurrentIndex(idx_y if idx_y >= 0 else 0)
+        else:
+            self.combo_yil.setCurrentIndex(0)
+        self.combo_yil.blockSignals(False)
+
+        # Tüm faturaları yükle (sube_adi=None)
+        try:
+            rows = self._detay_fn(None)
+        except Exception as e:
+            rows = []
+            print(f"[DetayDialog] Hepsi veri yüklenemedi: {e}")
+
+        self._tablo.load_rows(rows)
+        self._back_btn.show()
+        self._title_lbl.setText(f"{self._baslik}  →  Tüm Şubeler")
+        self._stack.setCurrentIndex(1)
+        self.resize(1100, 680)
+
     def _show_ozet(self):
+
         self._back_btn.hide()
         self._title_lbl.setText(self._baslik)
         self._stack.setCurrentIndex(0)
