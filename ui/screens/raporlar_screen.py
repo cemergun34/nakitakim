@@ -56,7 +56,7 @@ class RaporlarScreen(QWidget):
         super().__init__(parent)
         self._user = user
         self._userid = user.get("GercekUserId", user.get("Kayitno", 1))
-        self._musterino = user.get("GercekUserId", user.get("Kayitno", 1))
+        self._musterino = user.get("musterino", user.get("GercekUserId", 1))
         self._yil = datetime.now().year
         self._setup_ui()
         self._load_data()

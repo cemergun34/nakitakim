@@ -35,12 +35,40 @@ def get_db_path() -> Path:
 
 def _to_pg_sql(sql: str) -> str:
     """sqlite3'ün ? parametresini psycopg2'nin %s parametresine çevirir.
+    Aynı zamanda SQLite'a özgü sözdizimi farklılıklarını da dönüştürür:
+      INSERT OR IGNORE INTO ...  →  INSERT INTO ... ON CONFLICT DO NOTHING
+      SELECT changes()           →  SELECT 0  (rowcount _PgCursor.rowcount ile okunur)
+      CURRENT_TIMESTAMP          →  korunur (PG'de de geçerli)
 
     Kurallar:
     1. String literalleri içindeki ? korunur.
     2. String literalleri içindeki % → %% (psycopg2 escape) olarak değiştirilir.
     3. String literalleri dışındaki ? → %s olarak değiştirilir.
     """
+    import re
+    # INSERT OR IGNORE INTO tablo → INSERT INTO tablo ... ON CONFLICT DO NOTHING
+    # Regex: satır başından bağımsız, büyük/küçük harf duyarsız
+    sql = re.sub(
+        r'(?i)\bINSERT\s+OR\s+IGNORE\s+INTO\b',
+        'INSERT INTO',
+        sql,
+    )
+    # ON CONFLICT DO NOTHING ekle — VALUES ... bloğunun sonuna
+    # Sadece INSERT INTO ... VALUES ... ise (ON CONFLICT yoksa) ekle
+    if re.search(r'(?i)\bINSERT\s+INTO\b', sql) and \
+       not re.search(r'(?i)\bON\s+CONFLICT\b', sql):
+        # VALUES bloğunun son parantezinden sonraki opsiyonel boşluk/satır sonu
+        # ve varsa RETURNING ifadesinden önce ekle
+        sql = re.sub(
+            r'(?i)(VALUES\s*\([^)]*(?:\([^)]*\)[^)]*)*\))\s*$',
+            r'\1 ON CONFLICT DO NOTHING',
+            sql.rstrip(),
+        )
+
+    # SELECT changes() → SELECT 0  (gerçek rowcount _PgCursor.rowcount üzerinden okunur)
+    sql = re.sub(r'(?i)\bSELECT\s+changes\(\)', 'SELECT 0', sql)
+
+    # ? → %s dönüşümü (string literalleri korunur)
     result = []
     in_str = False
     str_char = None
@@ -235,10 +263,19 @@ class _PgWrapper:
                     if row:
                         wrapper.lastrowid = row[0]
                 else:
-                    # SERIAL sütun varsa lastval() çalışır
+                    # SAVEPOINT kullan — lastval() ON CONFLICT DO NOTHING durumunda
+                    # exception verir ve transaction'ı aborted moduna alır.
+                    # SAVEPOINT ile bu exception'dan güvenle kurtuluruz.
                     lv_cur = self._conn.cursor()
-                    lv_cur.execute("SELECT lastval()")
-                    wrapper.lastrowid = lv_cur.fetchone()[0]
+                    lv_cur.execute("SAVEPOINT _lastval_sp")
+                    try:
+                        lv_cur.execute("SELECT lastval()")
+                        wrapper.lastrowid = lv_cur.fetchone()[0]
+                        lv_cur.execute("RELEASE SAVEPOINT _lastval_sp")
+                    except Exception:
+                        lv_cur.execute("ROLLBACK TO SAVEPOINT _lastval_sp")
+                        lv_cur.execute("RELEASE SAVEPOINT _lastval_sp")
+                        wrapper.lastrowid = None
                     lv_cur.close()
             except Exception:
                 wrapper.lastrowid = None

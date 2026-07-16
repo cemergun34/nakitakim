@@ -273,31 +273,54 @@ def google_sheets_aktar(
 
         # ─────────────────────────────────────────────────────────────────────
         # 1) KASA
-        # Şema: [0]Tarih [1]FormID [2]Şube [3]Kategori [4]Gelir [5]TeslimŞekli [6]İade
+        # Google Sheet şeması: [0]Tarih [1]FormID [2]Şube [3]Kategori [4]Gelir(₺) [5]TeslimŞekli [6]İade(₺)
+        # Satır 0: başlık (boş/özet), Satır 1: toplam özeti satırı → ikisi atlanır (rows[2:])
         # ─────────────────────────────────────────────────────────────────────
         if "kasa" in kaynaklar:
             emit("📥  KASA — Google Sheet indiriliyor...")
             try:
                 csv_raw = _csv_download(_KASA_URL, "Kasa")
                 rows    = _csv_parse(csv_raw)
-                emit(f"📊  KASA — {len(rows)-1} satır okundu, filtreleniyor...")
+                emit(f"📊  KASA — {len(rows)-2} satır okundu, filtreleniyor...")
 
                 batch = []
-                for row in rows[1:]:           # satır 0 başlık
+                for row in rows[2:]:           # satır 0=başlık, satır 1=toplam özeti → atla
                     tarih = (row[0] if len(row) > 0 else "").strip()
                     if not tarih or not _in_range(tarih, bas_tarih, bit_tarih):
                         continue
                     gelir_raw = (row[4] if len(row) > 4 else "").strip()
-                    if not gelir_raw:
+                    iade_r    = (row[6] if len(row) > 6 else "").strip()
+
+                    gelir = _parse_float(gelir_raw) or None
+                    gider = _parse_float(iade_r) or None
+
+                    # En az biri değer içermeli — ikisi de boşsa bu satır atla
+                    if not gelir and not gider:
                         continue
-                    gelir   = _parse_float(gelir_raw) or None
-                    iade_r  = (row[6] if len(row) > 6 else "").strip()
-                    gider   = _parse_float(iade_r) or None
-                    form_id = (row[1] if len(row) > 1 else "").strip()
-                    kat     = (row[3] if len(row) > 3 else "").strip()
+
+                    # form_id: boş / '-' / sadece tire-noise → None kaydet
+                    form_raw = (row[1] if len(row) > 1 else "").strip()
+                    if form_raw in ("", "-", "—", "None", "nan", "null"):
+                        form_id = None
+                    else:
+                        form_id = form_raw
+
+                    # Şube: sheet'ten oku, yoksa 'Merkez'
+                    sube_raw = (row[2] if len(row) > 2 else "").strip()
+                    sube = sube_raw if sube_raw and sube_raw not in ("-", "—") else "Merkez"
+
+                    # Kategori
+                    kat = (row[3] if len(row) > 3 else "").strip() or None
+
+                    # Teslim şekli: sheet'ten oku (kolon 5)
+                    teslim_raw = (row[5] if len(row) > 5 else "").strip()
+                    teslim = teslim_raw if teslim_raw and teslim_raw not in ("-", "—") else None
+
+
+
                     batch.append((
-                        tarih, _tarih_date(tarih), form_id, "Merkez", kat,
-                        None, None, None, "Nakit",
+                        tarih, _tarih_date(tarih), form_id, sube, kat,
+                        teslim, None, None, "Nakit",
                         gelir, gider, "kasa",
                         None, userid, musterino, now_str
                     ))
@@ -310,6 +333,7 @@ def google_sheets_aktar(
             except Exception as exc:
                 hatalar.append(f"KASA: {exc}")
                 emit(f"❌  KASA hatası: {exc}")
+
 
         # ─────────────────────────────────────────────────────────────────────
         # 2) GİDER

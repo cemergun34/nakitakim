@@ -95,6 +95,7 @@ def ensure_tables() -> None:
     """
     paytr, paytr_sync_log ve apisanalpos tablolarını oluşturur (yoksa).
     PHP: paytr_sync_chunk.php → CREATE TABLE IF NOT EXISTS bloğu.
+    PostgreSQL modunda sequence'ları da düzeltir (import sonrası pkey conflict'i önler).
     """
     conn = get_connection()
     try:
@@ -104,6 +105,45 @@ def ensure_tables() -> None:
         pass  # Tablolar zaten varsa devam et
     finally:
         conn.close()
+    _fix_pg_sequences()
+
+
+def _fix_pg_sequences() -> None:
+    """
+    PostgreSQL modunda paytr ilgili tabloların sequence'larını max(id) ile senkronize eder.
+    SQLite'da no-op.
+    """
+    try:
+        from db.db_config import get_mode
+        if get_mode() != "postgres":
+            return
+    except Exception:
+        return
+
+    conn = get_connection()
+    try:
+        raw = conn._conn  # type: ignore[attr-defined]
+        cur = raw.cursor()
+        for tablo, seq in [
+            ("paytr", "paytr_id_seq"),
+            ("paytr_sync_log", "paytr_sync_log_id_seq"),
+            ("apisanalpos", "apisanalpos_id_seq"),
+        ]:
+            try:
+                cur.execute(f"SELECT MAX(id) FROM {tablo}")
+                max_id = cur.fetchone()[0]
+                if max_id is not None:
+                    cur.execute("SELECT setval(%s, %s)", (seq, max_id))
+            except Exception:
+                pass
+        raw.commit()
+        cur.close()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +750,7 @@ def sync_chunk(
                         transactions = api_sonuc.get("list") or []
                         for t in transactions:
                             try:
-                                conn.execute(insert_sql, (
+                                cur = conn.execute(insert_sql, (
                                     userid,
                                     str(musterino),
                                     t.get("islem_tarihi", ""),
@@ -730,7 +770,7 @@ def sync_chunk(
                                     "",
                                     int(t.get("taksit") or 0),
                                 ))
-                                if conn.execute("SELECT changes()").fetchone()[0] > 0:
+                                if getattr(cur, "rowcount", 1) > 0:
                                     total_inserted += 1
                                 else:
                                     total_skipped += 1
@@ -885,11 +925,17 @@ def _paytr_api_request(post_data: dict) -> str:
     PHP: curl_exec() karşılığı.
     URL: https://www.paytr.com/rapor/islem-dokumu
     """
+    import ssl
     url = "https://www.paytr.com/rapor/islem-dokumu"
     data = urllib.parse.urlencode(post_data).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
         return resp.read().decode("utf-8")
 
 
@@ -898,12 +944,18 @@ def _paytr_api_request_with_code(post_data: dict) -> tuple[str, int]:
     PayTR API isteği yapar; (response_body, http_status_code) döndürür.
     PHP: curl_exec() + curl_getinfo(CURLINFO_HTTP_CODE) karşılığı.
     """
+    import ssl
     url = "https://www.paytr.com/rapor/islem-dokumu"
     data = urllib.parse.urlencode(post_data).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
             return resp.read().decode("utf-8"), resp.status
     except urllib.error.HTTPError as e:
         return e.read().decode("utf-8", errors="replace"), e.code

@@ -496,7 +496,7 @@ class WomsisPosIsleWorker(QThread):
 
     def __init__(self, api_base: str, app_key: str, app_secret: str,
                  start_dt: datetime.datetime, end_dt: datetime.datetime,
-                 userid: int):
+                 userid: int, musterino: int = 1):
         super().__init__()
         self._api_base   = api_base
         self._app_key    = app_key
@@ -504,6 +504,7 @@ class WomsisPosIsleWorker(QThread):
         self._start_dt   = start_dt
         self._end_dt     = end_dt
         self._userid     = userid
+        self._musterino  = musterino
 
     def run(self):
         try:
@@ -544,8 +545,8 @@ class WomsisPosIsleWorker(QThread):
                 bas_str_norm = self._start_dt.strftime("%Y-%m-%d")
                 bit_str_norm = self._end_dt.strftime("%Y-%m-%d")
                 conn.execute(
-                    "DELETE FROM womsi_pos WHERE userid=? AND islemtarihi >= ? AND islemtarihi <= ?",
-                    (self._userid, bas_str_norm, bit_str_norm)
+                    "DELETE FROM womsi_pos WHERE userid=? AND musterino=? AND islemtarihi >= ? AND islemtarihi <= ?",
+                    (self._userid, self._musterino, bas_str_norm, bit_str_norm)
                 )
                 conn.commit()
 
@@ -571,10 +572,10 @@ class WomsisPosIsleWorker(QThread):
 
                         conn.execute(
                             """INSERT INTO womsi_pos
-                               (userid, isyerino, islemtarihi, islemtutari,
+                               (userid, musterino, isyerino, islemtarihi, islemtutari,
                                 nettutar, isyeriucretitutar, islemtipi, kartno, brand, aciklama)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (self._userid, isyeri_no, islem_tarihi, islem_tutari,
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (self._userid, self._musterino, isyeri_no, islem_tarihi, islem_tutari,
                              net_tutar, isyeri_ucreti, islem_tipi, kart_no, brand, aciklama)
                         )
                         total_inserted += 1
@@ -604,11 +605,13 @@ class PaytrTopluIsleWorker(QThread):
     batch_done = pyqtSignal(int, int)
     finished = pyqtSignal(dict)
 
-    def __init__(self, start_dt: datetime.datetime, end_dt: datetime.datetime, userid: int):
+    def __init__(self, start_dt: datetime.datetime, end_dt: datetime.datetime,
+                 userid: int, musterino: str = ""):
         super().__init__()
-        self._start_dt = start_dt
-        self._end_dt   = end_dt
-        self._userid   = userid
+        self._start_dt  = start_dt
+        self._end_dt    = end_dt
+        self._userid    = userid
+        self._musterino = str(musterino)
 
     def run(self):
         from services.paytr_service import sync_chunk
@@ -625,6 +628,7 @@ class PaytrTopluIsleWorker(QThread):
         total_batches  = len(batches)
         total_inserted = 0
         total_skipped  = 0
+        tum_uyarilar: list[str] = []
 
         for i, (bs, be) in enumerate(batches):
             self.progress.emit(
@@ -633,23 +637,30 @@ class PaytrTopluIsleWorker(QThread):
             )
             result = sync_chunk(
                 userid=self._userid,
-                musterino="",
+                musterino=self._musterino,
                 chunk_start=bs,
                 chunk_end=be
             )
             if result.get("success"):
                 total_inserted += result.get("inserted", 0)
                 total_skipped  += result.get("skipped", 0)
+                # Uyarıları topla (API hataları vb.)
+                uyarilar = result.get("uyarilar", [])
+                if uyarilar:
+                    tum_uyarilar.extend(uyarilar)
             self.batch_done.emit(i + 1, total_batches)
 
-        self.finished.emit({
+        sonuc = {
             "success": True,
             "message": (
                 f"{total_inserted} yeni PayTR kaydı aktarıldı, "
                 f"{total_skipped} mevcut kayıt atlandı ({total_batches} parça)."
             ),
             "count": total_inserted
-        })
+        }
+        if tum_uyarilar:
+            sonuc["uyarilar"] = tum_uyarilar
+        self.finished.emit(sonuc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -946,7 +957,7 @@ class ManuelTopluIsleDialog(QDialog):
 
         self._worker = WomsisPosIsleWorker(
             self._api_base, self._app_key, self._app_secret,
-            start, end, self._userid
+            start, end, self._userid, musterino=self._musterino
         )
         self._worker.progress.connect(lambda m: self._show_status(m, "#1a3a5c"))
         self._worker.finished.connect(self._on_done)
@@ -962,7 +973,8 @@ class ManuelTopluIsleDialog(QDialog):
         self._show_status("⏳  PayTR sanal POS verileri çekiliyor...", "#374151")
         self._start_progress()
 
-        self._worker = PaytrTopluIsleWorker(start, end, self._userid)
+        self._worker = PaytrTopluIsleWorker(start, end, self._userid,
+                                            musterino=self._musterino)
         self._worker.progress.connect(lambda m: self._show_status(m, "#374151"))
         self._worker.batch_done.connect(
             lambda done, total: self._progress_bar.setValue(
@@ -1038,14 +1050,15 @@ class ManuelTopluIsleDialog(QDialog):
             self._show_status("📟  (2/4) Womsis POS İşleniyor...", "#1a3a5c")
             self._worker = WomsisPosIsleWorker(
                 self._api_base, self._app_key, self._app_secret,
-                start, end, self._userid
+                start, end, self._userid, musterino=self._musterino
             )
             self._worker.progress.connect(lambda m: self._show_status(m, "#1a3a5c"))
             self._worker.finished.connect(self._on_queue_step_done)
             self._worker.start()
         elif next_op == "paytr":
             self._show_status("💳  (3/4) PayTR Sanal POS İşleniyor...", "#374151")
-            self._worker = PaytrTopluIsleWorker(start, end, self._userid)
+            self._worker = PaytrTopluIsleWorker(start, end, self._userid,
+                                                musterino=self._musterino)
             self._worker.progress.connect(lambda m: self._show_status(m, "#374151"))
             self._worker.finished.connect(self._on_queue_step_done)
             self._worker.start()
@@ -1084,7 +1097,12 @@ class ManuelTopluIsleDialog(QDialog):
             self._worker.deleteLater()
             self._worker = None
         if result["success"]:
-            self._show_status(f"✅  {result['message']}", "#059669", ok=True)
+            msg = result['message']
+            uyarilar = result.get("uyarilar", [])
+            if uyarilar:
+                n = len(uyarilar)
+                msg += f"  |  ⚠️ {n} API uyarısı (bazı chunk'lar çekilememiş olabilir)"
+            self._show_status(f"✅  {msg}", "#059669", ok=True)
         else:
             self._show_status(f"❌  {result['message']}", "#dc2626", ok=False)
 
@@ -1509,9 +1527,10 @@ class VomsisCard(QFrame):
     Butonlar: Kontrol Et | VOMSİS İşle (tarih aralığı seçerek)
     """
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
-        self._userid  = userid
+        self._userid    = userid
+        self._musterino = musterino
         self._test_worker: VomsisTestWorker | None = None
         self._isle_worker: VomsisIsleWorker | None = None
         self.setStyleSheet(
@@ -1961,6 +1980,7 @@ class VomsisCard(QFrame):
         seckey = self._sec_inp.text().strip()
         dlg = ManuelTopluIsleDialog(
             userid=self._userid,
+            musterino=self._musterino,
             api_base=url,
             app_key=appkey,
             app_secret=seckey,
@@ -3847,7 +3867,7 @@ class AyarlarScreen(QWidget):
         super().__init__(parent)
         self._user = user
         self._userid    = user.get("GercekUserId", user.get("Kayitno", 1))
-        self._musterino = user.get("GercekUserId", user.get("Kayitno", 1))
+        self._musterino = user.get("musterino", user.get("GercekUserId", 1))
         self._setup_ui()
 
     def _setup_ui(self):
@@ -3920,7 +3940,7 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._yonetim_card)
 
         # VOMSİS API kartı — Fatura Yönetim'in altında
-        self._vomsis_card = VomsisCard(self._userid)
+        self._vomsis_card = VomsisCard(self._userid, musterino=self._musterino)
         self._content_layout.addWidget(self._vomsis_card)
 
         # Moy kartı — VOMSİS'in altında
@@ -4729,7 +4749,7 @@ class AyarlarScreen(QWidget):
         super().__init__(parent)
         self._user = user
         self._userid    = user.get("GercekUserId", user.get("Kayitno", 1))
-        self._musterino = user.get("GercekUserId", user.get("Kayitno", 1))
+        self._musterino = user.get("musterino", user.get("GercekUserId", 1))
         self._setup_ui()
 
     def _setup_ui(self):
@@ -4806,7 +4826,7 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._yonetim_card)
 
         # VOMSİS API kartı — Fatura Yönetim'in altında
-        self._vomsis_card = VomsisCard(self._userid)
+        self._vomsis_card = VomsisCard(self._userid, musterino=self._musterino)
         self._content_layout.addWidget(self._vomsis_card)
 
         # Moy kartı — VOMSİS'in altında
