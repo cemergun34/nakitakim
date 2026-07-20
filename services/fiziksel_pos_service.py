@@ -107,7 +107,7 @@ def _norm_date(val: str) -> Optional[str]:
 #    PHP: womsisSonGuncellemeGoster() → #womsisDashIslem, #womsisDashOdeme, #womsisToplamBadge
 # ---------------------------------------------------------------------------
 
-def get_dashboard_ozet(userid: int) -> dict:
+def get_dashboard_ozet(userid: int, musterino: int) -> dict:
     """
     womsi_pos tablosundan toplam İşlem ve Net Tutar değerlerini döndürür.
     PHP: womsisSonGuncellemeGoster() → res.toplam_islem_fmt, res.toplam_net_fmt
@@ -121,8 +121,8 @@ def get_dashboard_ozet(userid: int) -> dict:
             "  COALESCE(SUM(isyeriucretitutar), 0) AS toplam_isyeri, "
             "  COALESCE(SUM(nettutar), 0)           AS toplam_net, "
             "  COUNT(*) AS kayit_sayisi "
-            "FROM womsi_pos WHERE userid = ?",
-            (userid,)
+            "FROM womsi_pos WHERE musterino = ? ",
+            (musterino,)
         ).fetchone()
         islem  = float(row[0] or 0)
         isyeri = float(row[1] or 0)
@@ -156,6 +156,7 @@ def get_dashboard_ozet(userid: int) -> dict:
 
 def get_hareketler(
     userid:    int,
+    musterino: int,
     ilk_tarih: str,   # 'YYYY-MM-DD'
     son_tarih: str,   # 'YYYY-MM-DD'
 ) -> dict:
@@ -192,8 +193,8 @@ def get_hareketler(
             "       islemtutari, islemtarihi, posno, "
             "       isyeriucretitutar, nettutar, brand, "
             "       kartno, islemtipi, aciklama "
-            "FROM womsi_pos WHERE userid = ?",
-            (userid,)
+            "FROM womsi_pos WHERE musterino = ?",
+            (musterino,)
         ).fetchall()
 
         toplam_islem  = 0.0

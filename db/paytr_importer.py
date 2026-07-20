@@ -73,8 +73,9 @@ def import_paytr(mysql_cur, sqlite_conn) -> tuple[int, int]:
         col_str = ", ".join(mapped_cols)
         sql = f"INSERT OR IGNORE INTO paytr ({col_str}) VALUES ({ph})"
         try:
-            sqlite_conn.execute(sql, vals)
-            if sqlite_conn.execute("SELECT changes()").fetchone()[0] > 0:
+            cur = sqlite_conn.execute(sql, vals)
+            changed = cur.rowcount if (hasattr(cur, "rowcount") and cur.rowcount != -1) else sqlite_conn.execute("SELECT changes()").fetchone()[0]
+            if changed > 0:
                 eklenen += 1
             else:
                 atlanan += 1

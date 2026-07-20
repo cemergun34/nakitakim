@@ -267,6 +267,67 @@ class BankalaBakiyeKPICard(KPICard):
         self._gider_lbl.setText(gider_fmt)
         self._alt_lbl.setText(alt_yazi)
 
+class KrediKartiKPICard(KPICard):
+    """
+    Kredi Kartları kartı — BankalaBakiyeKPICard ile aynı pattern.
+    """
+    def __init__(self, click_cb=None, parent=None):
+        super().__init__(
+            title="Kredi Kartları",
+            value="₺0,00",
+            color="#D97706",
+            color2="#B45309",
+            click_cb=click_cb,
+            parent=parent,
+        )
+        self.setFixedHeight(160)
+
+        # Net badge — mint yeşil
+        self.value_lbl.setStyleSheet(
+            "color: rgb(170,255,204); font-size:20px; font-weight:700;"
+            " background:transparent; letter-spacing:-0.5px;"
+        )
+        self.title_lbl.setStyleSheet(
+            "color:#ffffff; font-size:12px; font-weight:600; background:transparent;"
+        )
+
+        from PyQt6.QtWidgets import QHBoxLayout as _HBL, QVBoxLayout as _VBL, QLabel as _LBL
+        row_w = _HBL()
+        row_w.setSpacing(4)
+
+        def _blok(key: str, lbl: str, clr: str):
+            col = _VBL()
+            col.setSpacing(0)
+            hdr = _LBL(lbl)
+            hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hdr.setStyleSheet("color:rgba(255,255,255,.70);font-size:11px;background:transparent;")
+            val = _LBL("-")
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            val.setStyleSheet(f"color:{clr};font-size:12px;font-weight:600;background:transparent;")
+            col.addWidget(hdr)
+            col.addWidget(val)
+            setattr(self, key, val)
+            row_w.addLayout(col)
+
+        _blok("_harcama_lbl", "Harcama", "#ffb3b3")   # açık kırmızı
+        _blok("_odeme_lbl", "Ödeme",   "#ffe0a0")   # sarı
+
+        self._alt_lbl = _LBL("kredikartidata · tüm dönem")
+        self._alt_lbl.setStyleSheet(
+            "color:rgba(255,255,255,.80);font-size:10px;background:transparent;"
+        )
+
+        lay = self.layout()
+        lay.addLayout(row_w)
+        lay.addWidget(self._alt_lbl)
+
+    def set_kredi_karti(self, net_fmt: str, harcama_fmt: str, odeme_fmt: str,
+                     alt_yazi: str = "kredikartidata · tüm dönem"):
+        self.value_lbl.setText(net_fmt)
+        self._harcama_lbl.setText(harcama_fmt)
+        self._odeme_lbl.setText(odeme_fmt)
+        self._alt_lbl.setText(alt_yazi)
+
 
 class DashboardLoader(QThread):
     """Arka planda veri yükler — UI donmaması için."""
@@ -750,6 +811,10 @@ class DashboardScreen(QWidget):
                 card = BankalaBakiyeKPICard(
                     click_cb=lambda k=key: self._on_card_click(k),
                 )
+            elif key == "kredi_karti":
+                card = KrediKartiKPICard(
+                    click_cb=lambda k=key: self._on_card_click(k),
+                )
             else:
                 card = KPICard(
                     title=title,
@@ -1025,7 +1090,7 @@ class DashboardScreen(QWidget):
         fp_card = self._cards.get("fiziksel_pos")
         if isinstance(fp_card, FizikselPosKPICard):
             from services.fiziksel_pos_service import get_dashboard_ozet
-            fp = get_dashboard_ozet(self._userid)
+            fp = get_dashboard_ozet(self._userid, self._musterino)
             fp_card.set_fiziksel_pos(
                 net_fmt=fp.get("toplam_net_fmt",   "₺0,00"),
                 islem_fmt=fp.get("toplam_islem_fmt", "₺0,00"),
@@ -1042,9 +1107,11 @@ class DashboardScreen(QWidget):
         borc  = kk.get("borc", 0)
         odeme = kk.get("odeme", 0)
         net   = kk.get("net",   0)
-        c["kredi_karti"].set_value(
-            fmt_para(borc),
-            f"Harcama: {fmt_para(borc)}  Ödeme: {fmt_para(abs(odeme))}  Net: {fmt_para(net)}"
+        c["kredi_karti"].set_kredi_karti(
+            net_fmt=fmt_para(net),
+            harcama_fmt=fmt_para(borc),
+            odeme_fmt=fmt_para(abs(odeme)),
+            alt_yazi="kredikartidata"
         )
 
         # Genel Hesap
@@ -1144,7 +1211,7 @@ class DashboardScreen(QWidget):
             return
 
         elif key == "kredi_karti":
-            dlg = KrediKartiDialog(uid, yil, parent=self)
+            dlg = KrediKartiDialog(uid, self._musterino, yil, parent=self)
             dlg.exec()
             return
 
@@ -3443,8 +3510,8 @@ class KrediKartiDialog(QDialog):
             color: #1e293b;
         }
         QTableWidget::item:selected {
-            background: #bfdbfe;
-            color: #1e293b;
+            background: transparent;
+            color: inherit;
         }
         QTableWidget::item:alternate {
             background: #f0f7ff;
@@ -3458,6 +3525,41 @@ class KrediKartiDialog(QDialog):
             padding: 6px 4px;
             border: none;
             border-right: 1px solid #1d4ed8;
+        }
+    """
+
+    # Sol panel (ozet_tbl) için sarı/siyah başlık stili
+    _SOL_TBL_STYLE = """
+        QTableWidget {
+            background: white;
+            gridline-color: #e2e8f0;
+            font-size: 12px;
+            color: #1e293b;
+            border: 1px solid #fde047;
+            border-radius: 8px;
+            selection-background-color: #fde047;
+            selection-color: #000000;
+        }
+        QTableWidget::item {
+            color: #1e293b;
+            padding: 4px 6px;
+        }
+        QTableWidget::item:hover {
+            background: #fef9c3;
+            color: #000;
+        }
+        QTableWidget::item:selected {
+            background: #fde047;
+            color: #000000;
+        }
+        QHeaderView::section {
+            background: #fde047;
+            color: #000000;
+            font-weight: 700;
+            font-size: 11px;
+            padding: 6px 4px;
+            border: none;
+            border-right: 1px solid #f59e0b;
         }
     """
 
@@ -3491,13 +3593,17 @@ class KrediKartiDialog(QDialog):
         "QDateEdit::down-arrow{image:none;width:10px;height:10px;}"
     )
 
-    def __init__(self, userid: int, yil: int, parent=None):
+    def __init__(self, userid: int, musterino: int, yil: int, parent=None):
         super().__init__(parent)
         self._userid    = userid
+        self._musterino = musterino
         self._yil       = yil
         self._ozet_rows: list[dict] = []
         self._ekstre_rows: list[dict] = []
         self._secili_banka: str = ""
+        self._secili_hesapkodu: str = ""
+        self._secili_pdf_adi: str = ""
+        self._secili_row_idx: int = -1  # Sarı boyama için
 
         self.setWindowTitle("💳  Kredi Kartları — Detay")
         self.setMinimumSize(1160, 660)
@@ -3543,45 +3649,63 @@ class KrediKartiDialog(QDialog):
 
         # ── Sol Panel: Kart Özet Listesi ──
         sol = QFrame()
-        sol.setFixedWidth(310)
+        sol.setFixedWidth(360)
         sol.setStyleSheet(
             "background:white;border-radius:10px;"
-            "border:1.5px solid #bfdbfe;"
+            "border:1.5px solid #fde047;"
         )
         sol_lay = QVBoxLayout(sol)
         sol_lay.setContentsMargins(0, 0, 0, 0)
         sol_lay.setSpacing(0)
 
-        sol_hdr = QLabel("💳  Kayıtlı Kartlar")
+        # Sol panel başlık + Hepsi butonu
+        sol_hdr_row = QHBoxLayout()
+        sol_hdr_row.setContentsMargins(0, 0, 0, 0)
+        sol_hdr_row.setSpacing(0)
+        sol_hdr = QLabel("💳  Ekstre Dosyaları")
         sol_hdr.setFixedHeight(38)
         sol_hdr.setStyleSheet(
-            "background:#1e40af;color:white;font-size:13px;font-weight:700;"
-            "padding:0 12px;border-radius:9px 9px 0 0;"
+            "background:#fde047;color:#000000;font-size:13px;font-weight:700;"
+            "padding:0 12px;border-radius:9px 0 0 0;"
         )
-        sol_lay.addWidget(sol_hdr)
+        sol_hdr_row.addWidget(sol_hdr, 1)
+        self._hepsi_btn = QPushButton("★ Hepsi")
+        self._hepsi_btn.setFixedSize(72, 38)
+        self._hepsi_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hepsi_btn.setStyleSheet(
+            "QPushButton{background:#1e293b;color:#fde047;font-size:12px;font-weight:700;"
+            "border:none;border-radius:0 9px 0 0;}"
+            "QPushButton:hover{background:#0f172a;}"
+        )
+        self._hepsi_btn.clicked.connect(self._on_hepsi)
+        sol_hdr_row.addWidget(self._hepsi_btn)
+        sol_hdr_frame = QFrame()
+        sol_hdr_frame.setLayout(sol_hdr_row)
+        sol_lay.addWidget(sol_hdr_frame)
 
         self._ozet_tbl = QTableWidget()
-        self._ozet_tbl.setColumnCount(4)
-        self._ozet_tbl.setHorizontalHeaderLabels(["Kart / Banka", "Kayıt", "Harcama (₺)", "Net (₺)"])
+        self._ozet_tbl.setColumnCount(5)
+        self._ozet_tbl.setHorizontalHeaderLabels(["Ekstre Dosyası", "Dönem", "Kayıt", "Harcama (₺)", "Net (₺)"])
         self._ozet_tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._ozet_tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._ozet_tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._ozet_tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._ozet_tbl.verticalHeader().setVisible(False)
-        self._ozet_tbl.setAlternatingRowColors(True)
+        self._ozet_tbl.setAlternatingRowColors(False)
         self._ozet_tbl.setShowGrid(False)
         self._ozet_tbl.horizontalHeader().setStretchLastSection(True)
-        self._ozet_tbl.setColumnWidth(0, 130)
-        self._ozet_tbl.setColumnWidth(1, 42)
-        self._ozet_tbl.setColumnWidth(2, 90)
-        self._ozet_tbl.setStyleSheet(self._TBL_STYLE)
-        self._ozet_tbl.cellClicked.connect(self._on_kart_sec)
+        self._ozet_tbl.setColumnWidth(0, 110)
+        self._ozet_tbl.setColumnWidth(1, 75)
+        self._ozet_tbl.setColumnWidth(2, 38)
+        self._ozet_tbl.setColumnWidth(3, 85)
+        self._ozet_tbl.setStyleSheet(self._SOL_TBL_STYLE)
+        self._ozet_tbl.itemSelectionChanged.connect(self._on_secim_degisti)
         sol_lay.addWidget(self._ozet_tbl, 1)
 
         self._ozet_toplam_lbl = QLabel("")
         self._ozet_toplam_lbl.setFixedHeight(28)
         self._ozet_toplam_lbl.setStyleSheet(
-            "background:#dbeafe;border-top:1px solid #bfdbfe;"
-            "padding:0 10px;font-size:11px;color:#1e40af;font-weight:600;"
+            "background:#fef9c3;border-top:1px solid #fde047;"
+            "padding:0 10px;font-size:11px;color:#000000;font-weight:600;"
         )
         sol_lay.addWidget(self._ozet_toplam_lbl)
         body_lay.addWidget(sol)
@@ -3666,6 +3790,17 @@ class KrediKartiDialog(QDialog):
         self._filtre_btn.setEnabled(False)
         self._filtre_btn.clicked.connect(self._load_ekstre)
         filtre_lay.addWidget(self._filtre_btn)
+
+        self._excel_btn = QPushButton("📥 Excel İndir")
+        self._excel_btn.setFixedSize(110, 30)
+        self._excel_btn.setStyleSheet(
+            "QPushButton{background:#10b981;color:white;border:none;"
+            "border-radius:7px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:#059669;}"
+        )
+        self._excel_btn.clicked.connect(self._export_excel)
+        filtre_lay.addWidget(self._excel_btn)
+
         sag_lay.addWidget(filtre_frame)
 
         # Özet bantı
@@ -3698,6 +3833,7 @@ class KrediKartiDialog(QDialog):
         for i, (_, w) in enumerate(SUTUNLAR):
             self._ekstre_tbl.setColumnWidth(i, w)
         self._ekstre_tbl.setStyleSheet(self._TBL_STYLE)
+        self._ekstre_tbl.itemSelectionChanged.connect(self._hesapla_secili_toplam)
         sag_lay.addWidget(self._ekstre_tbl, 1)
 
         body_lay.addWidget(sag, 1)
@@ -3709,6 +3845,11 @@ class KrediKartiDialog(QDialog):
         alt.setStyleSheet("background:white;border-top:1px solid #e2e8f0;")
         a = QHBoxLayout(alt)
         a.setContentsMargins(16, 0, 16, 0)
+        
+        self._secim_toplam_lbl = QLabel("")
+        self._secim_toplam_lbl.setStyleSheet("font-size:13px; font-weight:700; color:#166534; padding-left:10px;")
+        a.addWidget(self._secim_toplam_lbl)
+        
         a.addStretch()
         kapat = QPushButton("✕  Kapat")
         kapat.setFixedSize(110, 32)
@@ -3748,9 +3889,53 @@ class KrediKartiDialog(QDialog):
 
     # ── Kart Özet Yükleme ─────────────────────────────────────────
 
+    def _load_pdf_listesi(self):
+        """PDF Dönemleri sekmesini doldurur."""
+        from services.dashboard_service import get_kredi_karti_pdf_listesi
+        from PyQt6.QtGui import QColor, QFont as QF
+        rows = get_kredi_karti_pdf_listesi(self._userid, self._musterino)
+        self._pdf_tbl.setRowCount(0)
+        toplam_kayit = 0
+        toplam_tutar = 0.0
+        for r in rows:
+            pdf_adi  = str(r.get("pdf_adi", "") or "")
+            kayit    = int(r.get("kayit_sayisi", 0) or 0)
+            tutar    = float(r.get("toplam", 0) or 0)
+            ilk      = str(r.get("ilk_tarih", "") or "")
+            son      = str(r.get("son_tarih", "") or "")
+            toplam_kayit += kayit
+            toplam_tutar += tutar
+
+            ri = self._pdf_tbl.rowCount()
+            self._pdf_tbl.insertRow(ri)
+            self._pdf_tbl.setRowHeight(ri, 26)
+
+            # PDF adı
+            it0 = QTableWidgetItem(pdf_adi)
+            it0.setToolTip(f"{pdf_adi}\n{ilk} → {son}")
+            it0.setForeground(QColor("#1e293b"))
+
+            # Kayıt sayısı
+            it1 = QTableWidgetItem(str(kayit))
+            it1.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            it1.setForeground(QColor("#374151"))
+
+            # Tutar
+            it2 = QTableWidgetItem(f"{tutar:,.0f}")
+            it2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            it2.setForeground(QColor("#1d4ed8"))
+            it2.setFont(QF("", -1, QF.Weight.Bold))
+
+            for ci, it in enumerate([it0, it1, it2]):
+                self._pdf_tbl.setItem(ri, ci, it)
+
+        self._pdf_sayac_lbl.setText(
+            f"📄 {len(rows)} PDF dosyası  •  Toplam {toplam_kayit} kayıt  •  {toplam_tutar:,.0f} ₺"
+        )
+
     def _load_ozet(self):
         from services.dashboard_service import get_kredi_karti_kart_ozet
-        self._ozet_rows = get_kredi_karti_kart_ozet(self._userid, self._yil)
+        self._ozet_rows = get_kredi_karti_kart_ozet(self._userid, self._musterino, self._yil)
         self._ozet_tbl.setSortingEnabled(False)
         self._ozet_tbl.setRowCount(0)
 
@@ -3759,43 +3944,73 @@ class KrediKartiDialog(QDialog):
         toplam_odeme = 0.0
         toplam_net   = 0.0
 
+        AY_ADI = {
+            "01": "Oca", "02": "Şub", "03": "Mar", "04": "Nis",
+            "05": "May", "06": "Haz", "07": "Tem", "08": "Ağu",
+            "09": "Eyl", "10": "Eki", "11": "Kas", "12": "Ara",
+        }
+
         for row in self._ozet_rows:
             ri = self._ozet_tbl.rowCount()
             self._ozet_tbl.insertRow(ri)
             self._ozet_tbl.setRowHeight(ri, 28)
 
-            banka  = row.get("Banka", "")
-            kayit  = int(row.get("kayit_sayisi", 0))
-            borc   = float(row.get("borc",  0))
-            odeme  = float(row.get("odeme", 0))
-            net    = float(row.get("net",   0))
+            # PDF adı ile göster (banka ise fallback)
+            pdf_adi    = row.get("pdf_adi") or row.get("banka", "") or ""
+            banka      = row.get("banka", "") or ""
+            kayit      = int(row.get("kayit_sayisi", 0))
+            borc       = float(row.get("borc",  0))
+            odeme      = float(row.get("odeme", 0))
+            net        = float(row.get("net",   0))
+            ilk_tarih  = str(row.get("ilk_tarih", "") or "")
+            son_tarih  = str(row.get("son_tarih",  "") or "")
             toplam_borc  += borc
             toplam_odeme += odeme
             toplam_net   += net
 
-            banka_kisa = banka[:22] + ("…" if len(banka) > 22 else "")
+            # Dönem: "Oca-Haz 2026" gibi
+            def _ay_yil(t: str) -> str:
+                """DD.MM.YYYY veya DD/MM/YYYY → Oca 2026"""
+                try:
+                    sep = "." if "." in t else "/"
+                    parts = t.split(sep)
+                    return AY_ADI.get(parts[1], parts[1]) + " " + parts[2]
+                except Exception:
+                    return t[:7] if t else ""
 
-            it0 = QTableWidgetItem(banka_kisa)
-            it0.setToolTip(banka)
+            ilk_str = _ay_yil(ilk_tarih)
+            son_str = _ay_yil(son_tarih)
+            donem   = ilk_str if ilk_str == son_str else f"{ilk_str}–{son_str}"
+
+            pdf_kisa = pdf_adi[:22] + ("…" if len(pdf_adi) > 22 else "")
+
+            it0 = QTableWidgetItem(pdf_kisa)
+            it0.setToolTip(pdf_adi)
             it0.setForeground(QColor("#1e293b"))
             it0.setData(Qt.ItemDataRole.UserRole, ri)
 
-            it1 = QTableWidgetItem(str(kayit))
+            it1 = QTableWidgetItem(donem)
             it1.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-            it1.setForeground(QColor("#374151"))
+            it1.setForeground(QColor("#6d28d9"))
+            it1.setFont(QF("", -1, QF.Weight.Bold))
+            it1.setToolTip(f"{ilk_tarih} → {son_tarih}")
 
-            it2 = QTableWidgetItem(f"{borc:,.0f}")
-            it2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            it2.setForeground(QColor("#1d4ed8"))
-            it2.setFont(QF("", -1, QF.Weight.Bold))
+            it2 = QTableWidgetItem(str(kayit))
+            it2.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            it2.setForeground(QColor("#374151"))
 
-            net_clr = "#dc2626" if net < 0 else ("#059669" if net > 0 else "#6b7280")
-            it3 = QTableWidgetItem(f"{net:,.0f}")
+            it3 = QTableWidgetItem(f"{borc:,.0f}")
             it3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            it3.setForeground(QColor(net_clr))
+            it3.setForeground(QColor("#1d4ed8"))
             it3.setFont(QF("", -1, QF.Weight.Bold))
 
-            for ci, it in enumerate([it0, it1, it2, it3]):
+            net_clr = "#dc2626" if net < 0 else ("#059669" if net > 0 else "#6b7280")
+            it4 = QTableWidgetItem(f"{net:,.0f}")
+            it4.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            it4.setForeground(QColor(net_clr))
+            it4.setFont(QF("", -1, QF.Weight.Bold))
+
+            for ci, it in enumerate([it0, it1, it2, it3, it4]):
                 self._ozet_tbl.setItem(ri, ci, it)
 
         self._ozet_tbl.setSortingEnabled(True)
@@ -3805,26 +4020,108 @@ class KrediKartiDialog(QDialog):
             f"Net: {toplam_net:,.0f} ₺"
         )
 
-    # ── Kart Seçimi ────────────────────────────────────────────
+    # ── Kart Seçimi ─────────────────────────────────────────────
+
+    def _on_hepsi(self):
+        """Tüm satırları seç → tüm PDF'lerin ekstresi birleşik görünsün."""
+        # itemSelectionChanged defalarca tetiklenmesin diye sinyali blokla
+        self._ozet_tbl.blockSignals(True)
+        self._ozet_tbl.selectAll()
+        self._ozet_tbl.blockSignals(False)
+        # Tek seferde çağır
+        self._on_secim_degisti()
+
+    def _on_secim_degisti(self):
+        """Seçili PDF satırlarının ekstre verilerini birleştirip gösterir."""
+        from PyQt6.QtGui import QColor as QC
+        selected_rows = sorted(set(idx.row() for idx in self._ozet_tbl.selectedIndexes()))
+        if not selected_rows:
+            return
+
+        # Seçili → sarı/siyah, diğerleri → beyaz
+        for ri in range(self._ozet_tbl.rowCount()):
+            selected = ri in selected_rows
+            for c in range(self._ozet_tbl.columnCount()):
+                it = self._ozet_tbl.item(ri, c)
+                if it:
+                    if selected:
+                        it.setBackground(QC("#fde047"))
+                        it.setForeground(QC("#000000"))
+                    else:
+                        it.setBackground(QC("white"))
+                        it.setForeground(QC("#1e293b"))
+
+        # Seçili PDF'lerin ekstre verilerini topla
+        from services.dashboard_service import get_kredi_karti_ekstre_detay
+        ilk_str = self._ilk_de.date().toString("dd.MM.yyyy")
+        son_str = self._son_de.date().toString("dd.MM.yyyy")
+
+        birlesik: list = []
+        etiketler = []
+        for ri in selected_rows:
+            if ri >= len(self._ozet_rows):
+                continue
+            row_data = self._ozet_rows[ri]
+            pdf_adi = row_data.get("pdf_adi") or ""
+            banka   = row_data.get("banka", "") or ""
+            satirlar = get_kredi_karti_ekstre_detay(
+                userid=self._userid, musterino=self._musterino,
+                banka=banka, yil=self._yil,
+                ilk_tarih=ilk_str, son_tarih=son_str,
+                pdf_adi=pdf_adi or None,
+            )
+            birlesik.extend(satirlar)
+            etiketler.append((pdf_adi or banka)[:30])
+
+        self._ekstre_rows = birlesik
+        label = ", ".join(etiketler[:3]) + ("…" if len(etiketler) > 3 else "")
+        self._sag_baslik.setText(f"💳  {label}")
+        self._filtre_btn.setEnabled(True)
+        self._doldur_ekstre(ilk_str, son_str)
 
     def _on_kart_sec(self, row: int, _col: int):
-        if row < 0 or row >= len(self._ozet_rows):
-            return
+        pass  # itemSelectionChanged ile yönetiliyor
+
+
+        if self._secili_row_idx >= 0:
+            for c in range(self._ozet_tbl.columnCount()):
+                it = self._ozet_tbl.item(self._secili_row_idx, c)
+                if it:
+                    it.setBackground(QColor("white"))
+                    it.setForeground(QColor("#1e293b"))
+                    f = it.font()
+                    f.setBold(False)
+                    it.setFont(f)
+        
+        # Yeni seçili satırı SARI / Siyah yap
+        self._secili_row_idx = row
+        for c in range(self._ozet_tbl.columnCount()):
+            it = self._ozet_tbl.item(row, c)
+            if it:
+                it.setBackground(QColor("#fde047"))
+                it.setForeground(QColor("#000000"))
+                f = it.font()
+                f.setBold(True)
+                it.setFont(f)
+        
         row_data = self._ozet_rows[row]
-        if row_data.get("Banka") == "sanal_pos":
+        if row_data.get("banka") == "sanal_pos":
             dlg = SanalPosDialog(self._userid, self._musterino, self._yil, self)
             dlg.exec()
         else:
-            self._secili_banka = row_data.get("Banka", "")
-            banka_kisa = self._secili_banka[:40] + ("…" if len(self._secili_banka) > 40 else "")
-            self._sag_baslik.setText(f"💳  {banka_kisa}")
+            self._secili_banka     = row_data.get("banka", "") or ""
+            self._secili_hesapkodu = ""
+            self._secili_pdf_adi   = row_data.get("pdf_adi") or ""
+            label = self._secili_pdf_adi or self._secili_banka
+            label_kisa = label[:45] + ("…" if len(label) > 45 else "")
+            self._sag_baslik.setText(f"💳  {label_kisa}")
             self._filtre_btn.setEnabled(True)
             self._load_ekstre()
 
     # ── Ekstre Yükleme ─────────────────────────────────────────
 
     def _load_ekstre(self):
-        if not self._secili_banka:
+        if not self._secili_pdf_adi and not self._secili_banka:
             return
 
         # Tablo hemen temizlenir — kullanıcı eski veri görmesin
@@ -3836,12 +4133,99 @@ class KrediKartiDialog(QDialog):
 
         self._ekstre_rows = get_kredi_karti_ekstre_detay(
             userid=self._userid,
+            musterino=self._musterino,
             banka=self._secili_banka,
             yil=self._yil,
             ilk_tarih=ilk_str,
             son_tarih=son_str,
+            pdf_adi=self._secili_pdf_adi or None,
         )
         self._doldur_ekstre(ilk_str, son_str)
+
+    def _hesapla_secili_toplam(self):
+        from utils.format import fmt_para
+        ranges = self._ekstre_tbl.selectedRanges()
+        toplam = 0.0
+        for r in ranges:
+            for row in range(r.topRow(), r.bottomRow() + 1):
+                item = self._ekstre_tbl.item(row, 2)
+                if item:
+                    # Item text looks like "1.234,56 ₺" or "-1.234,56 ₺"
+                    # Table uses standard python formatting: f"{val:,.2f}" -> "1,234.56"
+                    # So we just remove the comma to get "1234.56"
+                    txt = item.text().replace(",", "")
+                    try:
+                        toplam += float(txt)
+                    except ValueError:
+                        pass
+        
+        if toplam != 0:
+            self._secim_toplam_lbl.setText(f"Seçilen Toplam: {fmt_para(toplam)}")
+        else:
+            self._secim_toplam_lbl.setText("")
+
+    def _export_excel(self):
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        
+        if self._ekstre_tbl.rowCount() == 0:
+            QMessageBox.information(self, "Bilgi", "Dışa aktarılacak veri yok.")
+            return
+            
+        dosya_adi, _ = QFileDialog.getSaveFileName(
+            self, "Excel Olarak Kaydet", "kredi_karti_hareketleri.xlsx", "Excel Files (*.xlsx)"
+        )
+        if not dosya_adi:
+            return
+            
+        try:
+            import openpyxl
+            from openpyxl.styles import Font
+        except ImportError:
+            QMessageBox.critical(self, "Eksik Kütüphane", "openpyxl modülü eksik. Terminalde 'pip install openpyxl' yazarak yükleyebilirsiniz.")
+            return
+            
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Kredi Kartı Hareketleri"
+            
+            # Write headers
+            headers = [self._ekstre_tbl.horizontalHeaderItem(i).text() for i in range(self._ekstre_tbl.columnCount())]
+            ws.append(headers)
+            
+            # Style headers
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+            
+            # Write data
+            for r in range(self._ekstre_tbl.rowCount()):
+                row_data = []
+                for c in range(self._ekstre_tbl.columnCount()):
+                    it = self._ekstre_tbl.item(r, c)
+                    val = it.text() if it else ""
+                    
+                    if c == 2 and val:
+                        # Remove thousands separator to convert to float
+                        txt = val.replace(",", "")
+                        try:
+                            val = float(txt)
+                        except ValueError:
+                            pass
+                            
+                    row_data.append(val)
+                ws.append(row_data)
+                
+            # Tutar sütununu (C sütunu = 3. sütun) sayısal olarak formatla
+            for row in ws.iter_rows(min_row=2, min_col=3, max_col=3):
+                for cell in row:
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = '#,##0.00'
+                
+            wb.save(dosya_adi)
+            QMessageBox.information(self, "Başarılı", f"Excel dosyası başarıyla kaydedildi:\n{dosya_adi}")
+        except Exception as e:
+            import traceback
+            QMessageBox.critical(self, "Hata", f"Excel kaydedilemedi:\n{e}\n{traceback.format_exc()}")
 
     def _doldur_ekstre(self, ilk_str: str, son_str: str):
         from PyQt6.QtGui import QColor, QFont as QF
@@ -4751,7 +5135,7 @@ class FizikselPosDialog(QDialog):
         ilk_str = self._ilk_de.date().toString("yyyy-MM-dd")
         son_str = self._son_de.date().toString("yyyy-MM-dd")
 
-        result = get_hareketler(self._userid, ilk_str, son_str)
+        result = get_hareketler(self._userid, self._musterino, ilk_str, son_str)
         self._listele_btn.setEnabled(True)
 
         if not result.get("success"):

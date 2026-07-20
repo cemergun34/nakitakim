@@ -101,6 +101,14 @@ def get_pg_params() -> dict:
     }
     if cfg.get("pg_pass"):
         params["password"] = cfg["pg_pass"]
+
+    # Neon SNI Hatası (Müşteri Bilgisayarı Bağlantı Sorunu) Çözümü
+    host = cfg.get("pg_host", "")
+    if "neon.tech" in host:
+        # endpoint ID genelde host'un ilk parçasıdır (örn: ep-restless-bird-1234)
+        endpoint_id = host.split(".")[0]
+        params["options"] = f"project={endpoint_id}"
+
     return params
 
 

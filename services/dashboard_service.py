@@ -247,23 +247,33 @@ def get_sanal_pos_toplam(userid: int, yil: Optional[int] = None) -> dict:
         conn.close()
 
 
-def get_kredi_karti_toplam(userid: int, yil: Optional[int] = None) -> dict:
+def get_kredi_karti_toplam(userid: int, musterino: int, yil: Optional[int] = None, ilk_tarih: Optional[str] = None, son_tarih: Optional[str] = None) -> dict:
     """
     Kredi kartı KPI özeti.
-    tarih kolonu 'DD.MM.YYYY' → son 4 karakter yıl.
+    ilk_tarih/son_tarih verilirse ona göre filtreler.
     """
     yil = yil or _year()
     conn = get_connection()
     try:
+        from db.db_compat import tarih_iso_hareketler
+        
+        params = [str(userid), str(musterino)]
+        if ilk_tarih and son_tarih:
+            where_extra = f"AND ({tarih_iso_hareketler('tarih')} BETWEEN ? AND ?)"
+            params += [ilk_tarih, son_tarih]
+        else:
+            where_extra = f"AND {right4('tarih')} = ?"
+            params.append(str(yil))
+            
         row = conn.execute(f"""
             SELECT
                 COALESCE(SUM(CASE WHEN alinan_tutar1 >= 0 THEN alinan_tutar1 ELSE 0 END), 0) AS toplam_borc,
                 COALESCE(SUM(CASE WHEN alinan_tutar1 <  0 THEN alinan_tutar1 ELSE 0 END), 0) AS toplam_odeme,
                 COALESCE(SUM(alinan_tutar1), 0)                                               AS toplam_net
             FROM kredikartidata
-            WHERE userid = ?
-              AND {right4("tarih")} = ?
-        """, (str(userid), str(yil))).fetchone()
+            WHERE userid = ? AND musterino = ?
+              {where_extra}
+        """, params).fetchone()
         return {
             "borc":  float(row["toplam_borc"]  or 0),
             "odeme": float(row["toplam_odeme"] or 0),
@@ -275,50 +285,97 @@ def get_kredi_karti_toplam(userid: int, yil: Optional[int] = None) -> dict:
         conn.close()
 
 
-def get_kredi_karti_kart_ozet(userid: int, yil: Optional[int] = None) -> list[dict]:
+def get_kredi_karti_kart_ozet(userid: int, musterino: int, yil: Optional[int] = None) -> list[dict]:
     """
-    Kart bazlı özet — admin.php modal ilk seviyesi.
+    Her yüklenen PDF dosyası için bir satır döndürür.
+    Sol panelde her PDF ayrı satır olarak görünür.
     """
     yil = yil or _year()
     conn = get_connection()
     try:
-        rows = conn.execute(f"""
+        rows = conn.execute("""
             SELECT
-                Banka,
+                SUBSTRING(aciklama FROM 1 FOR POSITION('.pdf' IN LOWER(aciklama)) + 3) AS pdf_adi,
                 COUNT(*) AS kayit_sayisi,
+                MIN(tarih) AS ilk_tarih,
+                MAX(tarih) AS son_tarih,
                 COALESCE(SUM(CASE WHEN alinan_tutar1 >= 0 THEN alinan_tutar1 ELSE 0 END), 0) AS borc,
                 COALESCE(SUM(CASE WHEN alinan_tutar1 <  0 THEN alinan_tutar1 ELSE 0 END), 0) AS odeme,
                 COALESCE(SUM(alinan_tutar1), 0) AS net,
-                MIN(tarih) AS ilk_tarih,
-                MAX(tarih) AS son_tarih
+                MAX(banka) AS banka
             FROM kredikartidata
-            WHERE userid = ?
-              AND {right4("tarih")} = ?
-            GROUP BY Banka
-            ORDER BY borc DESC
-        """, (str(userid), str(yil))).fetchall()
-        return list(rows)
+            WHERE userid = %s AND musterino = %s
+              AND LOWER(aciklama) LIKE %s
+            GROUP BY SUBSTRING(aciklama FROM 1 FOR POSITION('.pdf' IN LOWER(aciklama)) + 3)
+            ORDER BY MIN(tarih) DESC
+        """, (str(userid), str(musterino), '%.pdf%')).fetchall()
+        return [dict(r) for r in rows]
     except Exception:
         return []
     finally:
         conn.close()
 
 
+def get_kredi_karti_pdf_listesi(userid: int, musterino: int) -> list[dict]:
+    """
+    Yüklenen PDF dosyalarını ve dönemlerini listeler.
+    aciklama alanında kaynak_dosya adı gömülüdür: '{pdf_adi} {aciklama}'
+    """
+    conn = get_connection()
+    try:
+        # PostgreSQL: regexp ile .pdf uzantılı dosya adını çıkar
+        rows = conn.execute("""
+            SELECT
+                REGEXP_REPLACE(aciklama, '\\s+.*$', '') AS pdf_adi,
+                COUNT(*)                                 AS kayit_sayisi,
+                MIN(tarih)                               AS ilk_tarih,
+                MAX(tarih)                               AS son_tarih,
+                COALESCE(SUM(alinan_tutar1), 0)          AS toplam,
+                MAX(banka)                               AS banka
+            FROM kredikartidata
+            WHERE userid = ? AND musterino = ?
+              AND aciklama ILIKE '%.pdf%'
+            GROUP BY REGEXP_REPLACE(aciklama, '\\s+.*$', '')
+            ORDER BY MIN(tarih) DESC
+        """, (str(userid), str(musterino))).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r) if hasattr(r, 'keys') else {
+                'pdf_adi':      r[0],
+                'kayit_sayisi': r[1],
+                'ilk_tarih':    r[2],
+                'son_tarih':    r[3],
+                'toplam':       r[4],
+                'banka':        r[5],
+            }
+            result.append(d)
+        return result
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+
+
 def get_kredi_karti_ekstre_detay(
     userid: int,
+    musterino: int,
     banka: str,
     yil: Optional[int] = None,
     ilk_tarih: Optional[str] = None,
     son_tarih: Optional[str] = None,
+    hesapkodu: Optional[str] = None,
+    pdf_adi: Optional[str] = None,
 ) -> list[dict]:
     """
     Belirli bir karta ait ekstre satırları.
-    Tarih filtresi DD.MM.YYYY formatında verilir.
+    pdf_adi verilirse o PDF'e ait satırlar filtrelenir.
     """
     yil = yil or _year()
     conn = get_connection()
     try:
-        params: list = [str(userid), banka]
+        params: list = [str(userid), str(musterino)]
 
         def tr2iso(d: str) -> str:
             """DD.MM.YYYY → YYYY-MM-DD"""
@@ -327,11 +384,25 @@ def get_kredi_karti_ekstre_detay(
 
         _iso = tarih_iso_hareketler("tarih")
 
-        if ilk_tarih and son_tarih:
-            where_extra = f"AND ({_iso} BETWEEN ? AND ?)"
+        # PDF adına göre filtrele — SUBSTRING ile GROUP BY'daki aynı ifadeyi kullan
+        if pdf_adi:
+            banka_where = "AND SUBSTRING(aciklama FROM 1 FOR POSITION('.pdf' IN LOWER(aciklama)) + 3) = %s"
+            params.append(pdf_adi)
+        elif hesapkodu:
+            banka_where = "AND hesapkodu = %s"
+            params.append(hesapkodu)
+        else:
+            banka_where = "AND Banka = %s AND (hesapkodu IS NULL OR hesapkodu = '')"
+            params.append(banka)
+
+        # PDF adına göre seçildiğinde tarih filtresi gerekmez — PDF adı zaten benzersiz
+        if pdf_adi:
+            where_extra = ""
+        elif ilk_tarih and son_tarih:
+            where_extra = f"AND ({_iso} BETWEEN %s AND %s)"
             params += [tr2iso(ilk_tarih), tr2iso(son_tarih)]
         else:
-            where_extra = f"AND {right4('tarih')} = ?"
+            where_extra = f"AND {right4('tarih')} = %s"
             params.append(str(yil))
 
         rows = conn.execute(f"""
@@ -341,16 +412,17 @@ def get_kredi_karti_ekstre_detay(
                 hesapKodu, womsiskey, islem, Banka,
                 CASE WHEN alinan_tutar1 < 0 THEN 'odeme' ELSE 'borc' END AS tur
             FROM kredikartidata
-            WHERE userid = ?
-              AND Banka = ?
+            WHERE userid = %s AND musterino = %s
+              {banka_where}
               {where_extra}
             ORDER BY {_iso} ASC, id ASC
         """, params).fetchall()
-        return list(rows)
+        return [dict(r) for r in rows]
     except Exception:
         return []
     finally:
         conn.close()
+
 
 
 def get_subeler(userid: int) -> list:
@@ -454,7 +526,7 @@ def get_all_dashboard_data(
         "maas_kira_smm":  get_maaş_kira_smm(userid, musterino, yil, _ghh=ghh),
         "kurum_odemeleri":get_kurum_odemeleri(userid, musterino, yil),
         "sanal_pos":      get_sanal_pos_toplam(userid, yil),
-        "kredi_karti":    get_kredi_karti_toplam(userid, yil),
+        "kredi_karti":    get_kredi_karti_toplam(userid, musterino, yil, ilk_tarih=ilk_tarih, son_tarih=son_tarih),
         "bankalar":       get_bankalar_toplam(userid),
         "monthly_chart":  get_monthly_comparison(userid, musterino, yil,
                                                   ilk_tarih=ilk_tarih, son_tarih=son_tarih),

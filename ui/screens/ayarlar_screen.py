@@ -3391,10 +3391,11 @@ class KrediKartYukleWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(dict)
 
-    def __init__(self, userid, dosya_yolları, hesap_kodu,
+    def __init__(self, userid, musterino, dosya_yolları, hesap_kodu,
                  banka_adi, dosya_turu, banka_adi_listesi):
         super().__init__()
         self._userid           = userid
+        self._musterino        = musterino
         self._dosya_yolları    = dosya_yolları
         self._hesap_kodu       = hesap_kodu
         self._banka_adi        = banka_adi
@@ -3405,6 +3406,7 @@ class KrediKartYukleWorker(QThread):
         from services.kredi_kart_service import yukle_dosyalar
         r = yukle_dosyalar(
             userid          = self._userid,
+            musterino       = self._musterino,
             dosya_yolları   = self._dosya_yolları,
             hesap_kodu      = self._hesap_kodu,
             banka_adi       = self._banka_adi,
@@ -3430,9 +3432,10 @@ class KrediKartCard(QFrame):
     - Sonuç gösterimi (durum etiketi)
     """
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int, parent=None):
         super().__init__(parent)
         self._userid       = userid
+        self._musterino    = musterino
         self._worker: KrediKartYukleWorker | None = None
         self._kart_listesi: list[dict] = []
 
@@ -3604,33 +3607,29 @@ class KrediKartCard(QFrame):
 
     def refresh(self):
         from services.kredi_kart_service import get_kart_listesi
-        r = get_kart_listesi(self._userid)
+        r = get_kart_listesi(self._userid, self._musterino)
         self._kart_listesi = r.get("data", [])
         self._fill_kart_combo()
 
     def _fill_kart_combo(self):
         self._kart_combo.blockSignals(True)
         self._kart_combo.clear()
-        self._kart_combo.addItem("Bir kart tanımı seçin", "")
-        eklenen: set = set()
+        self._kart_combo.addItem("Bir kart tanımı seçin", None)
         for item in self._kart_listesi:
-            label     = item.get("banka", "").split("-")[0].strip()
-            banka_adi = (item.get("bankaAdi") or label).strip()
-            key       = banka_adi.lower()
-            if key not in eklenen:
-                eklenen.add(key)
-                self._kart_combo.addItem(label, item.get("hesapKodu", ""))
-                self._kart_combo.setItemData(
-                    self._kart_combo.count() - 1,
-                    banka_adi, Qt.ItemDataRole.UserRole + 1
-                )
+            banka = (item.get("banka") or "").strip()
+            no    = (item.get("no") or "").strip()
+            display_text = f"{banka} {no}".strip()
+            self._kart_combo.addItem(display_text, item)
         self._kart_combo.blockSignals(False)
 
     def _get_secili_banka_adi(self) -> str:
         idx = self._kart_combo.currentIndex()
-        return "" if idx <= 0 else (
-            self._kart_combo.itemData(idx, Qt.ItemDataRole.UserRole + 1) or ""
-        )
+        if idx <= 0:
+            return ""
+        item = self._kart_combo.itemData(idx)
+        if not item or not isinstance(item, dict):
+            return ""
+        return (item.get("bankaadi") or item.get("banka") or "").strip()
 
     def _on_kart_changed(self):
         kart = self._kart_combo.currentData()
@@ -3656,9 +3655,9 @@ class KrediKartCard(QFrame):
         conn = _gc()
         try:
             conn.execute(
-                "INSERT INTO key_kartlari (banka, no, userid, hesapKodu, bankaAdi) "
-                "VALUES (?, '', ?, ?, ?)",
-                (banka_col_val, self._userid, hesap_kodu, banka_adi)
+                "INSERT INTO key_kartlari (banka, no, userid, hesapkodu, bankaadi, musterino) "
+                "VALUES (%s, '', %s, %s, %s, %s)",
+                (banka_col_val, self._userid, hesap_kodu, banka_adi, self._musterino)
             )
             conn.commit()
             self._show_durum(f"✅  '{banka_adi}' kartı kaydedildi.", "#059669")
@@ -3697,7 +3696,7 @@ class KrediKartCard(QFrame):
         self._set_busy(True)
         self._show_durum("⌛  Dosya yükleniyor...", "#2563eb")
         self._worker = KrediKartYukleWorker(
-            userid=self._userid, dosya_yolları=dosyalar,
+            userid=self._userid, musterino=self._musterino, dosya_yolları=dosyalar,
             hesap_kodu=hesap_kodu, banka_adi=banka_adi,
             dosya_turu=dosya_turu, banka_adi_listesi=[banka_adi] * len(dosyalar),
         )
@@ -3753,38 +3752,19 @@ class KrediKartCard(QFrame):
     def refresh(self):
         """Kart listesini DB'den yükler (PHP: guncelleKartlar() + nocache.php)."""
         from services.kredi_kart_service import get_kart_listesi
-        r = get_kart_listesi(self._userid)
+        r = get_kart_listesi(self._userid, self._musterino)
         self._kart_listesi = r.get("data", [])
         self._fill_kart_combo()
 
     def _fill_kart_combo(self):
-        """
-        PHP ayarlar.php #kartSelect: her key_kartlari satırı ayrı seçenek.
-        Etiket: 'BankaAdı — KartNo  (HesapKodu)'
-        data() = id (her zaman unique), UserRole+1 = hesapKodu, UserRole+2 = bankaAdi
-        """
         self._kart_combo.blockSignals(True)
         self._kart_combo.clear()
         self._kart_combo.addItem("Bir kart tanımı seçin", None)
-
         for item in self._kart_listesi:
-            kart_id   = item.get("id")
-            banka_adi = (item.get("bankaAdi") or item.get("banka") or "").strip()
-            no        = (item.get("no") or "").strip()
-            hesap     = (item.get("hesapKodu") or "").strip()
-
-            # Etiket: 'YapıKredi — 455359****918  (309.01.0003)'
-            etiket = banka_adi or "Kart"
-            if no:
-                etiket += f" — {no}"
-            if hesap:
-                etiket += f"  ({hesap})"
-
-            self._kart_combo.addItem(etiket, kart_id)
-            idx = self._kart_combo.count() - 1
-            self._kart_combo.setItemData(idx, hesap,     Qt.ItemDataRole.UserRole + 1)
-            self._kart_combo.setItemData(idx, banka_adi, Qt.ItemDataRole.UserRole + 2)
-
+            banka = (item.get("banka") or "").strip()
+            no    = (item.get("no") or "").strip()
+            display_text = f"{banka} {no}".strip()
+            self._kart_combo.addItem(display_text, item)  # item dict'in tamamını sakla
         self._kart_combo.blockSignals(False)
 
     def _get_secili_kart(self) -> dict:
@@ -3792,13 +3772,13 @@ class KrediKartCard(QFrame):
         idx = self._kart_combo.currentIndex()
         if idx <= 0:
             return {}
-        kart_id = self._kart_combo.currentData()
-        if kart_id is None:
+        item = self._kart_combo.itemData(idx)
+        if not item or not isinstance(item, dict):
             return {}
         return {
-            "id":        kart_id,
-            "hesapKodu": self._kart_combo.itemData(idx, Qt.ItemDataRole.UserRole + 1) or "",
-            "bankaAdi":  self._kart_combo.itemData(idx, Qt.ItemDataRole.UserRole + 2) or "",
+            "id":        item.get("id", ""),
+            "hesapKodu": (item.get("hesapkodu") or item.get("hesapKodu") or ""),
+            "bankaAdi":  (item.get("bankaadi") or item.get("bankaAdi") or item.get("banka") or ""),
         }
 
     def _get_secili_banka_adi(self) -> str:
@@ -3952,7 +3932,7 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._vergi_muhtasar_card)
 
         # Kredi Kartı kartı — Vergi Muhtasar'ın altında
-        self._kredi_kart_card = KrediKartCard(self._userid)
+        self._kredi_kart_card = KrediKartCard(self._userid, self._musterino)
         self._content_layout.addWidget(self._kredi_kart_card)
 
         # Veritabanı sekmesi
@@ -4838,7 +4818,7 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._vergi_muhtasar_card)
 
         # Kredi Kartı kartı — Vergi Muhtasar'ın altında
-        self._kredi_kart_card = KrediKartCard(self._userid)
+        self._kredi_kart_card = KrediKartCard(self._userid, self._musterino)
         self._content_layout.addWidget(self._kredi_kart_card)
 
         # Hesap Tanımları kartı — Eklentiler sekmesinde
@@ -6633,6 +6613,11 @@ class VeriTabaniTestWorker(QThread):
         )
         if self._pw:
             params["password"] = self._pw
+
+        # Neon SNI Hatası Çözümü
+        if "neon.tech" in self._host:
+            endpoint_id = self._host.split(".")[0]
+            params["options"] = f"project={endpoint_id}"
         try:
             conn = psycopg2.connect(**params)
             v = conn.server_version

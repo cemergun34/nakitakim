@@ -58,7 +58,7 @@ def _tr_float(val: str) -> Optional[float]:
 # Kart Listesi (PHP nocache.php → SELECT * FROM key_kartlari)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_kart_listesi(userid: int) -> dict:
+def get_kart_listesi(userid: int, musterino: int = 1) -> dict:
     """
     Kullanıcıya ait kayıtlı kredi kartı tanımlarını döndürür.
     PHP: ajax/nakit/nocache.php → SELECT * FROM key_kartlari
@@ -66,11 +66,19 @@ def get_kart_listesi(userid: int) -> dict:
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT id, banka, no, tag, hesapKodu, bankaAdi, iban "
-            "FROM key_kartlari WHERE userid = ? ORDER BY bankaAdi, banka",
-            (userid,)
+            "SELECT id, banka, no, tag, hesapkodu, bankaadi, iban "
+            "FROM key_kartlari WHERE userid = %s AND (musterino = %s OR musterino IS NULL) ORDER BY bankaadi, banka",
+            (userid, musterino)
         ).fetchall()
-        return {"success": True, "data": [dict(r) for r in rows]}
+        result = []
+        for r in rows:
+            d = dict(r)
+            # camelCase aliasları da ekle (UI uyumu için)
+            d["hesapKodu"] = d.get("hesapkodu", "")
+            d["bankaAdi"]  = d.get("bankaadi", "")
+            d["tag"]       = d.get("tag", "")
+            result.append(d)
+        return {"success": True, "data": result}
     except Exception as exc:
         return {"success": False, "message": str(exc), "data": []}
     finally:
@@ -83,6 +91,7 @@ def get_kart_listesi(userid: int) -> dict:
 
 def yukle_csv_yapıkredi(
     userid: int,
+    musterino: int,
     dosya_yolu: str,
     hesap_kodu: str,
     banka_adi: str,
@@ -138,7 +147,7 @@ def yukle_csv_yapıkredi(
         )
         check_sql = (
             "SELECT COUNT(*) FROM kredikartidata "
-            "WHERE userid=%s AND tarih=%s AND aciklama=%s AND alinan_tutar1=%s"
+            "WHERE userid=%s AND musterino=%s AND tarih=%s AND aciklama=%s AND alinan_tutar1=%s"
         )
 
         for line in lines:
@@ -176,7 +185,7 @@ def yukle_csv_yapıkredi(
 
             # Mükerrer kontrolü
             mukerrer_sayisi = conn.execute(
-                check_sql, (str(userid), islem_tarihi, islemler, tutar_float)
+                check_sql, (str(userid), str(musterino), islem_tarihi, islemler, tutar_float)
             ).fetchone()[0]
             if mukerrer_sayisi > 0:
                 mukerrer += 1
@@ -184,7 +193,7 @@ def yukle_csv_yapıkredi(
 
             try:
                 conn.execute(insert_sql, (
-                    str(userid), str(userid),
+                    str(userid), str(musterino),
                     islem_tarihi, islemler,
                     tutar_str_duzenli, hesap_kodu, tutar_float, banka_adi
                 ))
@@ -294,8 +303,8 @@ def _parse_pdf_fallback(dosya_yolu: str, banka: str = "") -> list[dict]:
         kaynak_dosya = os.path.basename(dosya_yolu)
 
         if banka == "isbank":
-            isbank_pattern = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+(\d+)\s+(.+?)\s+(-?\d{1,3}(?:\.\d{3})*(?:,\d+))(?:\s|$)")
-            isbank_start_pattern = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+(\d+)\s+(.+?)(?:\s+(-?\d{1,3}(?:\.\d{3})*(?:,\d+))(?:\s|$))?$")
+            isbank_pattern = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+(\d+)\s+(.+?)\s*(-?\d{1,3}(?:\.\d{3})*(?:,\d+))(?:\s|$)")
+            isbank_start_pattern = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+(\d+)\s+(.+?)(?:\s*(-?\d{1,3}(?:\.\d{3})*(?:,\d+))(?:\s|$))?$")
 
             with pdfplumber.open(dosya_yolu) as pdf:
                 pending_date = None
@@ -390,14 +399,13 @@ def _parse_pdf_fallback(dosya_yolu: str, banka: str = "") -> list[dict]:
                             gun, ay_str, yil, aciklama, tutar_raw = match.groups()
                             tarih = _tr_tarih_cevir(gun, ay_str, yil)
 
-                            # Ödeme satırlarını atla (+tutar)
-                            if tutar_raw.startswith("+"):
-                                continue
-
-                            tutar_str = tutar_raw.strip()
+                            is_odeme = tutar_raw.startswith("+")
+                            tutar_str = tutar_raw.replace('+', '').strip()
                             tutar = tutar_str.replace('.', '').replace(',', '.')
                             try:
                                 tutar_float = float(tutar)
+                                if is_odeme:
+                                    tutar_float = -tutar_float
                             except ValueError:
                                 continue
 
@@ -418,6 +426,7 @@ def _parse_pdf_fallback(dosya_yolu: str, banka: str = "") -> list[dict]:
 
 def _yukle_pdf_ortak(
     userid: int,
+    musterino: int,
     dosya_yolları: list[str],
     hesap_kodu: str,
     banka_adi: str,
@@ -440,7 +449,7 @@ def _yukle_pdf_ortak(
         )
         check_sql = (
             "SELECT COUNT(*) FROM kredikartidata "
-            "WHERE userid=%s AND tarih=%s AND alinan_tutar1=%s AND aciklama LIKE %s"
+            "WHERE userid=%s AND musterino=%s AND tarih=%s AND alinan_tutar1=%s AND aciklama LIKE %s"
         )
 
         for idx, dosya_yolu in enumerate(dosya_yolları):
@@ -478,7 +487,7 @@ def _yukle_pdf_ortak(
                 # Mükerrer kontrolü (PHP checkStmt karşılığı)
                 mukerrer_sayisi = conn.execute(
                     check_sql,
-                    (str(userid), islem_tarihi, tutar_float, f"%{aciklama_orj}%")
+                    (str(userid), str(musterino), islem_tarihi, tutar_float, f"%{aciklama_orj}%")
                 ).fetchone()[0]
                 if mukerrer_sayisi > 0:
                     mukerrer += 1
@@ -489,7 +498,7 @@ def _yukle_pdf_ortak(
                 try:
                     conn.execute("SAVEPOINT sp_insert")
                     conn.execute(insert_sql, (
-                        str(userid), str(userid),
+                        str(userid), str(musterino),
                         islem_tarihi, aciklama_birlesik,
                         tutar_str_duzenli, tutar_float,
                         hesap_kodu, womsiskey, dosya_banka_adi
@@ -533,6 +542,7 @@ def _yukle_pdf_ortak(
 
 def yukle_pdf_isbank(
     userid: int,
+    musterino: int,
     dosya_yolları: list[str],
     hesap_kodu: str,
     banka_adi: str,
@@ -540,13 +550,14 @@ def yukle_pdf_isbank(
 ) -> dict:
     """PHP krediKartVeriAktarPdf.php karşılığı — İş Bankası PDF."""
     return _yukle_pdf_ortak(
-        userid, dosya_yolları, hesap_kodu, banka_adi,
+        userid, musterino, dosya_yolları, hesap_kodu, banka_adi,
         banka_adi_liste or [], is_yapıkredi=False
     )
 
 
 def yukle_pdf_yapıkredi(
     userid: int,
+    musterino: int,
     dosya_yolları: list[str],
     hesap_kodu: str,
     banka_adi: str,
@@ -554,7 +565,7 @@ def yukle_pdf_yapıkredi(
 ) -> dict:
     """PHP krediKartVeriAktarPdfYK.php karşılığı — Yapı Kredi PDF."""
     return _yukle_pdf_ortak(
-        userid, dosya_yolları, hesap_kodu, banka_adi,
+        userid, musterino, dosya_yolları, hesap_kodu, banka_adi,
         banka_adi_liste or [], is_yapıkredi=True
     )
 
@@ -566,6 +577,7 @@ def yukle_pdf_yapıkredi(
 
 def yukle_dosyalar(
     userid: int,
+    musterino: int,
     dosya_yolları: list[str],
     hesap_kodu: str,
     banka_adi: str,
@@ -585,15 +597,15 @@ def yukle_dosyalar(
 
     if turu == "pdf":
         if is_yapıkredi:
-            return yukle_pdf_yapıkredi(userid, dosya_yolları, hesap_kodu, banka_adi, banka_adi_liste)
+            return yukle_pdf_yapıkredi(userid, musterino, dosya_yolları, hesap_kodu, banka_adi, banka_adi_liste)
         else:
-            return yukle_pdf_isbank(userid, dosya_yolları, hesap_kodu, banka_adi, banka_adi_liste)
+            return yukle_pdf_isbank(userid, musterino, dosya_yolları, hesap_kodu, banka_adi, banka_adi_liste)
 
     elif turu == "csv":
         # CSV için ilk dosyayı al (PHP tekli dosya destekler)
         if not dosya_yolları:
             return {"success": False, "errors": "Dosya seçilmedi.", "added": 0, "skipped": 0}
-        return yukle_csv_yapıkredi(userid, dosya_yolları[0], hesap_kodu, banka_adi)
+        return yukle_csv_yapıkredi(userid, musterino, dosya_yolları[0], hesap_kodu, banka_adi)
 
     elif turu == "xlsx":
         return {"success": False, "errors": "XLSX desteği henüz eklenmedi.", "added": 0, "skipped": 0}

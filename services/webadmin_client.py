@@ -29,6 +29,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Varsayılan bağlantı bilgileri ──────────────────────────────────────────────
+_DEFAULT_BASE_URL = "http://178.233.204.224:5050"
+_DEFAULT_API_KEY  = "nakit-akim-api-key-2024-secure"
+
 # ── Config: PostgreSQL webadmin_sirket_config tablosundan ──────────────────────
 
 def get_webadmin_config(userid: int) -> dict:
