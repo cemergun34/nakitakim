@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS odemesekli (
     odemesekliAck  TEXT NOT NULL,
     userid         INTEGER,
     durumModu      TEXT,
-    topluid        TEXT DEFAULT NULL
+    topluid        TEXT DEFAULT NULL,
+    musterino      INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_os_userid ON odemesekli(userid);
 """
@@ -44,19 +45,20 @@ def ensure_tables() -> None:
 
 # ── 1. Listeleme ─────────────────────────────────────────────────────────────
 
-def get_odeme_sekilleri(userid: int) -> dict:
+def get_odeme_sekilleri(userid: int, musterino: int = 1) -> dict:
     """
-    SQLite: SELECT id, odemesekliAck, durumModu FROM odemesekli WHERE userid = ? ORDER BY id DESC
+    SQLite: SELECT id, odemesekliAck, durumModu FROM odemesekli
+            WHERE userid = ? AND musterino = ? ORDER BY id DESC
     """
     ensure_tables()
     conn = get_connection()
     try:
         rows = conn.execute(
             "SELECT id, odemesekliAck, durumModu, topluid FROM odemesekli "
-            "WHERE userid = ? ORDER BY id DESC",
-            (userid,)
+            "WHERE userid = ? AND musterino = ? ORDER BY id DESC",
+            (userid, musterino)
         ).fetchall()
-        
+
         data = [
             {
                 "id": r["id"],
@@ -75,9 +77,10 @@ def get_odeme_sekilleri(userid: int) -> dict:
 
 # ── 2. Ekleme ────────────────────────────────────────────────────────────────
 
-def ekle_odeme_sekli(userid: int, ack: str, mod: str) -> dict:
+def ekle_odeme_sekli(userid: int, ack: str, mod: str, musterino: int = 1) -> dict:
     """
-    SQLite: INSERT INTO odemesekli (odemesekliAck, durumModu, userid) VALUES (?, ?, ?)
+    SQLite: INSERT INTO odemesekli (odemesekliAck, durumModu, userid, musterino)
+            VALUES (?, ?, ?, ?)
     """
     ack = ack.strip()
     mod = mod.strip().lower()
@@ -88,17 +91,19 @@ def ekle_odeme_sekli(userid: int, ack: str, mod: str) -> dict:
     ensure_tables()
     conn = get_connection()
     try:
-        # Duplicate kontrolü (aynı açıklama ve mod)
+        # Duplicate kontrolü (aynı açıklama, mod ve musterino)
         ex = conn.execute(
-            "SELECT id FROM odemesekli WHERE userid = ? AND odemesekliAck = ? AND durumModu = ?",
-            (userid, ack, mod)
+            "SELECT id FROM odemesekli "
+            "WHERE userid = ? AND odemesekliAck = ? AND durumModu = ? AND musterino = ?",
+            (userid, ack, mod, musterino)
         ).fetchone()
         if ex:
             return {"success": False, "message": "Bu ödeme şekli zaten kayıtlı."}
 
         conn.execute(
-            "INSERT INTO odemesekli (odemesekliAck, durumModu, userid) VALUES (?, ?, ?)",
-            (ack, mod, userid)
+            "INSERT INTO odemesekli (odemesekliAck, durumModu, userid, musterino) "
+            "VALUES (?, ?, ?, ?)",
+            (ack, mod, userid, musterino)
         )
         conn.commit()
         last_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -112,21 +117,24 @@ def ekle_odeme_sekli(userid: int, ack: str, mod: str) -> dict:
 
 # ── 3. Silme ─────────────────────────────────────────────────────────────────
 
-def sil_odeme_sekli(userid: int, os_id: int) -> dict:
+def sil_odeme_sekli(userid: int, os_id: int, musterino: int = 1) -> dict:
     """
-    SQLite: DELETE FROM odemesekli WHERE userid = ? AND id = ?
+    SQLite: DELETE FROM odemesekli WHERE userid = ? AND id = ? AND musterino = ?
     """
     ensure_tables()
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT id FROM odemesekli WHERE id = ? AND userid = ?",
-            (os_id, userid)
+            "SELECT id FROM odemesekli WHERE id = ? AND userid = ? AND musterino = ?",
+            (os_id, userid, musterino)
         ).fetchone()
         if not row:
             return {"success": False, "message": "Ödeme şekli bulunamadı."}
 
-        conn.execute("DELETE FROM odemesekli WHERE id = ? AND userid = ?", (os_id, userid))
+        conn.execute(
+            "DELETE FROM odemesekli WHERE id = ? AND userid = ? AND musterino = ?",
+            (os_id, userid, musterino)
+        )
         conn.commit()
         return {"success": True}
     except Exception as exc:
@@ -138,7 +146,7 @@ def sil_odeme_sekli(userid: int, os_id: int) -> dict:
 
 # ── 4. Toplu CSV yükleme ──────────────────────────────────────────────────────
 
-def toplu_yukle_csv(userid: int, dosya_yolu: str) -> dict:
+def toplu_yukle_csv(userid: int, dosya_yolu: str, musterino: int = 1) -> dict:
     """
     CSV format: odemesekliAck, durumModu
     """
@@ -151,22 +159,24 @@ def toplu_yukle_csv(userid: int, dosya_yolu: str) -> dict:
             for row in reader:
                 ack = (row.get("odemesekliAck") or "").strip()
                 mod = (row.get("durumModu") or "hepsi").strip().lower()
-                
+
                 if not ack:
                     skipped += 1
                     continue
-                    
+
                 ex = conn.execute(
-                    "SELECT id FROM odemesekli WHERE userid=? AND odemesekliAck=? AND durumModu=?",
-                    (userid, ack, mod)
+                    "SELECT id FROM odemesekli "
+                    "WHERE userid=? AND odemesekliAck=? AND durumModu=? AND musterino=?",
+                    (userid, ack, mod, musterino)
                 ).fetchone()
                 if ex:
                     skipped += 1
                     continue
-                    
+
                 conn.execute(
-                    "INSERT INTO odemesekli (odemesekliAck, durumModu, userid) VALUES (?,?,?)",
-                    (ack, mod, userid)
+                    "INSERT INTO odemesekli (odemesekliAck, durumModu, userid, musterino) "
+                    "VALUES (?,?,?,?)",
+                    (ack, mod, userid, musterino)
                 )
                 added += 1
         conn.commit()

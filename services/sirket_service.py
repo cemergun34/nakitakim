@@ -6,13 +6,21 @@ from __future__ import annotations
 from db.database import get_connection
 
 
-def get_sirket_profili(userid: int) -> dict:
+def get_sirket_profili(userid: int, musterino: int = 1) -> dict:
     """
-    Kullanıcıya ait şirket profilini döndürür.
+    Kullanıcıya ve müşteriye ait şirket profilini döndürür.
+    Önce userid + musterino ile dener; bulamazsa yalnızca userid ile fallback yapar.
     Kayıt yoksa boş dict döner.
     """
     conn = get_connection()
     try:
+        row = conn.execute(
+            "SELECT * FROM sirket_profili WHERE userid=? AND musterino=?",
+            (userid, musterino)
+        ).fetchone()
+        if row:
+            return dict(row)
+        # Geriye dönük uyumluluk: musterino kolonu henüz güncellenmemiş kayıtlar
         row = conn.execute(
             "SELECT * FROM sirket_profili WHERE userid=?", (userid,)
         ).fetchone()
@@ -23,7 +31,8 @@ def get_sirket_profili(userid: int) -> dict:
 
 def save_sirket_profili(userid: int, unvan: str, vergino: str,
                         tckn: str = "", vergidairesi: str = "",
-                        adres: str = "", il: str = "", ilce: str = "") -> bool:
+                        adres: str = "", il: str = "", ilce: str = "",
+                        musterino: int = 1) -> bool:
     """
     Şirket profilini kaydeder (INSERT OR REPLACE).
     Başarılıysa True döner.
@@ -32,8 +41,8 @@ def save_sirket_profili(userid: int, unvan: str, vergino: str,
     try:
         conn.execute("""
             INSERT INTO sirket_profili
-                (userid, unvan, vergino, tckn, vergidairesi, adres, il, ilce)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (userid, unvan, vergino, tckn, vergidairesi, adres, il, ilce, musterino)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(userid) DO UPDATE SET
                 unvan        = excluded.unvan,
                 vergino      = excluded.vergino,
@@ -41,9 +50,11 @@ def save_sirket_profili(userid: int, unvan: str, vergino: str,
                 vergidairesi = excluded.vergidairesi,
                 adres        = excluded.adres,
                 il           = excluded.il,
-                ilce         = excluded.ilce
+                ilce         = excluded.ilce,
+                musterino    = excluded.musterino
         """, (userid, unvan.strip(), vergino.strip(), tckn.strip(),
-              vergidairesi.strip(), adres.strip(), il.strip(), ilce.strip()))
+              vergidairesi.strip(), adres.strip(), il.strip(), ilce.strip(),
+              musterino))
         conn.commit()
         return True
     except Exception as exc:
@@ -56,7 +67,7 @@ def save_sirket_profili(userid: int, unvan: str, vergino: str,
 
 def detect_fatura_mod(xml_supplier_vkn: str, xml_supplier_tc: str,
                       xml_customer_vkn: str, xml_customer_tc: str,
-                      userid: int) -> str | None:
+                      userid: int, musterino: int = 1) -> str | None:
     """
     XML'deki taraf bilgilerini şirket profiliyle karşılaştırarak
     faturanın modunu otomatik tespit eder.
@@ -66,7 +77,7 @@ def detect_fatura_mod(xml_supplier_vkn: str, xml_supplier_tc: str,
         'gider'  → Şirket alan taraf  (Gelen / Alış faturası)
         None     → Eşleşme yok (atla / hata)
     """
-    profil = get_sirket_profili(userid)
+    profil = get_sirket_profili(userid, musterino)
     if not profil:
         return None  # Profil tanımlanmamış
 

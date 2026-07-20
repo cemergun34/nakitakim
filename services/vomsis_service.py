@@ -35,7 +35,7 @@ DEFAULT_API_URL = "https://developers.vomsis.com/api/v2"
 # Veritabanı işlemleri  (vomsisKaydet.php + vomsisBilgileriGetir.php)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_vomsis_bilgileri(userid: int) -> dict:
+def get_vomsis_bilgileri(userid: int, musterino: int = 1) -> dict:
     """
     vomsisBilgileri tablosundan kullanıcıya ait kayıtları döndürür.
     Kayıt yoksa boş değerlerle dict döner.
@@ -43,10 +43,18 @@ def get_vomsis_bilgileri(userid: int) -> dict:
     """
     conn = get_connection()
     try:
+        # Önce userid + musterino ile dene
         row = conn.execute(
-            "SELECT appkey, seckey, url FROM vomsisBilgileri WHERE userid=? LIMIT 1",
-            (userid,)
+            "SELECT appkey, seckey, url FROM vomsisbilgileri "
+            "WHERE userid=? AND musterino=? LIMIT 1",
+            (userid, musterino)
         ).fetchone()
+        # Geriye dönük uyumluluk: musterino henüz güncellenmemiş kayıtlar
+        if not row:
+            row = conn.execute(
+                "SELECT appkey, seckey, url FROM vomsisbilgileri WHERE userid=? LIMIT 1",
+                (userid,)
+            ).fetchone()
         if row:
             return {
                 "success": True,
@@ -63,7 +71,8 @@ def get_vomsis_bilgileri(userid: int) -> dict:
 
 
 def save_vomsis_bilgileri(userid: int, appkey: str, seckey: str,
-                          url: str = DEFAULT_API_URL) -> dict:
+                          url: str = DEFAULT_API_URL,
+                          musterino: int = 1) -> dict:
     """
     vomsisBilgileri tablosuna kayıt ekler veya günceller.
     PHP: ajax/ayarlar/vomsisKaydet.php
@@ -76,23 +85,30 @@ def save_vomsis_bilgileri(userid: int, appkey: str, seckey: str,
     conn = get_connection()
     try:
         existing = conn.execute(
-            "SELECT id FROM vomsisBilgileri WHERE userid=? LIMIT 1",
-            (userid,)
+            "SELECT id FROM vomsisbilgileri WHERE userid=? AND musterino=? LIMIT 1",
+            (userid, musterino)
         ).fetchone()
+        # Geriye dönük uyumluluk
+        if not existing:
+            existing = conn.execute(
+                "SELECT id FROM vomsisbilgileri WHERE userid=? LIMIT 1",
+                (userid,)
+            ).fetchone()
 
         if existing:
             conn.execute(
-                """UPDATE vomsisBilgileri
-                   SET appkey=?, seckey=?, url=?, guncelleme_tarihi=?
+                """UPDATE vomsisbilgileri
+                   SET appkey=?, seckey=?, url=?, guncelleme_tarihi=?, musterino=?
                    WHERE userid=?""",
-                (appkey, seckey, url, now, userid)
+                (appkey, seckey, url, now, musterino, userid)
             )
             message = "Vomsis bilgileri güncellendi."
         else:
             conn.execute(
-                """INSERT INTO vomsisBilgileri (userid, appkey, seckey, url, kayit_tarihi, guncelleme_tarihi)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (userid, appkey, seckey, url, now, now)
+                """INSERT INTO vomsisbilgileri
+                       (userid, appkey, seckey, url, kayit_tarihi, guncelleme_tarihi, musterino)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (userid, appkey, seckey, url, now, now, musterino)
             )
             message = "Vomsis bilgileri kaydedildi."
 

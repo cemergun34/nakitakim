@@ -584,6 +584,15 @@ def ensure_pg_ready() -> bool:
             conn.commit()
             print("[DB] PostgreSQL: superadmin kullanıcısı oluşturuldu.")
 
+        # 3. musterino migration — idempotent, hata olursa sessizce geç
+        try:
+            from db.migrations.add_musterino_columns import run_migration
+            mig_result = run_migration(verbose=False)
+            if mig_result.get("added"):
+                print(f"[DB] musterino migration: {mig_result['message']}")
+        except Exception as mig_exc:
+            print(f"[DB] musterino migration uyarı (atlandı): {mig_exc}")
+
         cur.close()
         conn.close()
         print("[DB] PostgreSQL hazır.")

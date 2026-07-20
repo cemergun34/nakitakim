@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Şubeler Servisi — PyQt6 backend
 ================================
@@ -17,15 +16,16 @@ from db.database import get_connection
 
 _SQL_INIT = """
 CREATE TABLE IF NOT EXISTS Subeler (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    subeAck  TEXT    NOT NULL,
-    userid   INTEGER NOT NULL,
-    topluid  TEXT    DEFAULT NULL
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    subeAck   TEXT    NOT NULL,
+    userid    INTEGER NOT NULL,
+    topluid   TEXT    DEFAULT NULL,
+    musterino INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_sub_userid ON Subeler(userid);
 """
 
-SEMA_SUTUNLAR = [subeack]          # CSV şema başlıkları
+SEMA_SUTUNLAR = ["subeAck"]          # CSV şema başlıkları
 SEMA_DOSYA_ADI = "subeler_sema.csv"  # PHP: toplu_sube_sema_pbtn dosya adı
 
 
@@ -40,7 +40,7 @@ def ensure_tables() -> None:
 
 # ── 1. Listeleme — PHP: subelerGetir.php ────────────────────────────────────
 
-def get_subeler(userid: int) -> dict:
+def get_subeler(userid: int, musterino: int = 1) -> dict:
     """
     PHP: SELECT * FROM subeler WHERE userid = :userId ORDER BY id DESC
     Döner: { 'success': bool, 'data': [{'id':…, 'subeAck':…}, …] }
@@ -50,11 +50,11 @@ def get_subeler(userid: int) -> dict:
     try:
         rows = conn.execute(
             "SELECT id, subeAck, topluid FROM subeler "
-            "WHERE userid = ? ORDER BY id DESC",
-            (userid,)
+            "WHERE userid = ? AND musterino = ? ORDER BY id DESC",
+            (userid, musterino)
         ).fetchall()
         data = [
-            {"id": r["id"], subeack: r[subeack] or "", "topluid": r["topluid"]}
+            {"id": r["id"], "subeAck": r["subeAck"] or "", "topluid": r["topluid"]}
             for r in rows
         ]
         return {"success": True, "data": data}
@@ -66,9 +66,9 @@ def get_subeler(userid: int) -> dict:
 
 # ── 2. Ekleme — PHP: parametreGuncelle.php (tablo='Subeler', sutun='subeAck') ──
 
-def ekle_sube(userid: int, sube_ack: str) -> dict:
+def ekle_sube(userid: int, sube_ack: str, musterino: int = 1) -> dict:
     """
-    PHP: INSERT INTO subeler (subeAck, userid) VALUES (:deger, :userid)
+    PHP: INSERT INTO subeler (subeAck, userid, musterino) VALUES (:deger, :userid, :musterino)
     """
     sube_ack = sube_ack.strip()
     if not sube_ack:
@@ -79,19 +79,19 @@ def ekle_sube(userid: int, sube_ack: str) -> dict:
     try:
         # Duplicate kontrolü
         ex = conn.execute(
-            "SELECT id FROM subeler WHERE userid = ? AND subeAck = ?",
-            (userid, sube_ack)
+            "SELECT id FROM subeler WHERE userid = ? AND subeAck = ? AND musterino = ?",
+            (userid, sube_ack, musterino)
         ).fetchone()
         if ex:
             return {"success": False, "message": "Bu şube adı zaten kayıtlı."}
 
         conn.execute(
-            "INSERT INTO subeler (subeAck, userid) VALUES (?, ?)",
-            (sube_ack, userid)
+            "INSERT INTO subeler (subeAck, userid, musterino) VALUES (?, ?, ?)",
+            (sube_ack, userid, musterino)
         )
         conn.commit()
         last_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        return {"success": True, "id": last_id, subeack: sube_ack}
+        return {"success": True, "id": last_id, "subeAck": sube_ack}
     except Exception as exc:
         conn.rollback()
         return {"success": False, "message": f"Hata: {exc}"}
@@ -101,21 +101,24 @@ def ekle_sube(userid: int, sube_ack: str) -> dict:
 
 # ── 3. Silme — PHP: parametreSil.php (tablo='Subeler') ─────────────────────
 
-def sil_sube(userid: int, sube_id: int) -> dict:
+def sil_sube(userid: int, sube_id: int, musterino: int = 1) -> dict:
     """
-    PHP: DELETE FROM subeler WHERE userid = :userid AND id = :id
+    PHP: DELETE FROM subeler WHERE userid = :userid AND id = :id AND musterino = :musterino
     """
     ensure_tables()
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT id FROM subeler WHERE id = ? AND userid = ?",
-            (sube_id, userid)
+            "SELECT id FROM subeler WHERE id = ? AND userid = ? AND musterino = ?",
+            (sube_id, userid, musterino)
         ).fetchone()
         if not row:
             return {"success": False, "message": "Şube bulunamadı."}
 
-        conn.execute("DELETE FROM subeler WHERE id = ? AND userid = ?", (sube_id, userid))
+        conn.execute(
+            "DELETE FROM subeler WHERE id = ? AND userid = ? AND musterino = ?",
+            (sube_id, userid, musterino)
+        )
         conn.commit()
         return {"success": True}
     except Exception as exc:
@@ -127,9 +130,9 @@ def sil_sube(userid: int, sube_id: int) -> dict:
 
 # ── 4. Toplu CSV yükleme — PHP: subelertoplubtn ─────────────────────────────
 
-def toplu_yukle_csv(userid: int, dosya_yolu: str) -> dict:
+def toplu_yukle_csv(userid: int, dosya_yolu: str, musterino: int = 1) -> dict:
     """
-    PHP: subelertoplubtn → CSV satır satır INSERT INTO subeler (subeAck, userid)
+    PHP: subelertoplubtn → CSV satır satır INSERT INTO subeler (subeAck, userid, musterino)
     CSV format: subeAck (tek sütun)
     """
     import csv
@@ -140,20 +143,20 @@ def toplu_yukle_csv(userid: int, dosya_yolu: str) -> dict:
             reader = csv.DictReader(f)
             added = skipped = 0
             for row in reader:
-                ack = (row.get(subeack) or "").strip()
+                ack = (row.get("subeAck") or "").strip()
                 if not ack:
                     skipped += 1
                     continue
                 ex = conn.execute(
-                    "SELECT id FROM subeler WHERE userid=? AND subeAck=?",
-                    (userid, ack)
+                    "SELECT id FROM subeler WHERE userid=? AND subeAck=? AND musterino=?",
+                    (userid, ack, musterino)
                 ).fetchone()
                 if ex:
                     skipped += 1
                     continue
                 conn.execute(
-                    "INSERT INTO subeler (subeAck, userid) VALUES (?,?)",
-                    (ack, userid)
+                    "INSERT INTO subeler (subeAck, userid, musterino) VALUES (?,?,?)",
+                    (ack, userid, musterino)
                 )
                 added += 1
         conn.commit()

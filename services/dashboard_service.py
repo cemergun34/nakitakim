@@ -472,7 +472,7 @@ def get_monthly_comparison(
         conn.close()
 
 
-def get_bankalar_toplam(userid: int) -> dict:
+def get_bankalar_toplam(userid: int, musterino: int = 1) -> dict:
     """womsis_banka tablosundan gelir/gider/net toplamı döndürür."""
     conn = get_connection()
     try:
@@ -482,8 +482,8 @@ def get_bankalar_toplam(userid: int) -> dict:
                 COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gider' THEN tutar ELSE 0 END), 0) AS gider,
                 COUNT(*) AS kayit
             FROM womsis_banka
-            WHERE userid = ?
-        """, (userid,)).fetchone()
+            WHERE userid = ? AND musterino = ?
+        """, (userid, musterino)).fetchone()
         gelir = float(row["gelir"] or 0) if row else 0.0
         gider = float(row["gider"] or 0) if row else 0.0
         return {"gelir": gelir, "gider": gider, "net": gelir - gider,
@@ -527,7 +527,7 @@ def get_all_dashboard_data(
         "kurum_odemeleri":get_kurum_odemeleri(userid, musterino, yil),
         "sanal_pos":      get_sanal_pos_toplam(userid, yil),
         "kredi_karti":    get_kredi_karti_toplam(userid, musterino, yil, ilk_tarih=ilk_tarih, son_tarih=son_tarih),
-        "bankalar":       get_bankalar_toplam(userid),
+        "bankalar":       get_bankalar_toplam(userid, musterino),
         "monthly_chart":  get_monthly_comparison(userid, musterino, yil,
                                                   ilk_tarih=ilk_tarih, son_tarih=son_tarih),
     }

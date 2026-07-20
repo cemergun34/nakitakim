@@ -35,10 +35,10 @@ _DEFAULT_API_KEY  = "nakit-akim-api-key-2024-secure"
 
 # ── Config: PostgreSQL webadmin_sirket_config tablosundan ──────────────────────
 
-def get_webadmin_config(userid: int) -> dict:
+def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
     """
     Şirket bazlı webadmin bağlantı ayarlarını PostgreSQL'den okur.
-    webadmin_sirket_config tablosunda userid eşleşen satırı döner.
+    webadmin_sirket_config tablosunda userid + musterino eşleşen satırı döner.
     Bulunamazsa güvenli varsayılanları döner.
     """
     defaults = {
@@ -54,16 +54,29 @@ def get_webadmin_config(userid: int) -> dict:
         if conn is None:
             return defaults
         cur = conn.cursor()
+        # Önce userid + musterino ile dene
         cur.execute(
             """
             SELECT webadmin_url, api_key, aktif, firmaadi
             FROM webadmin_sirket_config
-            WHERE userid = %s
+            WHERE userid = %s AND musterino = %s
             LIMIT 1
             """,
-            (userid,)
+            (userid, musterino)
         )
         row = cur.fetchone()
+        # Geriye dönük uyumluluk: musterino henüz eklenmemiş kayıtlar
+        if not row:
+            cur.execute(
+                """
+                SELECT webadmin_url, api_key, aktif, firmaadi
+                FROM webadmin_sirket_config
+                WHERE userid = %s
+                LIMIT 1
+                """,
+                (userid,)
+            )
+            row = cur.fetchone()
         cur.close()
         conn.close()
         if row:
@@ -251,17 +264,19 @@ try:
                      start_date: Optional[str] = None,
                      end_date:   Optional[str] = None,
                      base_url:   Optional[str] = None,
-                     api_key:    Optional[str] = None):
+                     api_key:    Optional[str] = None,
+                     musterino:  int = 1):
             super().__init__()
             self._userid     = userid
             self._start_date = start_date
             self._end_date   = end_date
             self._base_url   = base_url
             self._api_key    = api_key
+            self._musterino  = musterino
 
         def run(self):
-            # ── Şirket bazlı config'i DB'den oku ────────────────────────────
-            cfg = get_webadmin_config(self._userid)
+            # ── Şirket bazlı config'i DB'den oku ────────────────────────────────────
+            cfg = get_webadmin_config(self._userid, self._musterino)
 
             # Dışarıdan geçirilen base_url/api_key varsa onları kullan (override)
             base_url = self._base_url or cfg.get("base_url")

@@ -58,10 +58,11 @@ PG_TABLES: list[tuple[str, str]] = [
 
     ("subeler", """
         CREATE TABLE IF NOT EXISTS subeler (
-            id       INTEGER PRIMARY KEY,
-            subeack  TEXT NOT NULL,
-            userid   INTEGER,
-            topluid  TEXT
+            id         INTEGER PRIMARY KEY,
+            subeack    TEXT NOT NULL,
+            userid     INTEGER,
+            topluid    TEXT,
+            musterino  INTEGER DEFAULT 1
         )
     """),
 
@@ -80,7 +81,8 @@ PG_TABLES: list[tuple[str, str]] = [
             odemesekliack  TEXT NOT NULL,
             userid         INTEGER,
             durummodu      TEXT,
-            topluid        TEXT
+            topluid        TEXT,
+            musterino      INTEGER DEFAULT 1
         )
     """),
 
@@ -121,8 +123,8 @@ PG_TABLES: list[tuple[str, str]] = [
         )
     """),
 
-    ("womsis_banka", """
-        CREATE TABLE IF NOT EXISTS womsis_banka (
+    ("womsi_banka", """
+        CREATE TABLE IF NOT EXISTS womsi_banka (
             id              SERIAL PRIMARY KEY,
             tarih           TEXT,
             aciklama        TEXT,
@@ -137,7 +139,8 @@ PG_TABLES: list[tuple[str, str]] = [
             iban            TEXT,
             hesap_turu      TEXT,
             dekont_no       TEXT,
-            created_at      TEXT DEFAULT NOW()::TEXT
+            created_at      TEXT DEFAULT NOW()::TEXT,
+            musterino       INTEGER DEFAULT 1
         )
     """),
 
@@ -249,32 +252,35 @@ PG_TABLES: list[tuple[str, str]] = [
             vergidairesi TEXT             DEFAULT '',
             adres        TEXT             DEFAULT '',
             il           TEXT             DEFAULT '',
-            ilce         TEXT             DEFAULT ''
+            ilce         TEXT             DEFAULT '',
+            musterino    INTEGER          DEFAULT 1
         )
     """),
 
     ("webadmin_sirket_config", """
         CREATE TABLE IF NOT EXISTS webadmin_sirket_config (
-            id           SERIAL PRIMARY KEY,
-            userid       INTEGER NOT NULL UNIQUE,
-            firmaadi     TEXT    NOT NULL DEFAULT '',
-            webadmin_url TEXT    NOT NULL DEFAULT 'http://localhost:5050',
-            api_key      TEXT    NOT NULL DEFAULT '',
-            aktif        BOOLEAN NOT NULL DEFAULT TRUE,
-            kayit_tarihi TEXT    DEFAULT NOW()::TEXT,
-            guncelleme_tarihi TEXT DEFAULT NOW()::TEXT
+            id                SERIAL PRIMARY KEY,
+            userid            INTEGER NOT NULL UNIQUE,
+            firmaadi          TEXT    NOT NULL DEFAULT '',
+            webadmin_url      TEXT    NOT NULL DEFAULT 'http://localhost:5050',
+            api_key           TEXT    NOT NULL DEFAULT '',
+            aktif             BOOLEAN NOT NULL DEFAULT TRUE,
+            kayit_tarihi      TEXT    DEFAULT NOW()::TEXT,
+            guncelleme_tarihi TEXT    DEFAULT NOW()::TEXT,
+            musterino         INTEGER          DEFAULT 1
         )
     """),
 
     ("vomsisbilgileri", """
         CREATE TABLE IF NOT EXISTS vomsisbilgileri (
-            id       SERIAL PRIMARY KEY,
-            userid   INTEGER NOT NULL UNIQUE,
-            appkey   TEXT    NOT NULL DEFAULT '',
-            seckey   TEXT    NOT NULL DEFAULT '',
-            url      TEXT    NOT NULL DEFAULT 'https://developers.vomsis.com/api/v2',
-            kayit_tarihi TEXT DEFAULT NOW()::TEXT,
-            guncelleme_tarihi TEXT DEFAULT NOW()::TEXT
+            id                SERIAL PRIMARY KEY,
+            userid            INTEGER NOT NULL UNIQUE,
+            appkey            TEXT    NOT NULL DEFAULT '',
+            seckey            TEXT    NOT NULL DEFAULT '',
+            url               TEXT    NOT NULL DEFAULT 'https://developers.vomsis.com/api/v2',
+            kayit_tarihi      TEXT    DEFAULT NOW()::TEXT,
+            guncelleme_tarihi TEXT    DEFAULT NOW()::TEXT,
+            musterino         INTEGER          DEFAULT 1
         )
     """),
 

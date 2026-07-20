@@ -287,7 +287,7 @@ class VomsisIsleWorker(QThread):
 
     def __init__(self, api_base: str, app_key: str, app_secret: str,
                  start_dt: datetime.datetime, end_dt: datetime.datetime,
-                 userid: int):
+                 userid: int, musterino: int = 1):
         super().__init__()
         self._api_base   = api_base
         self._app_key    = app_key
@@ -295,6 +295,7 @@ class VomsisIsleWorker(QThread):
         self._start_dt   = start_dt
         self._end_dt     = end_dt
         self._userid     = userid
+        self._musterino  = musterino
 
     def run(self):
         from services.vomsis_service import (
@@ -339,18 +340,21 @@ class VomsisIsleWorker(QThread):
                 # Aynı VOMSİS kaydı zaten varsa atla
                 if vomsis_key:
                     exists = conn.execute(
-                        "SELECT id FROM womsis_banka WHERE womsiskey=? AND userid=? LIMIT 1",
-                        (str(vomsis_key), self._userid)
+                        "SELECT id FROM womsis_banka "
+                        "WHERE womsiskey=? AND userid=? AND musterino=? LIMIT 1",
+                        (str(vomsis_key), self._userid, self._musterino)
                     ).fetchone()
                     if exists:
                         continue
 
                 conn.execute(
                     """INSERT INTO womsis_banka
-                       (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey, userid, sube, faturaunvan)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey,
+                        userid, sube, faturaunvan, musterino)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (tarih_raw, aciklama, gelir_gider, abs(tutar), "vomsis",
-                     str(vomsis_key), self._userid, banka_sube, karsi_unvan)
+                     str(vomsis_key), self._userid, banka_sube, karsi_unvan,
+                     self._musterino)
                 )
                 count += 1
                 self.progress.emit(f"✔  {count} hareket işlendi...")
@@ -386,7 +390,7 @@ class TopluBankalarIsleWorker(QThread):
 
     def __init__(self, api_base: str, app_key: str, app_secret: str,
                  start_dt: datetime.datetime, end_dt: datetime.datetime,
-                 userid: int):
+                 userid: int, musterino: int = 1):
         super().__init__()
         self._api_base   = api_base
         self._app_key    = app_key
@@ -394,6 +398,7 @@ class TopluBankalarIsleWorker(QThread):
         self._start_dt   = start_dt
         self._end_dt     = end_dt
         self._userid     = userid
+        self._musterino  = musterino
 
     def run(self):
         try:
@@ -454,18 +459,21 @@ class TopluBankalarIsleWorker(QThread):
 
                         if vomsis_key:
                             exists = conn.execute(
-                                "SELECT id FROM womsis_banka WHERE womsiskey=? AND userid=? LIMIT 1",
-                                (str(vomsis_key), self._userid)
+                                "SELECT id FROM womsis_banka "
+                                "WHERE womsiskey=? AND userid=? AND musterino=? LIMIT 1",
+                                (str(vomsis_key), self._userid, self._musterino)
                             ).fetchone()
                             if exists:
                                 continue
 
                         conn.execute(
                             """INSERT INTO womsis_banka
-                               (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey, userid, sube, faturaunvan)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey,
+                                userid, sube, faturaunvan, musterino)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (tarih_raw, aciklama, gelir_gider, abs(tutar), "vomsis",
-                             str(vomsis_key), self._userid, banka_sube, karsi_unvan)
+                             str(vomsis_key), self._userid, banka_sube, karsi_unvan,
+                             self._musterino)
                         )
                         total_inserted += 1
                     conn.commit()
@@ -1727,7 +1735,7 @@ class VomsisCard(QFrame):
 
     def _load(self):
         from services.vomsis_service import get_vomsis_bilgileri, DEFAULT_API_URL
-        bilgi = get_vomsis_bilgileri(self._userid)
+        bilgi = get_vomsis_bilgileri(self._userid, self._musterino)
         self._url_inp.setText(bilgi.get("url") or DEFAULT_API_URL)
         self._key_inp.setText(bilgi.get("appkey") or "")
         self._sec_inp.setText(bilgi.get("seckey") or "")
@@ -1747,7 +1755,8 @@ class VomsisCard(QFrame):
             self._show_status("⚠️  Tüm alanları doldurunuz.", "#92400e")
             return
 
-        result = save_vomsis_bilgileri(self._userid, appkey, seckey, url)
+        result = save_vomsis_bilgileri(self._userid, appkey, seckey, url,
+                                        musterino=self._musterino)
         if result["success"]:
             self._show_status(f"✅  {result['message']}", "#059669")
         else:
@@ -1815,7 +1824,8 @@ class VomsisCard(QFrame):
         self._set_busy(True, "⚡  VOMSİS banka hareketleri alınıyor...")
 
         self._isle_worker = VomsisIsleWorker(
-            url, appkey, seckey, start_dt, end_dt, self._userid
+            url, appkey, seckey, start_dt, end_dt,
+            self._userid, musterino=self._musterino
         )
         self._isle_worker.progress.connect(
             lambda msg: self._show_status(msg, "#0891b2")
@@ -3251,9 +3261,10 @@ class VergiMuhtasarCard(QFrame):
 class SirketProfilCard(QFrame):
     """Hesap & Güvenlik sekmesindeki şirket profili formu."""
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid = userid
+        self._musterino = musterino
         self.setStyleSheet(
             "QFrame{background:white;border:1.5px solid #e2e8f0;"
             "border-radius:14px;}"
@@ -3346,7 +3357,7 @@ class SirketProfilCard(QFrame):
 
     def _load(self):
         from services.sirket_service import get_sirket_profili
-        p = get_sirket_profili(self._userid)
+        p = get_sirket_profili(self._userid, self._musterino)
         for key, inp in self._fields.items():
             inp.setText(p.get(key, ""))
 
@@ -3372,6 +3383,7 @@ class SirketProfilCard(QFrame):
             adres=self._fields["adres"].text().strip(),
             il=self._fields["il"].text().strip(),
             ilce=self._fields["ilce"].text().strip(),
+            musterino=self._musterino,
         )
         if ok:
             self._result_lbl.setText("✅  Şirket profili başarıyla kaydedildi.")
@@ -3901,7 +3913,7 @@ class AyarlarScreen(QWidget):
         root.addWidget(scroll)
 
         # Hesap & Güvenlik sekmesi — Şirket Profili
-        self._sirket_card = SirketProfilCard(self._userid)
+        self._sirket_card = SirketProfilCard(self._userid, musterino=self._musterino)
         self._content_layout.addWidget(self._sirket_card)
 
         # Manuel Toplu İşle kartı — EFatura'nın üstünde
@@ -4783,7 +4795,7 @@ class AyarlarScreen(QWidget):
         root.addWidget(scroll)
 
         # Hesap & Güvenlik sekmesi — Şirket Profili
-        self._sirket_card = SirketProfilCard(self._userid)
+        self._sirket_card = SirketProfilCard(self._userid, musterino=self._musterino)
         self._content_layout.addWidget(self._sirket_card)
 
         # Kullanıcı Yetkileri kartı — Şirket Profili'nin altında
