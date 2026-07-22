@@ -476,7 +476,9 @@ def get_monthly_comparison(
 
 
 def get_bankalar_toplam(userid: int, musterino: int = 1) -> dict:
-    """womsis_banka tablosundan gelir/gider/net toplamı döndürür."""
+    """womsis_banka tablosundan gelir/gider/net toplamı döndürür.
+    Not: userid filtresi yok — banka hareketleri tüm kullanıcılar için ortak,
+    musterino bazlı filtreleme yeterli."""
     conn = get_connection()
     try:
         row = conn.execute("""
@@ -485,8 +487,8 @@ def get_bankalar_toplam(userid: int, musterino: int = 1) -> dict:
                 COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gider' THEN tutar ELSE 0 END), 0) AS gider,
                 COUNT(*) AS kayit
             FROM womsis_banka
-            WHERE userid = ? AND musterino = ?
-        """, (userid, musterino)).fetchone()
+            WHERE musterino = ?
+        """, (musterino,)).fetchone()
         gelir = float(row["gelir"] or 0) if row else 0.0
         gider = float(row["gider"] or 0) if row else 0.0
         return {"gelir": gelir, "gider": gider, "net": gelir - gider,

@@ -226,10 +226,11 @@ def logout():
 @require_api_key
 def api_womsis_sync():
     try:
-        data   = request.get_json() or {}
-        userid = int(data.get('userid', 1))
-        start  = data.get('start_date') or (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-        end    = data.get('end_date')   or datetime.now().strftime('%Y-%m-%d')
+        data      = request.get_json() or {}
+        userid    = int(data.get('userid', 1))
+        musterino = int(data.get('musterino', 1))
+        start     = data.get('start_date') or (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        end       = data.get('end_date')   or datetime.now().strftime('%Y-%m-%d')
 
         creds = _get_womsis_creds(userid)
         if not creds:
@@ -247,10 +248,16 @@ def api_womsis_sync():
             start_dt, end_dt
         )
 
+        # ── DB'ye kaydet (womsis_banka) ──────────────────────────────────────
+        saved, skipped = _save_womsis_to_db(transactions, userid=userid, musterino=musterino)
+        logger.info('womsis/sync: %d cekildi, %d kaydedildi, %d atlandı (userid=%d, musterino=%d)',
+                    len(transactions), saved, skipped, userid, musterino)
+
         return jsonify({
             'success':      True,
             'count':        len(transactions),
-            'transactions': transactions,
+            'saved':        saved,
+            'skipped':      skipped,
             'timestamp':    datetime.now().isoformat(),
             'period':       {'start': start, 'end': end}
         })
@@ -424,6 +431,100 @@ def _fetch_womsis_transactions(api_url, app_key, app_secret, start_dt, end_dt):
         current = (current + timedelta(days=7)).replace(hour=0, minute=0, second=0)
 
     return results
+
+
+def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) -> tuple[int, int]:
+    """
+    Womsis API'den gelen işlemleri womsis_banka tablosuna kaydeder.
+    Aynı womsiskey varsa atlar (mükerrer kayıt önleme).
+    Returns: (kaydedilen, atlanan)
+    """
+    if not transactions:
+        return 0, 0
+
+    saved   = 0
+    skipped = 0
+    now     = datetime.now()
+
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+
+        for tx in transactions:
+            # womsiskey: tekil anahtar — account_id + transaction_id kombinasyonu
+            account_id = str(tx.get('accountId') or tx.get('account_id') or '')
+            tx_id      = str(tx.get('id') or tx.get('transactionId') or '')
+            womsiskey  = f"{account_id}_{tx_id}" if account_id and tx_id else ''
+
+            # Tarih — Womsis genellikle 'YYYY-MM-DD' veya 'DD-MM-YYYY HH:MM:SS' döner
+            raw_tarih = str(tx.get('date') or tx.get('transactionDate') or tx.get('valueDate') or '')
+            tarih_iso = None
+            for fmt in ('%Y-%m-%d', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y', '%Y-%m-%dT%H:%M:%S'):
+                try:
+                    tarih_iso = datetime.strptime(raw_tarih[:len(fmt)], fmt).strftime('%Y-%m-%d')
+                    break
+                except Exception:
+                    continue
+            if not tarih_iso:
+                tarih_iso = now.strftime('%Y-%m-%d')
+
+            # Tutar ve yön
+            tutar_raw    = tx.get('amount') or tx.get('tutar') or 0
+            tutar        = abs(float(tutar_raw))
+            debit        = float(tx.get('debit')  or 0)
+            credit       = float(tx.get('credit') or 0)
+            if credit > 0 and debit == 0:
+                gelirgider = 'gelir'
+            elif debit > 0 and credit == 0:
+                gelirgider = 'gider'
+            else:
+                gelirgider = 'gelir' if float(tutar_raw) >= 0 else 'gider'
+
+            aciklama  = str(tx.get('description') or tx.get('aciklama') or '')[:255]
+            sube      = str(tx.get('accountName') or tx.get('bankName') or tx.get('sube') or '')
+            iban      = str(tx.get('iban') or '')
+            bakiye    = float(tx.get('balance') or tx.get('bakiye') or 0)
+            hesap_turu= str(tx.get('currency') or tx.get('hesap_turu') or 'TL')
+            dekont_no = str(tx.get('referenceNo') or tx.get('dekont_no') or '')
+
+            # Mükerrer kontrol
+            if womsiskey:
+                cur.execute(
+                    'SELECT id FROM womsis_banka WHERE womsiskey = %s AND userid = %s LIMIT 1',
+                    (womsiskey, userid)
+                )
+                if cur.fetchone():
+                    skipped += 1
+                    continue
+
+            cur.execute("""
+                INSERT INTO womsis_banka
+                    (userid, musterino, tarih, aciklama, gelirgider, tutar,
+                     sube, faturaunvan, womsiskey, kaynak,
+                     created_at, bakiye, iban, hesap_turu, dekont_no)
+                VALUES
+                    (%s, %s, %s, %s, %s, %s,
+                     %s, %s, %s, %s,
+                     %s, %s, %s, %s, %s)
+            """, (
+                userid, musterino, tarih_iso, aciklama, gelirgider, tutar,
+                sube, '-', womsiskey, 'womsis_scheduler',
+                now, bakiye, iban, hesap_turu, dekont_no
+            ))
+            saved += 1
+
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error('womsis DB kayit hatasi: %s', e, exc_info=True)
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+
+    return saved, skipped
 
 
 # ── Hata Yoneticileri ─────────────────────────────────────────────────────────

@@ -1221,7 +1221,7 @@ class DashboardScreen(QWidget):
             return
 
         elif key == "fiziksel_pos":
-            dlg = FizikselPosDialog(self._userid, parent=self)
+            dlg = FizikselPosDialog(self._userid, self._musterino, parent=self)
             dlg.exec()
             return
 
@@ -1231,7 +1231,7 @@ class DashboardScreen(QWidget):
             return
 
         elif key == "bankalar_bakiye":
-            dlg = BankalaBakiyeDialog(self._userid, parent=self)
+            dlg = BankalaBakiyeDialog(self._userid, self._musterino, parent=self)
             dlg.exec()
             return
 
@@ -1764,9 +1764,9 @@ class DashboardScreen(QWidget):
                     COALESCE(dekont_no, '')      AS dekont_no,
                     CAST(bakiye AS REAL)         AS bakiye
                 FROM womsis_banka
-                WHERE userid = ?
+                WHERE musterino = ?
                 ORDER BY tarih DESC, id DESC
-            """, (uid,)).fetchall()
+            """, (self._musterino,)).fetchall()
             
             banka_export_rows = []
             for r in rows:
@@ -3288,9 +3288,10 @@ class BankalaBakiyeDialog(QDialog):
     _SOL_COLS = ["Banka / Şube", "Kayıt", "Gelir (₺)", "Gider (₺)", "Net (₺)"]
     _SAG_COLS = ["Tarih", "Açıklama", "Tür", "Tutar (₺)", "Karşı Taraf", "Kaynak"]
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid       = userid
+        self._musterino    = musterino
         self._tum_data: list[dict] = []
         self._secili_sube: str | None = None
 
@@ -3414,9 +3415,9 @@ class BankalaBakiyeDialog(QDialog):
                     COALESCE(faturaunvan, '')    AS faturaunvan,
                     COALESCE(kaynak, '')         AS kaynak
                 FROM womsis_banka
-                WHERE userid = ?
+                WHERE musterino = ?
                 ORDER BY tarih DESC, id DESC
-            """, (self._userid,)).fetchall()
+            """, (self._musterino,)).fetchall()
             self._tum_data = [dict(r) if not isinstance(r, dict) else r for r in rows]
             conn.close()
         except Exception as exc:
@@ -5163,9 +5164,10 @@ class FizikselPosDialog(QDialog):
         ("Brand",               "brand",               90, Qt.AlignmentFlag.AlignCenter),
     ]
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int, parent=None):
         super().__init__(parent)
         self._userid = userid
+        self._musterino = musterino
         self._rows: list[dict] = []
         self.setWindowTitle("🏪  Fiziksel Pos Hareketleri — Womsis")
         self.setMinimumSize(1200, 720)
