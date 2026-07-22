@@ -1,0 +1,75 @@
+@echo off
+chcp 1252 >nul
+echo.
+echo ================================================
+echo  PostgreSQL Sifre Sifirlama ve Superadmin Fix
+echo ================================================
+echo.
+
+:: PostgreSQL bin dizinini bul
+set PG_BIN=
+for /f "tokens=*" %%i in ('dir /b /ad "C:\Program Files\PostgreSQL" 2^>nul') do (
+    if exist "C:\Program Files\PostgreSQL\%%i\bin\psql.exe" (
+        set PG_BIN=C:\Program Files\PostgreSQL\%%i\bin
+    )
+)
+
+if "%PG_BIN%"=="" (
+    echo [HATA] PostgreSQL bulunamadi!
+    pause
+    exit /b 1
+)
+
+echo [OK] PostgreSQL: %PG_BIN%
+echo.
+
+:: postgres kullanicisinin sifresini sifirla
+echo [*] postgres kullanici sifresi 'postgres123' yapiliyor...
+"%PG_BIN%\psql.exe" -U postgres -c "ALTER USER postgres WITH PASSWORD 'postgres123';" 2>&1
+if errorlevel 1 (
+    echo [UYARI] Sifre degistirilemedi, pg_hba.conf trust modu deneniyor...
+    
+    :: pg_hba.conf'u gecici olarak trust yap
+    for /f "tokens=*" %%i in ('dir /b /ad "C:\Program Files\PostgreSQL" 2^>nul') do (
+        if exist "C:\Program Files\PostgreSQL\%%i\data\pg_hba.conf" (
+            set PG_DATA=C:\Program Files\PostgreSQL\%%i\data
+        )
+    )
+    
+    copy "%PG_DATA%\pg_hba.conf" "%PG_DATA%\pg_hba.conf.bak2" >nul
+    
+    :: Tum satirlari trust yap (gecici)
+    (echo # Gecici trust modu
+     echo local   all    all    trust
+     echo host    all    all    127.0.0.1/32    trust
+     echo host    all    all    0.0.0.0/0       md5
+    ) > "%PG_DATA%\pg_hba.conf"
+    
+    net stop postgresql* >nul 2>&1
+    timeout /t 3 >nul
+    net start postgresql* >nul 2>&1
+    timeout /t 2 >nul
+    
+    "%PG_BIN%\psql.exe" -U postgres -c "ALTER USER postgres WITH PASSWORD 'postgres123';"
+    
+    :: Orjinal pg_hba.conf'u geri yukle
+    copy "%PG_DATA%\pg_hba.conf.bak2" "%PG_DATA%\pg_hba.conf" >nul
+    net stop postgresql* >nul 2>&1
+    timeout /t 3 >nul
+    net start postgresql* >nul 2>&1
+    timeout /t 2 >nul
+)
+
+echo.
+echo [*] Superadmin icin webadmin duzeltmesi yapiliyor...
+"%PG_BIN%\psql.exe" -U postgres -d neondb -c "UPDATE uyelik SET musterino=1 WHERE kullanici_adi='superadmin' AND (musterino IS NULL OR musterino<0);" 2>&1
+
+echo.
+echo [*] Baglantiyi test ediyorum...
+"%PG_BIN%\psql.exe" -U postgres -d neondb -c "SELECT kullanici_adi, yetki, musterino FROM uyelik ORDER BY id;" 2>&1
+
+echo.
+echo ================================================
+echo  TAMAMLANDI!
+echo ================================================
+pause

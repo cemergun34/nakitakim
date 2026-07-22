@@ -1,0 +1,53 @@
+@echo off
+chcp 1252 >nul
+echo.
+echo =====================================================
+echo  WOMSIS Timer - Webadmin Entegrasyonu (Python)
+echo =====================================================
+echo.
+
+set WA=C:\FPPRO\webadmin-nakitakim
+
+"%WA%\.venv\Scripts\python.exe" -c "
+import os
+
+WA = r'C:\FPPRO\webadmin-nakitakim'
+
+template = open(os.path.join(WA, 'womsis_timer_src.html'), encoding='utf-8').read()
+
+tpl_path = os.path.join(WA, 'templates', 'womsis_timer.html')
+with open(tpl_path, 'w', encoding='utf-8') as f:
+    f.write(template)
+print('[OK] Template yazildi:', tpl_path)
+
+app_path = os.path.join(WA, 'app.py')
+with open(app_path, 'r', encoding='utf-8') as f:
+    content = f.read()
+
+if 'womsis_timer' not in content:
+    route = chr(10) + chr(10) + \"# WOMSIS Timer\" + chr(10) + \"@app.route('/womsis-timer')\" + chr(10) + \"def womsis_timer():\" + chr(10) + \"    return render_template('womsis_timer.html')\" + chr(10)
+    with open(app_path, 'a', encoding='utf-8') as f:
+        f.write(route)
+    print('[OK] Route eklendi: /womsis-timer')
+else:
+    print('[OK] Route zaten mevcut')
+"
+
+echo [*] Webadmin yeniden baslatiliyor...
+for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":5050 "') do (
+    taskkill /PID %%p /F >nul 2>&1
+)
+timeout /t 3 /nobreak >nul
+cd /d "%WA%"
+if exist "start_webadmin.bat" (
+    start "" cmd /c "%WA%\start_webadmin.bat"
+) else if exist "calistir.bat" (
+    start "" cmd /c "%WA%\calistir.bat"
+)
+timeout /t 6 /nobreak >nul
+
+echo.
+echo =====================================================
+echo  TAMAMLANDI! http://178.233.204.224:5050/womsis-timer
+echo =====================================================
+pause

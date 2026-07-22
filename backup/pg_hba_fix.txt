@@ -1,0 +1,77 @@
+@echo off
+chcp 1252 >nul
+echo.
+echo ================================================
+echo  PostgreSQL pg_hba.conf Guncelleme Araci
+echo ================================================
+echo.
+
+:: PostgreSQL data dizinini bul
+set PG_DATA=
+for /f "tokens=*" %%i in ('dir /b /ad "C:\Program Files\PostgreSQL" 2^>nul') do (
+    if exist "C:\Program Files\PostgreSQL\%%i\data\pg_hba.conf" (
+        set PG_DATA=C:\Program Files\PostgreSQL\%%i\data
+        set PG_BIN=C:\Program Files\PostgreSQL\%%i\bin
+    )
+)
+
+if "%PG_DATA%"=="" (
+    echo [HATA] PostgreSQL kurulum dizini bulunamadi!
+    echo Lutfen manuel olarak belirtin.
+    pause
+    exit /b 1
+)
+
+echo [OK] PostgreSQL dizini: %PG_DATA%
+echo.
+
+:: pg_hba.conf yedekle
+copy "%PG_DATA%\pg_hba.conf" "%PG_DATA%\pg_hba.conf.bak" >nul
+echo [OK] pg_hba.conf yedeklendi: pg_hba.conf.bak
+
+:: Tum IP'lerden erisimi ekle (dosyanin sonuna)
+echo. >> "%PG_DATA%\pg_hba.conf"
+echo # Uzak baglanti - Nakitakim Mac erisimi >> "%PG_DATA%\pg_hba.conf"
+echo host    all    all    0.0.0.0/0    md5 >> "%PG_DATA%\pg_hba.conf"
+
+echo [OK] pg_hba.conf guncellendi
+echo.
+
+:: postgresql.conf icinde listen_addresses kontrol et ve guncelle
+echo [*] postgresql.conf kontrol ediliyor...
+
+findstr /i "listen_addresses" "%PG_DATA%\postgresql.conf" | findstr /v "^#" >nul
+if errorlevel 1 (
+    echo. >> "%PG_DATA%\postgresql.conf"
+    echo listen_addresses = '*' >> "%PG_DATA%\postgresql.conf"
+    echo [OK] listen_addresses = '*' eklendi
+) else (
+    echo [OK] listen_addresses zaten ayarli
+)
+
+echo.
+echo [*] PostgreSQL servisi yeniden baslatiliyor...
+
+:: Servis adini bul
+for /f "tokens=*" %%s in ('sc query type^= all state^= all ^| findstr /i "postgresql"') do (
+    echo     %%s
+)
+
+net stop postgresql* >nul 2>&1
+timeout /t 2 >nul
+net start postgresql* >nul 2>&1
+
+if errorlevel 1 (
+    echo [UYARI] Servis baslatma basarisiz, manuel yeniden baslatmayi deneyin
+    echo    Servisler -> PostgreSQL -> Yeniden Basla
+) else (
+    echo [OK] PostgreSQL servisi yeniden baslatildi!
+)
+
+echo.
+echo ================================================
+echo  ISLEM TAMAMLANDI!
+echo  Artik Mac'ten baglanti kurulabilir.
+echo ================================================
+echo.
+pause

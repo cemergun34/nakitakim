@@ -1,0 +1,75 @@
+@echo off
+chcp 1252 >nul
+set LOG=C:\webadmin_analiz.txt
+set WA=C:\FPPRO\webadmin-nakitakim
+
+echo. > %LOG%
+echo ================================================ >> %LOG%
+echo  Webadmin Analiz Raporu - %date% %time% >> %LOG%
+echo ================================================ >> %LOG%
+echo. >> %LOG%
+
+echo [1] ANA KLASOR ICERIGI: >> %LOG%
+dir "%WA%" /b >> %LOG% 2>&1
+echo. >> %LOG%
+
+echo [2] TUM DOSYALAR (alt klasorler dahil): >> %LOG%
+dir "%WA%" /b /s /a-d >> %LOG% 2>&1
+echo. >> %LOG%
+
+echo [3] .env DOSYASI: >> %LOG%
+if exist "%WA%\.env" (
+    type "%WA%\.env" >> %LOG%
+) else (
+    echo .env bulunamadi >> %LOG%
+    for /r "%WA%" %%f in (.env) do (
+        echo Bulundu: %%f >> %LOG%
+        type "%%f" >> %LOG%
+    )
+)
+echo. >> %LOG%
+
+echo [4] requirements.txt: >> %LOG%
+if exist "%WA%\requirements.txt" (
+    type "%WA%\requirements.txt" >> %LOG%
+) else (
+    echo requirements.txt bulunamadi >> %LOG%
+)
+echo. >> %LOG%
+
+echo [5] package.json: >> %LOG%
+if exist "%WA%\package.json" (
+    type "%WA%\package.json" >> %LOG%
+) else (
+    echo package.json bulunamadi >> %LOG%
+)
+echo. >> %LOG%
+
+echo [6] LOGIN / AUTH DOSYALARI ICERIGI: >> %LOG%
+for /r "%WA%" %%f in (login.py auth.py giris.py user.py login.php auth.php giris.php) do (
+    if exist "%%f" (
+        echo. >> %LOG%
+        echo === %%f === >> %LOG%
+        type "%%f" >> %LOG%
+    )
+)
+echo. >> %LOG%
+
+echo [7] MUSTERINO KELIMESI GECEN SATIRLAR: >> %LOG%
+findstr /s /i /n "musterino musteri_no" "%WA%\*.py" "%WA%\*.php" "%WA%\*.js" >> %LOG% 2>&1
+echo. >> %LOG%
+
+echo [8] SIFRE / PASSWORD KELIMESI GECEN SATIRLAR: >> %LOG%
+findstr /s /i /n "password sifre bcrypt checkpw verify hash" "%WA%\*.py" "%WA%\*.php" >> %LOG% 2>&1
+echo. >> %LOG%
+
+echo ================================================ >> %LOG%
+echo  RAPOR TAMAMLANDI: %LOG% >> %LOG%
+echo ================================================ >> %LOG%
+
+echo.
+echo Rapor olusturuldu: %LOG%
+echo Lutfen bu dosyayi acip icerigini kopyalayin.
+echo.
+start notepad %LOG%
+pause

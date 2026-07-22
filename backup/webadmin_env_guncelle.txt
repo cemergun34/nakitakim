@@ -1,0 +1,82 @@
+@echo off
+chcp 1252 >nul
+echo.
+echo =============================================
+echo  Webadmin .env Guncelleme
+echo =============================================
+echo.
+
+set WA=C:\FPPRO\webadmin-nakitakim
+set ENV_FILE=%WA%\.env
+
+:: Yedek al
+copy "%ENV_FILE%" "%ENV_FILE%.bak" >nul 2>&1
+echo [OK] .env yedeklendi
+
+:: Mevcut icerigi goster
+echo.
+echo [*] Mevcut .env:
+type "%ENV_FILE%"
+echo.
+
+:: PG_PASS satirini 123 ile degistir
+set TMPFILE=%TEMP%\env_temp.txt
+(for /f "delims=" %%l in ('type "%ENV_FILE%"') do (
+    set "line=%%l"
+    echo !line! | findstr /i "PG_PASS" >nul
+    if not errorlevel 1 (
+        echo PG_PASS=123
+    ) else (
+        echo %%l
+    )
+)) > "%TMPFILE%"
+
+:: Delayed expansion gerekli
+setlocal enabledelayedexpansion
+(for /f "delims=" %%l in ('type "%ENV_FILE%"') do (
+    set "line=%%l"
+    echo !line! | findstr /i "^PG_PASS" >nul
+    if not errorlevel 1 (
+        echo PG_PASS=123
+    ) else (
+        echo !line!
+    )
+)) > "%TMPFILE%"
+
+copy "%TMPFILE%" "%ENV_FILE%" >nul
+endlocal
+
+echo [OK] .env guncellendi
+
+echo.
+echo [*] Yeni .env:
+type "%ENV_FILE%"
+echo.
+
+:: Webadmin servisini yeniden baslat
+echo [*] Webadmin yeniden baslatiliyor...
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":5050"') do (
+    taskkill /PID %%p /F >nul 2>&1
+    echo [OK] Port 5050 kapatildi (PID: %%p)
+)
+
+timeout /t 2 >nul
+
+:: Webadmin'i baslat
+cd /d "%WA%"
+if exist "start_webadmin.bat" (
+    echo [*] start_webadmin.bat calistiriliyor...
+    start "" "%WA%\start_webadmin.bat"
+) else if exist "calistir.bat" (
+    echo [*] calistir.bat calistiriliyor...
+    start "" "%WA%\calistir.bat"
+)
+
+timeout /t 5 >nul
+
+echo.
+echo =============================================
+echo  TAMAMLANDI! 
+echo  http://178.233.204.224:5050 tekrar deneyin
+echo =============================================
+pause

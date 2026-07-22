@@ -1,0 +1,37 @@
+@echo off
+chcp 1252 >nul
+echo.
+echo =============================================
+echo  PostgreSQL Servisi Baslat
+echo =============================================
+echo.
+
+:: Tum postgresql servislerini baslat
+for %%v in (17 16 15 14 13 12) do (
+    sc start "postgresql-x64-%%v" >nul 2>&1
+    net start "postgresql-x64-%%v" >nul 2>&1
+    net start "postgresql%%v" >nul 2>&1
+)
+
+timeout /t 8 /nobreak >nul
+
+:: Hangi servis calisıyor?
+echo [*] Calisana servisler:
+sc query type= all state= running | findstr /i "postgresql"
+
+echo.
+
+:: Test
+for %%v in (17 16 15 14 13 12) do (
+    if exist "C:\Program Files\PostgreSQL\%%v\bin\psql.exe" (
+        echo [*] PostgreSQL %%v test ediliyor...
+        set PGPASSWORD=123
+        "C:\Program Files\PostgreSQL\%%v\bin\psql.exe" -U postgres -h 127.0.0.1 -p 5432 -d neondb -c "SELECT 'PostgreSQL CALISIYOR!' AS durum;" 2>&1
+    )
+)
+
+echo.
+echo =============================================
+echo  TAMAMLANDI
+echo =============================================
+pause

@@ -1,0 +1,78 @@
+@echo off
+chcp 1252 >nul
+echo.
+echo ================================================
+echo  PostgreSQL Sifre Zorla Sifirlama
+echo ================================================
+echo.
+
+:: PostgreSQL dizinini bul
+set PG_DATA=
+set PG_BIN=
+for /f "tokens=*" %%i in ('dir /b /ad "C:\Program Files\PostgreSQL" 2^>nul') do (
+    if exist "C:\Program Files\PostgreSQL\%%i\data\pg_hba.conf" (
+        set PG_DATA=C:\Program Files\PostgreSQL\%%i\data
+        set PG_BIN=C:\Program Files\PostgreSQL\%%i\bin
+    )
+)
+
+if "%PG_DATA%"=="" (
+    echo [HATA] PostgreSQL bulunamadi!
+    pause
+    exit /b 1
+)
+
+echo [OK] Dizin: %PG_DATA%
+echo.
+
+:: Yedek al
+copy "%PG_DATA%\pg_hba.conf" "%PG_DATA%\pg_hba.conf.original" >nul
+echo [OK] pg_hba.conf yedeklendi
+
+:: Trust moda al - sifresiz giris
+echo # Gecici trust > "%PG_DATA%\pg_hba.conf"
+echo local   all    all              trust >> "%PG_DATA%\pg_hba.conf"
+echo host    all    all    127.0.0.1/32    trust >> "%PG_DATA%\pg_hba.conf"
+echo host    all    all    ::1/128         trust >> "%PG_DATA%\pg_hba.conf"
+echo host    all    all    0.0.0.0/0       md5 >> "%PG_DATA%\pg_hba.conf"
+
+echo [OK] pg_hba.conf trust moduna alindi
+
+:: Servisi yeniden basla
+echo [*] Servis yeniden baslatiliyor...
+net stop postgresql* >nul 2>&1
+timeout /t 4 >nul
+net start postgresql* >nul 2>&1
+timeout /t 4 >nul
+
+:: Sifreyi sifirla
+echo [*] Sifre 'postgres123' yapiliyor...
+"%PG_BIN%\psql.exe" -U postgres -h 127.0.0.1 -d postgres -c "ALTER USER postgres WITH PASSWORD 'postgres123';"
+echo.
+
+:: Superadmin duzelt
+echo [*] Superadmin musterino duzeltiliyor...
+"%PG_BIN%\psql.exe" -U postgres -h 127.0.0.1 -d neondb -c "UPDATE uyelik SET musterino=1 WHERE kullanici_adi='superadmin';"
+echo.
+
+:: Orjinal pg_hba.conf'u geri yukle
+copy "%PG_DATA%\pg_hba.conf.original" "%PG_DATA%\pg_hba.conf" >nul
+echo [OK] pg_hba.conf orjinaline dondu
+
+:: Tekrar yeniden basla
+echo [*] Servis tekrar baslatiliyor...
+net stop postgresql* >nul 2>&1
+timeout /t 4 >nul
+net start postgresql* >nul 2>&1
+timeout /t 4 >nul
+
+:: Test
+echo.
+echo [*] Test ediliyor...
+"%PG_BIN%\psql.exe" -U postgres -h 127.0.0.1 -d neondb -c "SELECT kullanici_adi, musterino FROM uyelik ORDER BY id;"
+
+echo.
+echo ================================================
+echo  TAMAMLANDI! Sifre: postgres123
+echo ================================================
+pause

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WOMSIS Otomasyon</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Inter, sans-serif; background: #0f0f1a; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
+    .container { width: 100%; max-width: 700px; }
+    .back-btn { display: inline-block; margin-bottom: 20px; padding: 8px 16px; background: #1e1e2e; border: 1px solid #2d2d44; border-radius: 8px; color: #94a3b8; text-decoration: none; font-size: 13px; transition: all 0.2s; }
+    .back-btn:hover { border-color: #4f46e5; color: #818cf8; }
+    .header { text-align: center; margin-bottom: 32px; }
+    .header h1 { font-size: 28px; font-weight: 700; background: linear-gradient(135deg,#6366f1,#8b5cf6,#06b6d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 6px; }
+    .header p { color: #64748b; font-size: 14px; }
+    .clock-card { background: linear-gradient(135deg,#1e1b4b,#312e81); border: 1px solid #4338ca40; border-radius: 16px; padding: 28px; text-align: center; margin-bottom: 20px; }
+    .clock { font-size: 52px; font-weight: 700; letter-spacing: 4px; color: #c7d2fe; }
+    .date { font-size: 14px; color: #818cf8; margin-top: 4px; }
+    .card { background: #1e1e2e; border: 1px solid #2d2d44; border-radius: 16px; padding: 24px; margin-bottom: 16px; }
+    .card-title { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #64748b; margin-bottom: 16px; }
+    .mode-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+    .tab { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid #2d2d44; background: transparent; color: #64748b; font-size: 13px; cursor: pointer; transition: all 0.2s; font-family: Inter, sans-serif; }
+    .tab.active { background: #4f46e5; border-color: #4f46e5; color: white; }
+    .tab:hover:not(.active) { border-color: #4f46e5; color: #818cf8; }
+    .mode-panel { display: none; }
+    .mode-panel.active { display: block; }
+    .time-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+    label { font-size: 13px; color: #94a3b8; white-space: nowrap; }
+    input[type=time], input[type=number], select { background: #0f0f1a; border: 1px solid #2d2d44; border-radius: 8px; color: #e2e8f0; padding: 10px 14px; font-size: 15px; font-family: Inter,sans-serif; outline: none; }
+    input[type=number] { width: 90px; }
+    .status-row { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-radius: 10px; background: #0f0f1a; border: 1px solid #2d2d44; margin-bottom: 16px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #64748b; flex-shrink: 0; }
+    .dot.active { background: #22c55e; box-shadow: 0 0 8px #22c55e80; animation: pulse 2s infinite; }
+    .dot.waiting { background: #f59e0b; }
+    .dot.error { background: #ef4444; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+    .status-text { font-size: 14px; color: #94a3b8; flex: 1; }
+    .next-sync { font-size: 12px; color: #4f46e5; font-weight: 500; }
+    .btn-row { display: flex; gap: 10px; }
+    .btn { flex: 1; padding: 12px 20px; border-radius: 10px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; font-family: Inter,sans-serif; }
+    .btn-start { background: linear-gradient(135deg,#4f46e5,#7c3aed); color: white; }
+    .btn-start:hover { transform: translateY(-1px); box-shadow: 0 4px 20px #4f46e540; }
+    .btn-stop { background: #1e1e2e; border: 1px solid #ef4444; color: #ef4444; }
+    .btn-manual { background: #1e1e2e; border: 1px solid #06b6d4; color: #06b6d4; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; transform: none !important; }
+    .log-box { background: #0f0f1a; border: 1px solid #2d2d44; border-radius: 10px; padding: 14px; height: 160px; overflow-y: auto; font-family: 'Courier New',monospace; font-size: 12px; line-height: 1.7; }
+    .log-line { color: #64748b; }
+    .log-line.ok { color: #22c55e; }
+    .log-line.err { color: #ef4444; }
+    .log-line.info { color: #06b6d4; }
+    .log-line.warn { color: #f59e0b; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <a href="/dashboard" class="back-btn">&#8592; Dashboard'a Don</a>
+  <div class="header">
+    <h1>&#9889; WOMSIS Otomasyon</h1>
+    <p>Otomatik veri cekme zamanlayicisi</p>
+  </div>
+  <div class="clock-card">
+    <div class="clock" id="clock">00:00:00</div>
+    <div class="date" id="dateStr"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Zamanlama Modu</div>
+    <div class="mode-tabs">
+      <button class="tab active" onclick="setMode('time')" id="tab-time">Belirli Saat</button>
+      <button class="tab" onclick="setMode('interval')" id="tab-interval">Aralik</button>
+    </div>
+    <div class="mode-panel active" id="panel-time">
+      <div class="time-row">
+        <label>Her gun saat:</label>
+        <input type="time" id="targetTime" value="00:00">
+      </div>
+    </div>
+    <div class="mode-panel" id="panel-interval">
+      <div class="time-row">
+        <label>Her</label>
+        <input type="number" id="intervalVal" value="6" min="1" max="24">
+        <select id="intervalUnit"><option value="h">Saat</option><option value="m">Dakika</option></select>
+        <label>bir calistir</label>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Durum</div>
+    <div class="status-row">
+      <div class="dot" id="statusDot"></div>
+      <div class="status-text" id="statusText">Zamanlama kurulmadi</div>
+      <div class="next-sync" id="nextSync"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-start" id="btnStart" onclick="startSchedule()">Zamanlamayi Baslat</button>
+      <button class="btn btn-stop" id="btnStop" onclick="stopSchedule()" disabled>Durdur</button>
+      <button class="btn btn-manual" onclick="manualSync()">Manuel Calistir</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title" style="display:flex;justify-content:space-between;">
+      <span>Log</span>
+      <span style="cursor:pointer;color:#64748b;font-size:11px;" onclick="clearLog()">Temizle</span>
+    </div>
+    <div class="log-box" id="logBox"></div>
+  </div>
+</div>
+<script>
+let scheduleTimer=null,mode='time',lastSyncTime=null;
+function updateClock(){const n=new Date();document.getElementById('clock').textContent=n.toLocaleTimeString('tr-TR',{hour12:false});const d=['Pazar','Pazartesi','Sali','Carsamba','Persembe','Cuma','Cumartesi'];document.getElementById('dateStr').textContent=d[n.getDay()]+', '+n.toLocaleDateString('tr-TR',{day:'numeric',month:'long',year:'numeric'});updateNextSync();}
+setInterval(updateClock,1000);updateClock();
+function setMode(m){mode=m;document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.querySelectorAll('.mode-panel').forEach(p=>p.classList.remove('active'));document.getElementById('tab-'+m).classList.add('active');document.getElementById('panel-'+m).classList.add('active');}
+function addLog(msg,type=''){const box=document.getElementById('logBox');const n=new Date().toLocaleTimeString('tr-TR');const div=document.createElement('div');div.className='log-line '+type;div.textContent='['+n+'] '+msg;box.appendChild(div);box.scrollTop=box.scrollHeight;}
+function clearLog(){document.getElementById('logBox').innerHTML='';}
+function setStatus(t,d,nx=''){document.getElementById('statusText').textContent=t;document.getElementById('statusDot').className='dot '+d;document.getElementById('nextSync').textContent=nx;}
+function updateNextSync(){if(!scheduleTimer||mode!=='time')return;const[h,m]=document.getElementById('targetTime').value.split(':').map(Number);const now=new Date();const nxt=new Date();nxt.setHours(h,m,0,0);if(nxt<=now)nxt.setDate(nxt.getDate()+1);const df=nxt-now;document.getElementById('nextSync').textContent='Sonraki: '+Math.floor(df/3600000)+'s '+Math.floor((df%3600000)/60000)+'d sonra';}
+async function doSync(){addLog('WOMSIS senkronizasyonu baslatiliyor...','info');setStatus('Senkronizasyon yapiliyor...','active');try{const r=await fetch('/api/womsis/sync',{method:'POST',headers:{'Content-Type':'application/json'}});const t=await r.text();if(r.ok){addLog('Basarili! '+t.substring(0,80),'ok');setStatus('Son sync: '+new Date().toLocaleTimeString('tr-TR'),'active');lastSyncTime=new Date();}else{addLog('HTTP '+r.status+': '+t.substring(0,80),'err');setStatus('Hata','error');}}catch(e){addLog('Hata: '+e.message,'err');setStatus('Baglanti hatasi','error');}}
+function manualSync(){addLog('--- Manuel tetikleme ---','info');doSync();}
+function startSchedule(){stopSchedule();document.getElementById('btnStart').disabled=true;document.getElementById('btnStop').disabled=false;if(mode==='time'){const tv=document.getElementById('targetTime').value;addLog('Zamanlama kuruldu: Her gun '+tv,'ok');setStatus('Aktif - Her gun '+tv,'waiting');scheduleTimer=setInterval(()=>{const n=new Date();const[h,m]=tv.split(':').map(Number);if(n.getHours()===h&&n.getMinutes()===m&&n.getSeconds()<30){if(!lastSyncTime||(n-lastSyncTime)>60000){addLog('Zamanlanan saat geldi!','info');doSync();}}updateNextSync();},10000);}else{const v=parseInt(document.getElementById('intervalVal').value);const u=document.getElementById('intervalUnit').value;const ms=u==='h'?v*3600000:v*60000;addLog('Zamanlama: '+(u==='h'?v+' saatte bir':v+' dakikada bir'),'ok');setStatus('Aktif','waiting');doSync();scheduleTimer=setInterval(()=>{addLog('Aralik geldi!','info');doSync();},ms);}}
+function stopSchedule(){if(scheduleTimer){clearInterval(scheduleTimer);scheduleTimer=null;}document.getElementById('btnStart').disabled=false;document.getElementById('btnStop').disabled=true;setStatus('Durduruldu','');document.getElementById('nextSync').textContent='';if(arguments.length===0)addLog('Zamanlama durduruldu.','warn');}
+addLog('Sistem hazir.','info');
+</script>
+</body>
+</html>
