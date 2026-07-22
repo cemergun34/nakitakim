@@ -194,6 +194,43 @@ def main():
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(800, _auto_webadmin_sync)   # pencere tamamen açıldıktan sonra
 
+        # ── Otomatik Moy Sync ─────────────────────────────────────────────────
+        # Login sonrası arka planda sessizce moy_kaydet_veriler çalıştırır.
+        # nakitakis_parametre tablosunu güncel tutar (unvan + şube + tutar).
+        def _auto_moy_sync():
+            musterino = user.get("musterino", user.get("GercekUserId", 1))
+            if not musterino:
+                return
+            try:
+                from services.moy_service import get_moy_bilgileri
+                bilgi = get_moy_bilgileri(musterino)
+                if not bilgi.get("success"):
+                    return  # Moy tanımlı değil, sessizce çık
+            except Exception:
+                return
+
+            from datetime import datetime
+            import logging
+            _log = logging.getLogger("auto_moy_sync")
+
+            class _MoySyncThread(QThread):
+                def run(self):
+                    try:
+                        from services.moy_service import moy_kaydet_veriler
+                        yil = datetime.now().year
+                        for y in [yil - 1, yil]:
+                            r = moy_kaydet_veriler(musterino, y)
+                            _log.info("Moy auto-sync %d: %s (%d kayıt)",
+                                      y, r.get("message"), r.get("eklenen", 0))
+                    except Exception as exc:
+                        _log.warning("Moy auto-sync hatası: %s", exc)
+
+            _moy_sync_thread = _MoySyncThread()
+            _moy_sync_thread.start()
+            app._moy_sync_thread = _moy_sync_thread  # GC'den korunmak için
+
+        QTimer.singleShot(2000, _auto_moy_sync)  # 2 sn sonra sessizce başlar
+
     login_screen.login_success.connect(_on_login)
     sys.exit(app.exec())
 

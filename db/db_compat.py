@@ -143,3 +143,8 @@ def pg_hesapkodu() -> str:
 def pg_isinv() -> str:
     """nakitakis_Parametre: ilkTarih (SQLite) | ilktarih (PG)"""
     return "ilktarih" if _pg() else "ilkTarih"
+
+
+def pg_gelirgider() -> str:
+    """nakitakis_Parametre: gelirGider (SQLite) | gelirgider (PG)"""
+    return "gelirgider" if _pg() else "gelirGider"

@@ -398,17 +398,32 @@ def get_kurum_odemeleri_detay(musterino: int, yil: int,
 
 def get_kurum_odemeleri_detay_tarih(musterino: int,
                                     ilk_tarih: str,
-                                    son_tarih: str) -> list[dict]:
+                                    son_tarih: str) -> tuple[list, float]:
     """
     Tarih aralığı bazlı Kurum Ödemeleri detay listesi.
     ilk_tarih / son_tarih: YYYYMMDD formatı ('20260201', '20260228')
+    Returns: (rows, toplam_float)
     """
     _mno  = pg_musterino()
     _hkod = pg_hesapkodu()
     _ilkt = pg_isinv()
     _gider_col = _col("gelirGider", "gelirgider")
+    from db.db_config import get_mode as _gm
+    _tutar_cast = "tutar::numeric" if _gm() == "postgres" else "CAST(tutar AS NUMERIC)"
     conn = get_connection()
     try:
+        # Toplam
+        toplam_row = conn.execute(f"""
+            SELECT COALESCE(SUM({_tutar_cast}), 0) AS toplam
+            FROM nakitakis_parametre
+            WHERE {_mno} = ?
+              AND {_gider_col} = 'gider'
+              AND {_ilkt} >= ?
+              AND {_ilkt} <= ?
+        """, (musterino, ilk_tarih, son_tarih)).fetchone()
+        toplam = float(toplam_row["toplam"] or 0)
+
+        # Satırlar
         rows = conn.execute(f"""
             SELECT
                 id, {_hkod} AS hesapKodu, hesapAck, unvan, vergiNo,
@@ -421,7 +436,7 @@ def get_kurum_odemeleri_detay_tarih(musterino: int,
               AND {_ilkt} <= ?
             ORDER BY {_ilkt} DESC
         """, (musterino, ilk_tarih, son_tarih)).fetchall()
-        return list(rows)
+        return list(rows), toplam
     finally:
         conn.close()
 

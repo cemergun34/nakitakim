@@ -9,7 +9,7 @@ from db.database import get_connection
 from db.db_compat import (
     yr, mo, left4, right4,
     tarih_iso_hareketler, tarih_yil_hareketler,
-    tablo_var_expr, pg_musterino, pg_hesapkodu, pg_isinv
+    tablo_var_expr, pg_musterino, pg_hesapkodu, pg_isinv, pg_gelirgider
 )
 
 
@@ -167,15 +167,18 @@ def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) 
         # Kaynak 2 — nakitakis_parametre (PG: kolon adları camelCase tırnaklı)
         # 770.01 = vergi giderleri  |  730.08 = işçilik/müşavirlik
         # ilkTarih formatı: YYYYMMDD — ilk 4 karakter yıl
-        _mno = pg_musterino()
-        _hkod = pg_hesapkodu()
-        _ilkt = pg_isinv()
+        _mno   = pg_musterino()
+        _hkod  = pg_hesapkodu()
+        _ilkt  = pg_isinv()
+        _gelir = pg_gelirgider()
+        from db.db_config import get_mode as _gm
+        _tutar_cast = "tutar::numeric" if _gm() == "postgres" else "CAST(tutar AS NUMERIC)"
         row2 = conn.execute(f"""
-            SELECT COALESCE(SUM(CAST(tutar AS REAL)), 0) AS toplam
+            SELECT COALESCE(SUM({_tutar_cast}), 0) AS toplam
             FROM nakitakis_parametre
             WHERE {_mno} = ?
               AND {_hkod} IN ('770.01', '730.08')
-              AND gelirGider = 'gider'
+              AND {_gelir} = 'gider'
               AND {left4(_ilkt)} = ?
         """, (musterino, str(yil))).fetchone()
         toplam2 = float(row2["toplam"] or 0)

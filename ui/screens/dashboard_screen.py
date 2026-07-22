@@ -2241,13 +2241,9 @@ class DashboardScreen(QWidget):
 
 class KurumOdemeDialog(QDialog):
     """
-    Kurum Ödemeleri kartına tıklandığında açılan detay tablosu.
-    PHP gider_veriler.js DataTable ile birebir aynı sütun yapısı.
-    Düzeltmeler:
-      1) Yazılar daima siyah (hover dahil)
-      2) DateEdit picker — ilkTarih 01/01/YIL, sonTarih bugün
-      3) Ay seçince tarihler otomatik dolar (Şubat→01.02/28.02)
-      4) Satıra tıklandığında BeyannamePreviewDialog açılır
+    Kurum Ödemeleri kartına tıklandığında açılan DETAYLI tablo.
+    Beyanname bilgileri (belge türü, dönem, onay tarihi, PDF) doğrudan
+    tablo sütunlarında gösterilir — ayrı dialog açılmaz.
     """
 
     HESAP_ACIKLAMA = {
@@ -2265,14 +2261,19 @@ class KurumOdemeDialog(QDialog):
     ]
 
     SUTUNLAR = [
-        ("Beyanname Türü",  "hesapKodu",     200),
-        ("Ünvan",           "unvan",         140),
-        ("Vergi No",        "vergiNo",       105),
-        ("İlk Tarih",       "ilkTarih",       95),
+        ("Beyanname Türü",  "hesapKodu",     185),
+        ("Ünvan",           "unvan",         130),
+        ("Vergi No",        "vergiNo",       100),
+        ("İlk Tarih",       "ilkTarih",       90),
         ("Son Tarih",       "sonTarih",       90),
-        ("Sözleşme No",     "sozlesmeNo",    100),
-        ("Sözl. Tarih",     "sozlesmeTarih",  90),
-        ("Tutar",           "tutar",         115),
+        ("Sözleşme No",     "sozlesmeNo",     95),
+        ("Sözl. Tarih",     "sozlesmeTarih",  85),
+        ("Tutar",           "tutar",         110),
+        ("Belge Türü",      "byn_belge_turu", 130),
+        ("Dönem",           "byn_donem",     100),
+        ("Onay Tarihi",     "byn_onay",      100),
+        ("Belge Durum",     "byn_durum",      85),
+        ("PDF",             "byn_pdf",        60),
     ]
 
     _CBS = (
@@ -2290,14 +2291,15 @@ class KurumOdemeDialog(QDialog):
 
     def __init__(self, musterino: int, yil: int, parent=None):
         super().__init__(parent)
-        self._musterino = musterino
-        self._yil       = yil
+        self._musterino    = musterino
+        self._yil          = yil
         self._rows: list[dict] = []
         self._ay_degisiyor = False   # döngü koruması
+        self._pdf_map: dict[int, bytes] = {}  # satır_no → pdf bytes
 
         self.setWindowTitle("Kurum Ödemeleri — Detay")
-        self.setMinimumSize(1060, 620)
-        self.resize(1180, 700)
+        self.setMinimumSize(1300, 660)
+        self.resize(1480, 760)
         self._setup_ui()
         self._load()
 
@@ -2310,7 +2312,7 @@ class KurumOdemeDialog(QDialog):
         root.setSpacing(8)
 
         # ── Başlık ──
-        baslik = QLabel("📋  Kurum Ödemeleri — Gider Parametreleri")
+        baslik = QLabel("📋  Kurum Ödemeleri — Tüm Detaylar")
         baslik.setStyleSheet(
             "font-size:15px;font-weight:700;color:#162C47;"
             "padding-bottom:4px;"
@@ -2338,7 +2340,7 @@ class KurumOdemeDialog(QDialog):
         self._ilk_de.setDisplayFormat("dd.MM.yyyy")
         self._ilk_de.setFixedSize(120, 32)
         self._ilk_de.setStyleSheet(self._DES)
-        self._ilk_de.setDate(QDate(self._yil, 1, 1))    # 01/01/YIL
+        self._ilk_de.setDate(QDate(self._yil, 1, 1))
         bar.addWidget(self._ilk_de)
 
         # Son Tarih DateEdit
@@ -2375,7 +2377,7 @@ class KurumOdemeDialog(QDialog):
         root.addWidget(self._ozet_lbl)
 
         # ── Bilgi notu ──
-        not_lbl = QLabel("💡  Satıra tıklayarak beyanname önizlemesini açabilirsiniz.")
+        not_lbl = QLabel("💡  PDF sütunundaki 📄 butonuna tıklayarak beyanname PDF'ini açabilirsiniz.")
         not_lbl.setStyleSheet("font-size:11px;color:#64748b;")
         root.addWidget(not_lbl)
 
@@ -2388,12 +2390,14 @@ class KurumOdemeDialog(QDialog):
         self._tablo.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tablo.setAlternatingRowColors(True)
         self._tablo.verticalHeader().setVisible(False)
-        self._tablo.setSortingEnabled(True)
-        self._tablo.horizontalHeader().setStretchLastSection(True)
+        self._tablo.setSortingEnabled(False)  # butonlar olduğu için sıralama kapalı
+        self._tablo.horizontalHeader().setStretchLastSection(False)
+        self._tablo.horizontalHeader().setSectionResizeMode(
+            0, self._tablo.horizontalHeader().ResizeMode.Stretch
+        )
         self._tablo.setMouseTracking(True)
         for i, (_, _, w) in enumerate(self.SUTUNLAR):
             self._tablo.setColumnWidth(i, w)
-        # 1) Yazılar DAİMA siyah — hover ve seçim dahil
         self._tablo.setStyleSheet("""
             QTableWidget {
                 background: white;
@@ -2429,7 +2433,6 @@ class KurumOdemeDialog(QDialog):
                 border-right: 1px solid #334155;
             }
         """)
-        self._tablo.cellClicked.connect(self._on_satir_tikla)
         root.addWidget(self._tablo)
 
         # ── Kapat ──
@@ -2488,58 +2491,187 @@ class KurumOdemeDialog(QDialog):
 
     def _load(self):
         from services.detay_service import get_kurum_odemeleri_detay_tarih
+
         ilk = self._ilk_de.date()
         son = self._son_de.date()
         ilk_str = f"{ilk.year()}{ilk.month():02d}{ilk.day():02d}"
         son_str = f"{son.year()}{son.month():02d}{son.day():02d}"
-        self._rows = get_kurum_odemeleri_detay_tarih(
+
+        self._rows, self._sql_toplam = get_kurum_odemeleri_detay_tarih(
             self._musterino, ilk_str, son_str
         )
+        self._pdf_map = {}
+
+        # Sadece DB'den — byn=None, beyanname sütunları "—" gösterir
+        # PDF butonu tıklanınca o an Moy'a bağlanır (_pdf_ac_kayit)
+        self._enriched = [(row, None) for row in self._rows]
         self._doldur()
+
 
     def _doldur(self):
         from PyQt6.QtGui import QColor, QFont
-        self._tablo.setSortingEnabled(False)
-        self._tablo.setRowCount(0)
 
+        # Belge türü adları — PDF'teki başlıklarla uyumlu
+        BELGE_TUR_ADI = {
+            "KDV1":     "KDV Beyannamesi (1.Tür)",
+            "KDV2":     "KDV Beyannamesi (2.Tür)",
+            "MUHSGK":   "SGK Tahakkuk Fişi (5510)",   # PDF: TAHAKKUK FİŞİ (5510)
+            "KGECICI":  "Kurumlar Vg. Geçici",
+            "KURUMLAR": "Kurumlar Vergisi",
+            "LEVHA":    "Levha Beyannamesi",
+            "MUHTAR":   "Muhtasar Beyanname",
+        }
+
+        self._tablo.setRowCount(0)
         toplam = 0.0
-        for row in self._rows:
+        sayilan_tutarlar = set()  # (id, tutar) → toplama bir kez say
+
+        for ri_idx, (row, byn) in enumerate(self._enriched):
             ri = self._tablo.rowCount()
             self._tablo.insertRow(ri)
-            self._tablo.setRowHeight(ri, 30)
+            self._tablo.setRowHeight(ri, 32)
 
             kod      = row.get("hesapKodu", "")
             beyan_t  = self.BEYANNAME_TUR.get(kod, self.HESAP_ACIKLAMA.get(kod, kod))
-            unvan    = row.get("unvan", "") or "-"
             vergino  = row.get("vergiNo", "") or ""
             ilkT     = self._fmt_goster(row.get("ilkTarih", ""))
             sonT     = self._fmt_goster(row.get("sonTarih", ""))
             sozno    = row.get("sozlesmeNo", "") or ""
             soztarih = self._fmt_goster(row.get("sozlesmeTarih", ""))
             tutar    = float(row.get("tutar") or 0)
-            toplam  += tutar
 
-            degerler = [beyan_t, unvan, vergino, ilkT, sonT, sozno, soztarih, None]
-            for ci, val in enumerate(degerler):
+            # Ünvan: 1) DB unvanı (moy_kaydet_veriler'den), 2) Moy musteri_unvani, 3) SGM
+            db_unvan = str(row.get("unvan", "") or "")
+            if byn:
+                _mu = byn.get("musteri_unvani", "") or ""
+                _sk = byn.get("sgm_kodu", "") or ""
+                _sa = byn.get("sgm_adi",  "") or ""
+                if db_unvan and db_unvan not in ("-", ""):
+                    unvan = db_unvan
+                elif _mu:
+                    unvan = _mu
+                elif _sk and _sa:
+                    unvan = f"{_sk} - {_sa}"
+                elif _sa:
+                    unvan = _sa
+                elif _sk:
+                    unvan = _sk
+                else:
+                    unvan = "-"
+            else:
+                unvan = db_unvan if db_unvan and db_unvan not in ("-", "") else "-"
+
+
+            # Tutarı Python'da toplama — sadece sayım için
+            row_key = (row.get("id", id(row)), tutar)
+            sayilan_tutarlar.add(row_key)
+
+            # Beyanname sütunları
+            if byn:
+                byn_belge = BELGE_TUR_ADI.get(byn.get("belge_turu", ""), byn.get("belge_turu", ""))
+                byn_donem = byn.get("donem_adi", "") or ""
+                onay_raw  = byn.get("onay_tarihi", "") or ""
+                if len(str(onay_raw)) >= 8 and str(onay_raw)[:8].isdigit():
+                    s = str(onay_raw)
+                    byn_onay = f"{s[6:8]}.{s[4:6]}.{s[0:4]}"
+                else:
+                    byn_onay = str(onay_raw)
+                byn_durum  = byn.get("belge_durumu", "") or ""
+                byn_kayit  = byn.get("kayit_no", None)
+            else:
+                byn_belge = "—"
+                byn_donem = "—"
+                byn_onay  = "—"
+                byn_durum = "—"
+                byn_kayit = None
+
+            # Sütun verileri: 0-7 normal, 8-11 beyanname, 12 PDF butonu
+            metin_sutunlar = [
+                beyan_t, unvan, vergino, ilkT, sonT, sozno, soztarih,
+                None,  # tutar (özel)
+                byn_belge, byn_donem, byn_onay, byn_durum,
+            ]
+
+            for ci, val in enumerate(metin_sutunlar):
                 if ci == 7:
-                    # Tutar — sağa yasla, teal renk ama siyah hover için
-                    it = QTableWidgetItem(f"{tutar:,.2f}")
+                    it = QTableWidgetItem(f"{tutar:,.2f} ₺")
                     it.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     )
                     it.setForeground(QColor("#0f766e"))
                     it.setFont(QFont("", -1, QFont.Weight.Bold))
+                elif ci in (8, 9):
+                    # Belge türü ve dönem — mavi vurgu
+                    it = QTableWidgetItem(str(val))
+                    it.setTextAlignment(
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                    )
+                    it.setForeground(QColor("#1d4ed8") if byn else QColor("#94a3b8"))
+                elif ci == 10:
+                    # Onay tarihi — yeşil
+                    it = QTableWidgetItem(str(val))
+                    it.setTextAlignment(
+                        Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+                    )
+                    it.setForeground(QColor("#059669") if byn else QColor("#94a3b8"))
+                elif ci == 11:
+                    # Belge durumu
+                    it = QTableWidgetItem(str(val))
+                    it.setTextAlignment(
+                        Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+                    )
+                    it.setForeground(QColor("#7c3aed") if byn else QColor("#94a3b8"))
                 else:
                     it = QTableWidgetItem(str(val))
                     it.setTextAlignment(
                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
                     )
                     it.setForeground(QColor("#1e293b"))
-                # satır indeksini UserRole olarak sakla (preview için)
-                it.setData(Qt.ItemDataRole.UserRole, ri)
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self._tablo.setItem(ri, ci, it)
 
-        self._tablo.setSortingEnabled(True)
+            # ── PDF butonu (sütun 12) — her zaman göster, tıklayınca Moy'a bağlan ──
+            ilk_tarih_row  = str(row.get("ilkTarih", "") or "")
+            hesap_kodu_row = str(row.get("hesapKodu", "") or "")
+
+            if byn_kayit is not None:
+                # Beyanname zaten yüklü — direkt aç
+                def _make_handler(kno, mno):
+                    def _h():
+                        self._pdf_ac_kayit(kno, mno)
+                    return _h
+                pdf_btn = QPushButton("📄 PDF")
+                pdf_btn.setFixedHeight(26)
+                pdf_btn.setStyleSheet(
+                    "QPushButton{background:#0f766e;color:white;border:none;"
+                    "border-radius:5px;font-size:11px;font-weight:600;padding:0 6px;}"
+                    "QPushButton:hover{background:#0d9488;}"
+                )
+                pdf_btn.clicked.connect(_make_handler(byn_kayit, self._musterino))
+                self._tablo.setCellWidget(ri, 12, pdf_btn)
+            elif ilk_tarih_row:
+                # Moy'dan o an beyanname listesi çek → kayit_no bul → PDF aç
+                def _make_lazy_handler(ilk_t, hkod, mno):
+                    def _h():
+                        self._pdf_ac_lazy(ilk_t, hkod, mno)
+                    return _h
+                pdf_btn = QPushButton("📄 PDF")
+                pdf_btn.setFixedHeight(26)
+                pdf_btn.setStyleSheet(
+                    "QPushButton{background:#0f766e;color:white;border:none;"
+                    "border-radius:5px;font-size:11px;font-weight:600;padding:0 6px;}"
+                    "QPushButton:hover{background:#0d9488;}"
+                )
+                pdf_btn.clicked.connect(
+                    _make_lazy_handler(ilk_tarih_row, hesap_kodu_row, self._musterino)
+                )
+                self._tablo.setCellWidget(ri, 12, pdf_btn)
+            else:
+                no_pdf = QLabel("—")
+                no_pdf.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                no_pdf.setStyleSheet("color:#94a3b8;font-size:11px;")
+                self._tablo.setCellWidget(ri, 12, no_pdf)
+
 
         # Özet
         ilk_txt = self._ilk_de.date().toString("dd.MM.yyyy")
@@ -2547,18 +2679,78 @@ class KurumOdemeDialog(QDialog):
         self._ozet_lbl.setText(
             f"📅 {ilk_txt} — {son_txt}  │  "
             f"<b>{len(self._rows)}</b> kayıt  │  "
-            f"Toplam: <b>{toplam:,.2f} ₺</b>"
+            f"Toplam: <b>{self._sql_toplam:,.2f} ₺</b>"
         )
         self._ozet_lbl.setTextFormat(Qt.TextFormat.RichText)
 
-    # ── Satır tıklama → Beyanname preview ───────────────────────────────────
+    # ── PDF Aç (Kayıt No ile) ────────────────────────────────────────────────
 
-    def _on_satir_tikla(self, row: int, _col: int):
-        if row < 0 or row >= len(self._rows):
+    def _pdf_ac_kayit(self, kayit_no: int, musterino: int):
+        from services.moy_service import get_beyanname_pdf_bytes
+        import tempfile, os, subprocess, sys
+        pdf_bytes = get_beyanname_pdf_bytes(musterino, kayit_no)
+        if not pdf_bytes:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "PDF Bulunamadı",
+                "Bu beyanname için PDF verisi bulunamadı.\n"
+                "(beyanname_gib tablosunda kayıt yok)")
             return
-        veri = self._rows[row]
-        dlg = BeyannamePreviewDialog(veri, self._musterino, self)
-        dlg.exec()
+        workspace_tmp = os.path.expanduser("~/NakitAkim/data/tmp")
+        os.makedirs(workspace_tmp, exist_ok=True)
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".pdf",
+            prefix=f"beyanname_{kayit_no}_",
+            dir=workspace_tmp,
+            delete=False
+        )
+        tmp.write(pdf_bytes)
+        tmp.close()
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", tmp.name])
+            elif sys.platform == "win32":
+                os.startfile(tmp.name)
+            else:
+                subprocess.Popen(["xdg-open", tmp.name])
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Hata", f"PDF açılamadı: {e}")
+
+    def _pdf_ac_lazy(self, ilk_tarih: str, hesap_kodu: str, musterino: int):
+        """PDF butonuna tıklanınca o an Moy'dan beyanname listesini çeker."""
+        from PyQt6.QtWidgets import QMessageBox, QInputDialog
+        from services.moy_service import get_beyanname_listesi
+
+        try:
+            beyanlar = get_beyanname_listesi(musterino, ilk_tarih, hesap_kodu=hesap_kodu)
+        except Exception as e:
+            QMessageBox.warning(self, "Moy Bağlantı Hatası",
+                f"Beyanname listesi alınamadı:\n{e}")
+            return
+
+        if not beyanlar:
+            QMessageBox.information(self, "PDF Bulunamadı",
+                "Bu tarihe ait beyanname bulunamadı.")
+            return
+
+        if len(beyanlar) == 1:
+            self._pdf_ac_kayit(beyanlar[0]["kayit_no"], musterino)
+        else:
+            # Birden fazla beyanname — seçim sun
+            secenekler = [
+                f"{b['belge_turu']} — {b.get('donem_adi', '')} (Onay: {b.get('onay_tarihi', '')})"
+                for b in beyanlar
+            ]
+            secim, ok = QInputDialog.getItem(
+                self, "Beyanname Seç",
+                "Bu tarihe ait birden fazla beyanname var. Hangisini açmak istiyorsunuz?",
+                secenekler, 0, False
+            )
+            if ok and secim:
+                idx = secenekler.index(secim)
+                self._pdf_ac_kayit(beyanlar[idx]["kayit_no"], musterino)
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2584,7 +2776,7 @@ class BeyannamePreviewDialog(QDialog):
     BELGE_TUR_ADI = {
         "KDV1":     "KDV Beyannamesi (1.Tür)",
         "KDV2":     "KDV Beyannamesi (2.Tür)",
-        "MUHSGK":   "Muhtasar ve SGK Beyannamesi",
+        "MUHSGK":   "SGK Tahakkuk Fişi (5510)",   # PDF başlığıyla uyumlu
         "KGECICI":  "Kurumlar Vergisi Geçici Beyan",
         "KURUMLAR": "Kurumlar Vergisi Beyannamesi",
         "LEVHA":    "Levha Beyannamesi",
@@ -2682,8 +2874,8 @@ class BeyannamePreviewDialog(QDialog):
         sol_lay.addWidget(sol_baslik)
 
         self._liste = QTableWidget()
-        self._liste.setColumnCount(3)
-        self._liste.setHorizontalHeaderLabels(["Tür", "Dönem", "Onay"])
+        self._liste.setColumnCount(4)
+        self._liste.setHorizontalHeaderLabels(["Tür", "Dönem", "Onay", "SGM"])
         self._liste.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._liste.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._liste.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -2802,16 +2994,37 @@ class BeyannamePreviewDialog(QDialog):
     # ── Beyanname listesini yükle ─────────────────────────────────────────────
 
     def _load_beyanlar(self):
-        ilk_tarih = self._veri.get("ilkTarih", "") or ""
+        ilk_tarih   = self._veri.get("ilkTarih", "") or ""
+        hesap_kodu  = self._veri.get("hesapKodu", "") or ""
         if not ilk_tarih:
             self._liste_bos_goster("İlk tarih bilgisi yok.")
             return
+
+        # Yükleme dialogu
+        from PyQt6.QtWidgets import QProgressDialog, QApplication
+        from PyQt6.QtCore import Qt
+        prog = QProgressDialog(
+            "🔄  Beyanname bilgileri MöY'dan çekiliyor...\n"
+            "Lütfen bekleyiniz.",
+            None, 0, 0, self
+        )
+        prog.setWindowTitle("Lütfen Bekleyiniz")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.setValue(0)
+        QApplication.processEvents()
+
         self._yukleniyor_lbl.show()
         from services.moy_service import get_beyanname_listesi
         try:
-            self._beyanlar = get_beyanname_listesi(self._musterino, ilk_tarih)
-        except Exception as e:
+            self._beyanlar = get_beyanname_listesi(
+                self._musterino,
+                ilk_tarih,
+                hesap_kodu=hesap_kodu
+            )
+        except Exception:
             self._beyanlar = []
+        prog.close()
         self._yukleniyor_lbl.hide()
         self._liste_doldur()
 
@@ -2828,11 +3041,21 @@ class BeyannamePreviewDialog(QDialog):
 
             tur_adi = self.BELGE_TUR_ADI.get(b["belge_turu"], b["belge_turu"])
             onay = b["onay_tarihi"]
-            # YYYYMMDDHHMMSS → DD.MM.YYYY
             if len(onay) >= 8 and onay[:8].isdigit():
                 onay = f"{onay[6:8]}.{onay[4:6]}.{onay[0:4]}"
 
-            for ci, txt in enumerate([tur_adi, b["donem_adi"], onay]):
+            _sk = b.get("sgm_kodu", "") or ""
+            _sa = b.get("sgm_adi",  "") or ""
+            if _sk and _sa:
+                sgm_txt = f"{_sk} - {_sa}"
+            elif _sa:
+                sgm_txt = _sa
+            elif _sk:
+                sgm_txt = _sk
+            else:
+                sgm_txt = "—"
+
+            for ci, txt in enumerate([tur_adi, b["donem_adi"], onay, sgm_txt]):
                 it = QTableWidgetItem(str(txt))
                 it.setTextAlignment(
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
@@ -2853,7 +3076,17 @@ class BeyannamePreviewDialog(QDialog):
             return
         b = self._beyanlar[row]
         tur_adi = self.BELGE_TUR_ADI.get(b["belge_turu"], b["belge_turu"])
-        self._pdf_baslik.setText(f"{tur_adi}  —  {b['donem_adi']} {b['donem_no']}")
+        _sk = b.get("sgm_kodu", "") or ""
+        _sa = b.get("sgm_adi",  "") or ""
+        if _sk and _sa:
+            sgm_ek = f"  •  SGM: {_sk} – {_sa}"
+        elif _sa:
+            sgm_ek = f"  •  SGM: {_sa}"
+        elif _sk:
+            sgm_ek = f"  •  SGM: {_sk}"
+        else:
+            sgm_ek = ""
+        self._pdf_baslik.setText(f"{tur_adi}  —  {b['donem_adi']} {b['donem_no']}{sgm_ek}")
         self._pdf_alan.setText("⏳  PDF yükleniyor...")
         self._pdf_alan.show()
         self._pdf_img_scroll.hide()

@@ -1652,7 +1652,7 @@ class VomsisCard(QFrame):
         self._start_date.setFixedHeight(34)
         self._start_date.setFixedWidth(130)
         self._start_date.setDisplayFormat("dd.MM.yyyy")
-        self._start_date.setDate(QDate.currentDate().addDays(-7))
+        self._start_date.setDate(QDate(2026, 1, 1))  # Baştan sona çek
         self._start_date.setCalendarPopup(True)
         self._start_date.setStyleSheet(DATE_STYLE)
         date_row.addWidget(self._start_date)
@@ -2328,9 +2328,10 @@ class MoyCard(QFrame):
     # Veri başarıyla çekildiğinde dashboard’u haberdar eder
     data_changed = pyqtSignal()
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid         = userid
+        self._musterino      = musterino
         self._test_worker: MoyTestWorker   | None = None
         self._kaydet_worker: MoyKaydetWorker | None = None
         self._test_basarili  = False
@@ -2632,7 +2633,7 @@ class MoyCard(QFrame):
         self._set_busy(True, f"⚡  {yil} yılı hareketleri alınıyor...")
         self._ozel_veri.hide()
 
-        self._kaydet_worker = MoyKaydetWorker(self._userid, yil)
+        self._kaydet_worker = MoyKaydetWorker(self._musterino, yil)
         self._kaydet_worker.progress.connect(
             lambda msg: self._show_sonuc(msg, "#0891b2")
         )
@@ -3936,7 +3937,7 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._vomsis_card)
 
         # Moy kartı — VOMSİS'in altında
-        self._moy_card = MoyCard(self._userid)
+        self._moy_card = MoyCard(self._userid, musterino=self._musterino)
         self._content_layout.addWidget(self._moy_card)
 
         # Vergi Muhtasar kartı — Moy'un altında
@@ -4822,7 +4823,7 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._vomsis_card)
 
         # Moy kartı — VOMSİS'in altında
-        self._moy_card = MoyCard(self._userid)
+        self._moy_card = MoyCard(self._userid, musterino=self._musterino)
         self._content_layout.addWidget(self._moy_card)
 
         # Vergi Muhtasar kartı — Moy'un altında
