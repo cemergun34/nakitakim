@@ -240,7 +240,7 @@ class WebAdminClient:
     def upload_fatura_xml(self, file_path: str, sirket: str = "") -> dict:
         import requests
         import os
-        url = f"{self.base_url}/api/fatura/upload_xml"
+        url = f"{self.base_url}/api/womsis/fatura/upload_xml"
         try:
             with open(file_path, "rb") as f:
                 files = {"file": (os.path.basename(file_path), f, "application/xml")}
@@ -259,9 +259,9 @@ class WebAdminClient:
     def download_fatura_xml(self, filename: str, save_path: str, sirket: str = "") -> dict:
         import requests
         if sirket:
-            url = f"{self.base_url}/api/fatura/get_xml/{sirket}/{filename}"
+            url = f"{self.base_url}/api/womsis/fatura/get_xml/{sirket}/{filename}"
         else:
-            url = f"{self.base_url}/api/fatura/get_xml/{filename}"
+            url = f"{self.base_url}/api/womsis/fatura/get_xml/{filename}"
         headers = {"X-API-Key": self.api_key}
         try:
             resp = requests.get(url, headers=headers, timeout=self.timeout)
@@ -271,7 +271,7 @@ class WebAdminClient:
                 return {"success": True}
             elif resp.status_code == 404:
                 if sirket:
-                    url2 = f"{self.base_url}/api/fatura/get_xml/{filename}"
+                    url2 = f"{self.base_url}/api/womsis/fatura/get_xml/{filename}"
                     resp2 = requests.get(url2, headers=headers, timeout=self.timeout)
                     if resp2.status_code == 200:
                         with open(save_path, "wb") as f:
