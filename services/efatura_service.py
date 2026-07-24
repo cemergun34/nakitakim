@@ -225,8 +225,25 @@ def import_xml(xml_path: str, userid: int, mod: str = None,
             import re
             cfg = get_webadmin_config(userid)
             if cfg.get("enabled") and cfg.get("base_url"):
-                firmaadi = cfg.get("firmaadi") or f"sirket_{userid}"
-                sirket_klasor = re.sub(r'[^\w\-]', '_', firmaadi.strip())
+                sirket_klasor = ""
+                try:
+                    from db.db_config import get_pg_params
+                    import psycopg2
+                    pg_conn = psycopg2.connect(**get_pg_params())
+                    pg_cur = pg_conn.cursor()
+                    pg_cur.execute(
+                        "SELECT unvan FROM sirket_profili WHERE userid=%s AND musterino=%s LIMIT 1",
+                        (userid, 1)
+                    )
+                    row = pg_cur.fetchone()
+                    pg_cur.close(); pg_conn.close()
+                    if row and row[0]:
+                        sirket_klasor = re.sub(r'[^\w\-]', '_', row[0].strip())
+                except Exception:
+                    pass
+                if not sirket_klasor:
+                    sirket_klasor = cfg.get("firmaadi") or f"sirket_{userid}"
+                    sirket_klasor = re.sub(r'[^\w\-]', '_', str(sirket_klasor).strip())
                 client = WebAdminClient(base_url=cfg["base_url"], api_key=cfg["api_key"])
                 res = client.upload_fatura_xml(dest_path, sirket=sirket_klasor)
                 if not res.get("success"):
