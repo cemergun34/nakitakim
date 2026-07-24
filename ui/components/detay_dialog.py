@@ -477,12 +477,6 @@ class IslemTablosu(QTableWidget):
         dlg.exec()
 
     def _show_fatura_preview(self, row_data):
-        """
-        E-fatura XML önizlemesini gösterir.
-        - lxml mevcutsa: gömülü XSLT ile HTML dönüşümü yapılır
-        - PyQt6.QtWebEngineWidgets mevcutsa: uygulama içinde gösterilir
-        - Aksi hâlde: sistem tarayıcısında açılır (webbrowser fallback)
-        """
         import os, base64, tempfile
         import xml.etree.ElementTree as ET
         from PyQt6.QtWidgets import QMessageBox
@@ -490,7 +484,6 @@ class IslemTablosu(QTableWidget):
         xml_path  = row_data.get("xml_dosya")
         fatura_no = row_data.get("faturano") or row_data.get("faturaNo") or "?"
 
-        # ── 1. XML kayıt kontrolü ────────────────────────────────────────────
         if not xml_path or str(xml_path).strip().lower() in ("none", "null", ""):
             QMessageBox.information(
                 self,
@@ -500,13 +493,43 @@ class IslemTablosu(QTableWidget):
             )
             return
 
-        # ── 2. XML oku ───────────────────────────────────────────────────────
-        try:
-            with open(xml_path, "rb") as fh:
-                xml_bytes = fh.read()
-        except Exception as exc:
-            QMessageBox.critical(self, "Hata", f"XML okunamadı:\n{exc}")
-            return
+        xml_bytes = None
+
+        if xml_path and os.path.exists(xml_path):
+            try:
+                with open(xml_path, "rb") as fh:
+                    xml_bytes = fh.read()
+            except Exception as exc:
+                QMessageBox.critical(self, "Hata", f"Yerel XML okunamadı:\n{exc}")
+                return
+        else:
+            from services.webadmin_client import WebAdminClient, get_webadmin_config
+            userid = row_data.get("userid", 1)
+            cfg = get_webadmin_config(userid)
+            if not cfg.get("enabled") or not cfg.get("base_url"):
+                QMessageBox.warning(
+                    self, "Sunucu Yapılandırması Yok",
+                    "Fatura XML dosyası bu bilgisayarda bulunamadı ve\n"
+                    "webadmin sunucusu yapılandırılmadığından indirilemedi.\n\n"
+                    "Ayarlar → WebAdmin bağlantısını kontrol edin."
+                )
+                return
+            client = WebAdminClient(base_url=cfg["base_url"], api_key=cfg["api_key"])
+            filename = os.path.basename(xml_path) if xml_path else f"fatura_{fatura_no}.xml"
+            temp_path = os.path.join(tempfile.gettempdir(), filename)
+            
+            res = client.download_fatura_xml(filename, temp_path)
+            if res.get("success"):
+                try:
+                    with open(temp_path, "rb") as fh:
+                        xml_bytes = fh.read()
+                except Exception as exc:
+                    QMessageBox.critical(self, "Hata", f"İndirilen XML okunamadı:\n{exc}")
+                    return
+            else:
+                err_msg = res.get("error", "Bilinmeyen sunucu hatası")
+                QMessageBox.critical(self, "Hata", err_msg)
+                return
 
         # ── 3. lxml mevcutsa XSLT dönüşümü dene ────────────────────────────
         html_bytes = None

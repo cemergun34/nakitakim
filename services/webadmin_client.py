@@ -33,28 +33,21 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BASE_URL = "http://178.233.204.224:5050"
 _DEFAULT_API_KEY  = "nakit-akim-api-key-2024-secure"
 
-# ── Config: PostgreSQL webadmin_sirket_config tablosundan ──────────────────────
-
 def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
-    """
-    Şirket bazlı webadmin bağlantı ayarlarını PostgreSQL'den okur.
-    webadmin_sirket_config tablosunda userid + musterino eşleşen satırı döner.
-    Bulunamazsa güvenli varsayılanları döner.
-    """
     defaults = {
         "base_url": _DEFAULT_BASE_URL,
         "api_key":  _DEFAULT_API_KEY,
         "timeout":  60,
-        "enabled":  False,   # DB'de tanımlı değilse pasif
+        "enabled":  False,
         "firmaadi": "",
     }
     try:
-        from db.database import get_connection
-        conn = get_connection()
-        if conn is None:
-            return defaults
-        cur = conn.cursor()
-        # Önce userid + musterino ile dene
+        from db.db_config import get_pg_params
+        import psycopg2
+        import psycopg2.extras
+        params = get_pg_params()
+        conn = psycopg2.connect(**params)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
             SELECT webadmin_url, api_key, aktif, firmaadi
@@ -65,7 +58,6 @@ def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
             (userid, musterino)
         )
         row = cur.fetchone()
-        # Geriye dönük uyumluluk: musterino henüz eklenmemiş kayıtlar
         if not row:
             cur.execute(
                 """
@@ -77,19 +69,28 @@ def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
                 (userid,)
             )
             row = cur.fetchone()
+        if not row:
+            cur.execute(
+                """
+                SELECT webadmin_url, api_key, aktif, firmaadi
+                FROM webadmin_sirket_config
+                WHERE aktif = TRUE
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
         cur.close()
         conn.close()
         if row:
-            defaults["base_url"] = (row[0] or _DEFAULT_BASE_URL).rstrip("/")
-            defaults["api_key"]  = row[1] or _DEFAULT_API_KEY
-            defaults["enabled"]  = bool(row[2])
-            defaults["firmaadi"] = row[3] or ""
+            defaults["base_url"] = (row["webadmin_url"] or _DEFAULT_BASE_URL).rstrip("/")
+            defaults["api_key"]  = row["api_key"] or _DEFAULT_API_KEY
+            defaults["enabled"]  = bool(row["aktif"])
+            defaults["firmaadi"] = row["firmaadi"] or ""
     except Exception as e:
         logger.warning("webadmin_sirket_config okunamadı: %s", e)
     return defaults
 
 
-# Geriye dönük uyumluluk — eski çağrılar için
 def _load_client_config() -> dict:
     return {
         "base_url": _DEFAULT_BASE_URL,
@@ -97,6 +98,8 @@ def _load_client_config() -> dict:
         "timeout":  60,
         "enabled":  True,
     }
+
+
 
 
 class WebAdminClient:
@@ -233,6 +236,58 @@ class WebAdminClient:
             return resp.status_code in (200, 302, 404)
         except Exception:
             return False
+
+    def upload_fatura_xml(self, file_path: str, sirket: str = "") -> dict:
+        import requests
+        import os
+        url = f"{self.base_url}/api/fatura/upload_xml"
+        try:
+            with open(file_path, "rb") as f:
+                files = {"file": (os.path.basename(file_path), f, "application/xml")}
+                headers = {"X-API-Key": self.api_key}
+                data = {"sirket": sirket} if sirket else {}
+                resp = requests.post(url, headers=headers, files=files, data=data, timeout=self.timeout)
+                resp.raise_for_status()
+                return resp.json()
+        except requests.exceptions.ConnectionError:
+            from urllib.parse import urlparse
+            host = urlparse(self.base_url).hostname or self.base_url
+            return {"success": False, "error": f"Bu hizmet {host} sunucusu geçici hizmet dışı olduğundan çalışmıyor"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def download_fatura_xml(self, filename: str, save_path: str, sirket: str = "") -> dict:
+        import requests
+        if sirket:
+            url = f"{self.base_url}/api/fatura/get_xml/{sirket}/{filename}"
+        else:
+            url = f"{self.base_url}/api/fatura/get_xml/{filename}"
+        headers = {"X-API-Key": self.api_key}
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.timeout)
+            if resp.status_code == 200:
+                with open(save_path, "wb") as f:
+                    f.write(resp.content)
+                return {"success": True}
+            elif resp.status_code == 404:
+                if sirket:
+                    url2 = f"{self.base_url}/api/fatura/get_xml/{filename}"
+                    resp2 = requests.get(url2, headers=headers, timeout=self.timeout)
+                    if resp2.status_code == 200:
+                        with open(save_path, "wb") as f:
+                            f.write(resp2.content)
+                        return {"success": True}
+                return {"success": False, "error": "Fatura XML dosyası sunucuda bulunamadı."}
+            else:
+                resp.raise_for_status()
+                return {"success": False, "error": f"Sunucu hatası: {resp.status_code}"}
+        except requests.exceptions.ConnectionError:
+            from urllib.parse import urlparse
+            host = urlparse(self.base_url).hostname or self.base_url
+            return {"success": False, "error": f"Bu hizmet {host} sunucusu geçici hizmet dışı olduğundan çalışmıyor"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
 
 
 # ── PyQt6 QThread Worker ──────────────────────────────────────────────────────

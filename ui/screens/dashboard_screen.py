@@ -1337,12 +1337,15 @@ class DashboardScreen(QWidget):
             wb.remove(wb.active)   # default boş sheet'i sil
     
             def get_val(r, key):
-                if key in r:
-                    return r[key]
-                kl = key.lower()
-                if kl in r:
-                    return r[kl]
-                return None
+                try:
+                    if key in r:
+                        return r[key]
+                    kl = key.lower()
+                    if kl in r:
+                        return r[kl]
+                    return None
+                except (TypeError, AttributeError):
+                    return None
 
             def _fmt_goster_yyyymmdd(t) -> str:
                 s = str(t) if t else ""

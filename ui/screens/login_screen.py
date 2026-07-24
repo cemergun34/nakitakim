@@ -520,10 +520,16 @@ class GradientPanel(QWidget):
 
         # ── Veritabanı Bilgi Rozeti (alt sol köşe) ─────────────────────────────
         try:
-            from db.db_config import get_mode
+            from db.db_config import get_mode, get_pg_params
             mode = get_mode()
             if mode == "postgres":
-                db_text = "🌐  Sunucu (PostgreSQL) veritabanınızda açılıyorsunuz."
+                try:
+                    pg = get_pg_params()
+                    host = pg.get("host", "?")
+                    port = pg.get("port", 5432)
+                    db_text = f"🌐  {host}:{port} sunucusuna bağlanılıyor"
+                except Exception:
+                    db_text = "🌐  Sunucu (PostgreSQL) veritabanı"
                 bg_color = QColor("#1D4ED8")
             else:
                 db_text = "💻  Lokal (SQLite) veritabanınızda açılıyorsunuz."

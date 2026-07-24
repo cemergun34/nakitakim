@@ -220,6 +220,22 @@ def import_xml(xml_path: str, userid: int, mod: str = None,
         dest_path = os.path.join(UPLOAD_DIR, dest_name)
         shutil.copy2(xml_path, dest_path)
 
+        try:
+            from services.webadmin_client import WebAdminClient, get_webadmin_config
+            import re
+            cfg = get_webadmin_config(userid)
+            if cfg.get("enabled") and cfg.get("base_url"):
+                firmaadi = cfg.get("firmaadi") or f"sirket_{userid}"
+                sirket_klasor = re.sub(r'[^\w\-]', '_', firmaadi.strip())
+                client = WebAdminClient(base_url=cfg["base_url"], api_key=cfg["api_key"])
+                res = client.upload_fatura_xml(dest_path, sirket=sirket_klasor)
+                if not res.get("success"):
+                    import logging
+                    logging.getLogger(__name__).warning("Fatura XML sunucuya yüklenemedi: %s", res.get("error"))
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Fatura XML sunucuya yüklenirken hata oluştu: %s", e)
+
         # 6b - GHH'dan formno ve sube bul (unvan eşleşmesiyle)
         # XML'den gelen fatura unvanı, GHH.aciklama ile ILIKE eşleşirse
         # o kaydın form_id'sini formno olarak, sube'sini kayıda yazarız.
