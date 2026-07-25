@@ -268,7 +268,7 @@ def get_ongoru_gelir_tablo(userid: int, yil: Optional[int] = None) -> dict:
     else:
         ay_ex  = "CAST(strftime('%m', sonTarih) AS INTEGER)"
         yil_ex = "strftime('%Y', sonTarih)"
-        col_mno = musterino
+        col_mno = 'musterino'
 
     conn = get_connection()
     try:
@@ -282,7 +282,7 @@ def get_ongoru_gelir_tablo(userid: int, yil: Optional[int] = None) -> dict:
               AND {yil_ex} = ?
             GROUP BY hesapadi, {ay_ex}
             ORDER BY hesapadi, {ay_ex}
-        """, (str(userid), str(yil))).fetchall()
+        """, (str(musterino), str(yil))).fetchall()
 
         return _pivot_to_monthly_table(rows)
     finally:

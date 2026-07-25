@@ -102,7 +102,7 @@ def get_genel_hesap_toplam(userid: int, musterino: int, yil: Optional[int] = Non
     return {"gelir": gelir, "gider": gider, "net": gelir - gider}
 
 
-def get_fatura_toplamlar(userid: int, yil: Optional[int] = None) -> dict:
+def get_fatura_toplamlar(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """Kesilen (gelir) ve Gelen (gider) fatura toplamları — tek sorgu."""
     yil = yil or _year()
     conn = get_connection()
@@ -112,8 +112,8 @@ def get_fatura_toplamlar(userid: int, yil: Optional[int] = None) -> dict:
                 COALESCE(SUM(CASE WHEN gelirgidermod='gelir' THEN CAST(toplam AS REAL) ELSE 0 END), 0) AS kesilen,
                 COALESCE(SUM(CASE WHEN gelirgidermod='gider' THEN CAST(toplam AS REAL) ELSE 0 END), 0) AS gelen
             FROM faturalar
-            WHERE userid = ? AND {left4('tarih')} = ?
-        """, (userid, str(yil))).fetchone()
+            WHERE userid = ? AND musterino = ? AND {left4('tarih')} = ?
+        """, (userid, musterino, str(yil))).fetchone()
         return {
             "kesilen": float(row["kesilen"] or 0),
             "gelen":   float(row["gelen"]   or 0),
@@ -192,7 +192,7 @@ def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) 
         conn.close()
 
 
-def get_sanal_pos_toplam(userid: int, yil: Optional[int] = None) -> dict:
+def get_sanal_pos_toplam(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
     """
     PayTR Sanal POS toplamları — paytr tablosundan.
     PHP admin.php kartındaki değerlerin karşılığı.
@@ -210,8 +210,8 @@ def get_sanal_pos_toplam(userid: int, yil: Optional[int] = None) -> dict:
             "SELECT "
             "  COALESCE(SUM(islemtutari), 0) AS islem, "
             "  COALESCE(SUM(odemetutari), 0) AS odeme "
-            "FROM paytr WHERE userid = ?",
-            (userid,)
+            "FROM paytr WHERE userid = ? AND musterino = ?",
+            (userid, musterino)
         ).fetchone()
 
         islem = float(row["islem"] or 0)
@@ -220,9 +220,9 @@ def get_sanal_pos_toplam(userid: int, yil: Optional[int] = None) -> dict:
 
         try:
             log_row = conn.execute(
-                "SELECT son_sync_tarihi FROM paytr_sync_log WHERE userid = ? "
+                "SELECT son_sync_tarihi FROM paytr_sync_log WHERE userid = ? AND musterino = ? "
                 "ORDER BY id DESC LIMIT 1",
-                (userid,)
+                (userid, musterino)
             ).fetchone()
             son_sync = log_row["son_sync_tarihi"] if log_row else None
         except Exception:
@@ -526,11 +526,11 @@ def get_all_dashboard_data(
         "nakit_kasa":     get_nakit_kasa_toplam(userid, musterino, yil, _ghh=ghh),
         "gider":          get_gider_toplam(userid, musterino, yil, _ghh=ghh),
         "genel_hesap":    get_genel_hesap_toplam(userid, musterino, yil, _ghh=ghh),
-        "faturalar":      get_fatura_toplamlar(userid, yil),
+        "faturalar":      get_fatura_toplamlar(userid, musterino, yil),
         "gider_pusulasi": get_gider_pusulasi(userid, musterino, yil, _ghh=ghh),
         "maas_kira_smm":  get_maaş_kira_smm(userid, musterino, yil, _ghh=ghh),
         "kurum_odemeleri":get_kurum_odemeleri(userid, musterino, yil),
-        "sanal_pos":      get_sanal_pos_toplam(userid, yil),
+        "sanal_pos":      get_sanal_pos_toplam(userid, musterino, yil),
         "kredi_karti":    get_kredi_karti_toplam(userid, musterino, yil, ilk_tarih=ilk_tarih, son_tarih=son_tarih),
         "bankalar":       get_bankalar_toplam(userid, musterino),
         "monthly_chart":  get_monthly_comparison(userid, musterino, yil,

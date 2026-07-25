@@ -89,7 +89,7 @@ def get_genel_hesap_sube_ozet(userid: int, musterino: int, yil: int) -> list[dic
         conn.close()
 
 
-def get_fatura_sube_ozet(userid: int, yil: int, mod: str) -> list[dict]:
+def get_fatura_sube_ozet(userid: int, musterino: int, yil: int, mod: str) -> list[dict]:
     """
     Kesilen / Gelen Fatura kartına tıklandığında unvan bazlı özet.
     mod: 'gelir' (kesilen) | 'gider' (gelen)
@@ -104,12 +104,13 @@ def get_fatura_sube_ozet(userid: int, yil: int, mod: str) -> list[dict]:
                 COUNT(*) AS kayit_sayisi
             FROM faturalar
             WHERE userid = ?
+              AND musterino = ?
               AND {left4("tarih")} = ?
               AND {_mod_col} = ?
             GROUP BY unvan
             ORDER BY toplam_tutar DESC
             LIMIT 50
-        """, (userid, str(yil), mod)).fetchall()
+        """, (userid, musterino, str(yil), mod)).fetchall()
         return list(rows)
     finally:
         conn.close()
@@ -294,10 +295,11 @@ def get_genel_hesap_detay(userid: int, musterino: int, yil: int,
         conn.close()
 
 
-def get_fatura_detay(userid: int, yil: int, mod: str,
+def get_fatura_detay(userid: int, musterino: int, yil: int, mod: str,
                       unvan: str = None) -> list[dict]:
     """
     faturalar tablosundan belirli ünvan filtreli liste.
+    mod: 'gelir' | 'gider'
     """
     _mod_col  = _col("gelirGiderMod", "gelirgidermod")
     _fmod_col = _col("faturaMod", "faturamod")
@@ -316,11 +318,12 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
                        {_ykl_col} AS yuklenmetarihi, xml_dosya, fatura
                 FROM faturalar
                 WHERE userid = ?
+                  AND musterino = ?
                   AND {left4("tarih")} = ?
                   AND {_mod_col} = ?
                   AND unvan = ?
                 ORDER BY tarih DESC, id DESC
-            """, (userid, str(yil), mod, unvan)).fetchall()
+            """, (userid, musterino, str(yil), mod, unvan)).fetchall()
         else:
             rows = conn.execute(f"""
                 SELECT id, tarih, unvan, vergino,
@@ -332,11 +335,12 @@ def get_fatura_detay(userid: int, yil: int, mod: str,
                        {_ykl_col} AS yuklenmetarihi, xml_dosya, fatura
                 FROM faturalar
                 WHERE userid = ?
+                  AND musterino = ?
                   AND {left4("tarih")} = ?
                   AND {_mod_col} = ?
                 ORDER BY tarih DESC, id DESC
                 LIMIT 10000
-            """, (userid, str(yil), mod)).fetchall()
+            """, (userid, musterino, str(yil), mod)).fetchall()
         
         res = []
         import json
