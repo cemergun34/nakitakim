@@ -415,7 +415,11 @@ def _get_pg_connection() -> _PgWrapper:
         last_ping = getattr(_pg_local, "last_ping", 0.0)
 
         if now - last_ping < _PG_PING_INTERVAL:
-            # Son ping yeni — ağa gitme, direkt kullan
+            # Son ping yeni — ağa gitme, ama transaction temizle
+            try:
+                raw.rollback()   # Aborted transaction varsa temizle
+            except Exception:
+                pass
             return _PgWrapper(raw)
 
         # Ping aralığı doldu — SSL katmanını gerçekten test et

@@ -256,7 +256,7 @@ def get_vadesi_gecen_tahsilatlar(userid: int, musterino: int) -> list:
 
 # ─── FİNANSAL ÖNGÖRÜLER ──────────────────────────────────────────────────────
 
-def get_ongoru_gelir_tablo(userid: int, yil: Optional[int] = None) -> dict:
+def get_ongoru_gelir_tablo(userid: int, musterino: int = 1, yil: Optional[int] = None) -> dict:
     """Nakit akış parametrelerinden öngörü gelir tablosu."""
     yil = yil or _year()
     # nakitakis_hareket.sonTarih TEXT formatı: YYYY-MM-DD veya YYYYMMDD
@@ -287,6 +287,7 @@ def get_ongoru_gelir_tablo(userid: int, yil: Optional[int] = None) -> dict:
         return _pivot_to_monthly_table(rows)
     finally:
         conn.close()
+
 
 
 # ─── YARDIMCI FONKSİYONLAR ────────────────────────────────────────────────────
