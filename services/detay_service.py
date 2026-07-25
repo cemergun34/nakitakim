@@ -44,6 +44,13 @@ def get_nakit_kasa_sube_ozet(userid: int, musterino: int, yil: int) -> list[dict
     """
     conn = get_connection()
     try:
+        row = conn.execute(
+            "SELECT "
+            "  COALESCE(SUM(islemtutari), 0) AS islem, "
+            "  COALESCE(SUM(odemetutari), 0) AS odeme "
+            "FROM paytr WHERE userid::text = ? AND musterino::text = ?",
+            (str(userid), str(musterino))
+        ).fetchone()
         rows = conn.execute(f"""
             SELECT
                 COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
@@ -91,26 +98,42 @@ def get_genel_hesap_sube_ozet(userid: int, musterino: int, yil: int) -> list[dic
 
 def get_fatura_sube_ozet(userid: int, musterino: int, yil: int, mod: str) -> list[dict]:
     """
-    Kesilen / Gelen Fatura kartına tıklandığında unvan bazlı özet.
-    mod: 'gelir' (kesilen) | 'gider' (gelen)
+    Kesilen (mod='gelir') veya Gelen (mod='gider') faturaları
+    genel_hesap_hareketleri.form_id üzerinden şubeye bağlayarak
+    şube bazlı özet döndürür.
+
+    Faturanın form_no'su eşleşmiyorsa '(Şubesiz)' grubuna düşer.
+
+    DÜZELTME: CTE ile her formno'ya karşılık gelen şubeyi önce MIN ile
+    tekil hale getirip sonra JOIN yapıyoruz. Böylece genel_hesap_hareketleri'nde
+    aynı form_id'e birden fazla satır olsa bile SUM(f.toplam) çarpılmıyor.
     """
-    _mod_col = _col("gelirGiderMod", "gelirgidermod")
+    _mod_col  = _col("gelirGiderMod", "gelirgidermod")
+    _fno_col  = _col("formNo", "formno")
     conn = get_connection()
     try:
         rows = conn.execute(f"""
+            WITH sube_map AS (
+                SELECT form_id,
+                       MIN(sube) AS sube
+                FROM genel_hesap_hareketleri
+                WHERE userid    = ?
+                  AND musteri_no = ?
+                GROUP BY form_id
+            )
             SELECT
-                COALESCE(unvan, '(Bilinmeyen)') AS sube_adi,
-                {_round_sql("SUM(CAST(toplam AS REAL))")} AS toplam_tutar,
-                COUNT(*) AS kayit_sayisi
-            FROM faturalar
-            WHERE userid = ?
-              AND musterino = ?
-              AND {left4("tarih")} = ?
-              AND {_mod_col} = ?
-            GROUP BY unvan
-            ORDER BY toplam_tutar DESC
-            LIMIT 50
-        """, (userid, musterino, str(yil), mod)).fetchall()
+                COALESCE(sm.sube, '(Şubesiz)')         AS sube_adi,
+                COUNT(f.id)                             AS kayit_sayisi,
+                {_round_sql("SUM(CAST(f.toplam AS REAL))")} AS toplam_gelir,
+                0                                       AS toplam_gider
+            FROM faturalar f
+            LEFT JOIN sube_map sm ON sm.form_id = f.{_fno_col}
+            WHERE f.userid    = ?
+              AND {left4("f.tarih")} = ?
+              AND f.{_mod_col}  = ?
+            GROUP BY COALESCE(sm.sube, '(Şubesiz)')
+            ORDER BY toplam_gelir DESC
+        """, (userid, musterino, userid, str(yil), mod)).fetchall()
         return list(rows)
     finally:
         conn.close()
@@ -325,6 +348,11 @@ def get_fatura_detay(userid: int, musterino: int, yil: int, mod: str,
                 ORDER BY tarih DESC, id DESC
             """, (userid, musterino, str(yil), mod, unvan)).fetchall()
         else:
+            log_row = conn.execute(
+                "SELECT son_sync_tarihi FROM paytr_sync_log WHERE userid::text = ? AND musterino::text = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (str(userid), str(musterino))
+            ).fetchone()
             rows = conn.execute(f"""
                 SELECT id, tarih, unvan, vergino,
                        {_col("vergiDairesi", "vergidairesi")} AS vergidairesi,
@@ -496,82 +524,53 @@ def get_fatura_detay_by_sube(userid: int, musterino: int, yil: int,
     """
     Belirli bir şubeye ait fatura listesi.
     Şube bilgisi genel_hesap_hareketleri.sube üzerinden JOIN ile gelir.
-    sube_adi=None        → tüm şubeler (filtre yok).
+    CTE + MIN(sube) kullanılarak JOIN duplicate önlenir.
+    sube_adi=None        → tüm şubeler.
     sube_adi='(Şubesiz)' → eşleşmeyen faturalar.
     """
-    _mod_col = _col("gelirGiderMod", "gelirgidermod")
+    _mod_col  = _col("gelirGiderMod", "gelirgidermod")
     _fmod_col = _col("faturaMod", "faturamod")
     _fno_col  = _col("formNo", "formno")
     _ykl_col  = _col("yuklenmeTarihi", "yuklenmetarihi")
     conn = get_connection()
     try:
+        # CTE: her form_id için tek (MIN) sube seç → duplicate engel
+        cte = f"""
+            WITH sube_map AS (
+                SELECT form_id, MIN(sube) AS sube
+                FROM genel_hesap_hareketleri
+                WHERE userid = ? AND musteri_no = ?
+                GROUP BY form_id
+            )
+        """
+
+        sel_cols = f"""
+            SELECT f.id, f.tarih, f.unvan, f.vergino,
+                   {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,
+                   {_col("f.faturano", "f.faturano")} AS faturano,
+                   f.toplam, f.{_mod_col} AS gelirgidermod,
+                   f.{_fmod_col} AS faturamod,
+                   f.{_fno_col} AS formno, f.kaynak,
+                   f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
+                   sm.sube AS sube_adi, f.fatura
+            FROM faturalar f
+            LEFT JOIN sube_map sm ON sm.form_id = f.{_fno_col}
+        """
+
+        base_where = f"WHERE f.userid = ? AND f.musterino = ? AND {left4('f.tarih')} = ? AND f.{_mod_col} = ?"
+
         if sube_adi is None:
-            # Tüm şubeler — JOIN olmadan, tüm faturaları getir
-            rows = conn.execute(f"""
-                SELECT DISTINCT f.id, f.tarih, f.unvan, f.vergino,
-                       {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,
-                       {_col("f.faturano", "f.faturano")} AS faturano,
-                       f.toplam, f.{_mod_col} AS gelirgidermod,
-                       f.{_fmod_col} AS faturamod,
-                       f.{_fno_col} AS formno, f.kaynak,
-                       f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
-                       g.sube AS sube_adi, f.fatura
-                FROM faturalar f
-                LEFT JOIN genel_hesap_hareketleri g
-                    ON g.form_id = f.{_fno_col}
-                   AND g.userid  = f.userid
-                   AND g.musteri_no = ?
-                WHERE f.userid = ?
-                  AND {left4("f.tarih")} = ?
-                  AND f.{_mod_col} = ?
-                ORDER BY f.tarih DESC, f.id DESC
-                LIMIT 5000
-            """, (musterino, userid, str(yil), mod)).fetchall()
+            sql    = cte + sel_cols + base_where + " ORDER BY f.tarih DESC, f.id DESC LIMIT 5000"
+            params = (userid, musterino, userid, musterino, str(yil), mod)
         elif sube_adi == "(Şubesiz)":
-            rows = conn.execute(f"""
-                SELECT DISTINCT f.id, f.tarih, f.unvan, f.vergino,
-                       {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,
-                       {_col("f.faturano", "f.faturano")} AS faturano,
-                       f.toplam, f.{_mod_col} AS gelirgidermod,
-                       f.{_fmod_col} AS faturamod,
-                       f.{_fno_col} AS formno, f.kaynak,
-                       f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
-                       NULL AS sube_adi, f.fatura
-                FROM faturalar f
-                LEFT JOIN genel_hesap_hareketleri g
-                    ON g.form_id = f.{_fno_col}
-                   AND g.userid  = f.userid
-                   AND g.musteri_no = ?
-                WHERE f.userid = ?
-                  AND {left4("f.tarih")} = ?
-                  AND f.{_mod_col} = ?
-                  AND g.id IS NULL
-                ORDER BY f.tarih DESC, f.id DESC
-                LIMIT 5000
-            """, (musterino, userid, str(yil), mod)).fetchall()
+            sql    = cte + sel_cols + base_where + " AND sm.form_id IS NULL ORDER BY f.tarih DESC, f.id DESC LIMIT 5000"
+            params = (userid, musterino, userid, musterino, str(yil), mod)
         else:
-            rows = conn.execute(f"""
-                SELECT DISTINCT f.id, f.tarih, f.unvan, f.vergino,
-                       {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,
-                       {_col("f.faturano", "f.faturano")} AS faturano,
-                       f.toplam, f.{_mod_col} AS gelirgidermod,
-                       f.{_fmod_col} AS faturamod,
-                       f.{_fno_col} AS formno, f.kaynak,
-                       f.{_ykl_col} AS yuklenmetarihi, f.xml_dosya,
-                       g.sube AS sube_adi, f.fatura
-                FROM faturalar f
-                JOIN genel_hesap_hareketleri g
-                    ON g.form_id = f.{_fno_col}
-                   AND g.userid  = f.userid
-                   AND g.musteri_no = ?
-                WHERE f.userid = ?
-                  AND {left4("f.tarih")} = ?
-                  AND f.{_mod_col} = ?
-                  AND g.sube = ?
-                ORDER BY f.tarih DESC, f.id DESC
-                LIMIT 5000
-            """, (musterino, userid, str(yil), mod, sube_adi)).fetchall()
-        
+            sql    = cte + sel_cols + base_where + " AND sm.sube = ? ORDER BY f.tarih DESC, f.id DESC LIMIT 5000"
+            params = (userid, musterino, userid, musterino, str(yil), mod, sube_adi)
+
+        rows = conn.execute(sql, params).fetchall()
+
         res = []
         import json
         for r in rows:
