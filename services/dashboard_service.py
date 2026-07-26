@@ -196,6 +196,7 @@ def get_sanal_pos_toplam(userid: int, musterino: int, yil: Optional[int] = None)
     """
     PayTR Sanal POS toplamları — paytr tablosundan.
     PHP admin.php kartındaki değerlerin karşılığı.
+    paytr.musterino → TEXT, paytr.islemtarihi → 'DD.MM.YYYY' formatı.
     """
     yil = yil or _year()
     conn = get_connection()
@@ -206,12 +207,16 @@ def get_sanal_pos_toplam(userid: int, musterino: int, yil: Optional[int] = None)
         if not tablo_var:
             return {"islem": 0.0, "odeme": 0.0, "fark_val": 0.0, "son_guncelleme": ""}
 
+        # paytr.musterino TEXT tipinde olduğu için str() ile geçiriyoruz.
+        # islemtarihi 'DD.MM.YYYY' formatında → yıl = SUBSTR(islemtarihi, 7, 4)
         row = conn.execute(
             "SELECT "
             "  COALESCE(SUM(islemtutari), 0) AS islem, "
             "  COALESCE(SUM(odemetutari), 0) AS odeme "
-            "FROM paytr WHERE userid = ? AND musterino = ?",
-            (userid, musterino)
+            "FROM paytr "
+            "WHERE userid = ? AND musterino = ? "
+            "AND SUBSTR(islemtarihi, 7, 4) = ?",
+            (userid, str(musterino), str(yil))
         ).fetchone()
 
         islem = float(row["islem"] or 0)
@@ -222,7 +227,7 @@ def get_sanal_pos_toplam(userid: int, musterino: int, yil: Optional[int] = None)
             log_row = conn.execute(
                 "SELECT son_sync_tarihi FROM paytr_sync_log WHERE userid = ? AND musterino = ? "
                 "ORDER BY id DESC LIMIT 1",
-                (userid, musterino)
+                (userid, str(musterino))
             ).fetchone()
             son_sync = log_row["son_sync_tarihi"] if log_row else None
         except Exception:
@@ -244,10 +249,13 @@ def get_sanal_pos_toplam(userid: int, musterino: int, yil: Optional[int] = None)
             "fark_val":       fark,
             "son_guncelleme": son_guncelleme,
         }
-    except Exception:
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning("get_sanal_pos_toplam hata: %s", exc)
         return {"islem": 0.0, "odeme": 0.0, "fark_val": 0.0, "son_guncelleme": ""}
     finally:
         conn.close()
+
 
 
 def get_kredi_karti_toplam(userid: int, musterino: int, yil: Optional[int] = None, ilk_tarih: Optional[str] = None, son_tarih: Optional[str] = None) -> dict:
