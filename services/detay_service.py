@@ -545,7 +545,7 @@ def get_fatura_detay_by_sube(userid: int, musterino: int, yil: int,
         """
 
         sel_cols = f"""
-            SELECT f.id, f.tarih, f.unvan, f.vergino,
+            SELECT f.id, f.userid, f.musterino, f.tarih, f.unvan, f.vergino,
                    {_col("f.vergiDairesi", "f.vergidairesi")} AS vergidairesi,
                    {_col("f.faturano", "f.faturano")} AS faturano,
                    f.toplam, f.{_mod_col} AS gelirgidermod,
@@ -699,7 +699,7 @@ def get_fatura_by_formno(userid: int, formno: str) -> list[dict]:
     conn = get_connection()
     try:
         rows = conn.execute(f"""
-            SELECT id, tarih, unvan, vergino,
+            SELECT id, userid, musterino, tarih, unvan, vergino,
                    {_col("vergiDairesi", "vergidairesi")} AS vergidairesi,
                    {_col("faturano", "faturano")} AS faturano,
                    toplam, {_mod_col} AS gelirgidermod,
