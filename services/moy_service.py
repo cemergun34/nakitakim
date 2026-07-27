@@ -682,7 +682,14 @@ def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = ""
             params = (musteri_no, ilk_tarih, ilk_tarih)
             
         rows = conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+
+        # SQL IN(...) order'ı sıralamayı garanti etmez — Python'da tercih sırasına göre sırala
+        if izinli_turler:
+            order_map = {t: i for i, t in enumerate(izinli_turler)}
+            result.sort(key=lambda r: order_map.get(r.get("belge_turu", ""), 999))
+
+        return result
     finally:
         conn.close()
 
