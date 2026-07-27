@@ -1685,7 +1685,7 @@ class DashboardScreen(QWidget):
                 "730.08": "730.08 — İşçilik / Müşavirlik Giderleri",
             }
             
-            kurum_rows_dialog = get_kurum_odemeleri_detay_tarih(mno, ilk_yyyymmdd, son_yyyymmdd)
+            kurum_rows_dialog, _toplam = get_kurum_odemeleri_detay_tarih(mno, ilk_yyyymmdd, son_yyyymmdd)
             kurum_export_rows = []
             for r in kurum_rows_dialog:
                 kod = get_val(r, "hesapKodu")
