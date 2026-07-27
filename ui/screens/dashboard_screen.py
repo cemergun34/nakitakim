@@ -2518,9 +2518,25 @@ class KurumOdemeDialog(QDialog):
         )
         self._pdf_map = {}
 
-        # Sadece DB'den — byn=None, beyanname sütunları "—" gösterir
-        # PDF butonu tıklanınca o an Moy'a bağlanır (_pdf_ac_kayit)
-        self._enriched = [(row, None) for row in self._rows]
+        from services.moy_service import get_local_beyannameler
+
+        self._enriched = []
+        for row in self._rows:
+            ilk_tarih = str(row.get("ilkTarih", row.get("ilktarih", "")))
+            hkod = str(row.get("hesapKodu", row.get("hesapkodu", "")))
+            
+            # Yerel tablodan eşleşen beyannameleri ara
+            beyanlar = []
+            if ilk_tarih:
+                beyanlar = get_local_beyannameler(self._musterino, ilk_tarih, hkod)
+            
+            if beyanlar:
+                # Eşleşen beyannameler varsa ilkini bağla
+                # Not: PDF butonuna tıklanınca yine Moy'dan güncel PDF çekecek veya yerelden kayit_no kullanacak
+                self._enriched.append((row, beyanlar[0]))
+            else:
+                self._enriched.append((row, None))
+
         self._doldur()
 
 

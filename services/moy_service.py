@@ -370,6 +370,25 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
             (t1, t2, kayit_nom)
         )
         data_361 = cursor.fetchall()
+
+        # ── Yıllık Beyanname Listelerini de Çek ──
+        _log("📄  Yıllık beyanname verileri çekiliyor...")
+        cursor.execute(
+            """SELECT bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu, bl.Donem_No, bl.Donem_adi,
+                      bl.Onay_Tarihi, bl.Belge_No, bl.Belge_Durumu,
+                      bl.Beyan_Tarih_1, bl.Beyan_Tarih_2,
+                      COALESCE(s.Adi, '') AS Sube_Adi, COALESCE(s.Alanlar, '') AS Sube_Alanlar,
+                      COALESCE(mk.Soyadi_Unvani, '') AS Musteri_Unvani
+               FROM beyanname_listeleri bl
+               LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No = bl.Sube_Kayit_No
+               LEFT JOIN tanim_musteri_karti mk ON mk.Kayit_No = bl.Musteri_Kayit_No
+               WHERE bl.Musteri_Kayit_No = %s
+                 AND bl.Belge_Tipi = 'Byn'
+                 AND (bl.Beyan_Tarih_1 BETWEEN %s AND %s OR bl.Beyan_Tarih_2 BETWEEN %s AND %s)""",
+            (kayit_nom, t1, t2, t1, t2)
+        )
+        data_beyan = cursor.fetchall()
+        
         cursor.close()
         cnx.close()
 
@@ -504,7 +523,6 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                 detaylar.append({"kod": "730.08", "tarih": tarih_fmt, "tutar": tutar_val})
                 _log(f"✔  {basari} kayıt işlendi (361→730.08) — {tarih_fmt} / {tutar_val:.2f}...")
             else:
-                # Mevcut kayıt varsa ünvan/vergino güncelle
                 local.execute(
                     """UPDATE nakitakis_parametre
                        SET unvan=?, vergiNo=?
@@ -512,6 +530,50 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                     (unvan_val, vergino_val, musteri_no, "730.08", tarih_fmt)
                 )
 
+        # ── Beyannameleri Kaydet ──
+        _log("💾  Beyannameler yerel veritabanına kaydediliyor...")
+        eklenen_beyan = 0
+        for b_row in data_beyan:
+            b_kayit_no = int(b_row["Kayit_No"])
+            # Önce kontrol
+            mevcut = local.execute("SELECT id FROM moy_beyannameler WHERE kayit_no = ?", (b_kayit_no,)).fetchone()
+            if mevcut:
+                local.execute(
+                    """UPDATE moy_beyannameler SET
+                        musteri_no=?, belge_tipi=?, belge_turu=?, donem_no=?, donem_adi=?,
+                        onay_tarihi=?, belge_no=?, belge_durumu=?, beyan_tarih_1=?, beyan_tarih_2=?,
+                        sube_adi=?, sube_alanlar=?, musteri_unvani=?, updated_at=CURRENT_TIMESTAMP
+                       WHERE kayit_no = ?""",
+                    (
+                        musteri_no, str(b_row.get("Belge_Tipi") or ""), str(b_row.get("Belge_Turu") or ""),
+                        str(b_row.get("Donem_No") or ""), str(b_row.get("Donem_adi") or ""),
+                        str(b_row.get("Onay_Tarihi") or ""), str(b_row.get("Belge_No") or ""),
+                        str(b_row.get("Belge_Durumu") or ""), str(b_row.get("Beyan_Tarih_1") or ""),
+                        str(b_row.get("Beyan_Tarih_2") or ""), str(b_row.get("Sube_Adi") or ""),
+                        str(b_row.get("Sube_Alanlar") or ""), str(b_row.get("Musteri_Unvani") or ""),
+                        b_kayit_no
+                    )
+                )
+            else:
+                local.execute(
+                    """INSERT INTO moy_beyannameler 
+                        (musteri_no, kayit_no, belge_tipi, belge_turu, donem_no, donem_adi,
+                         onay_tarihi, belge_no, belge_durumu, beyan_tarih_1, beyan_tarih_2,
+                         sube_adi, sube_alanlar, musteri_unvani)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        musteri_no, b_kayit_no, str(b_row.get("Belge_Tipi") or ""), str(b_row.get("Belge_Turu") or ""),
+                        str(b_row.get("Donem_No") or ""), str(b_row.get("Donem_adi") or ""),
+                        str(b_row.get("Onay_Tarihi") or ""), str(b_row.get("Belge_No") or ""),
+                        str(b_row.get("Belge_Durumu") or ""), str(b_row.get("Beyan_Tarih_1") or ""),
+                        str(b_row.get("Beyan_Tarih_2") or ""), str(b_row.get("Sube_Adi") or ""),
+                        str(b_row.get("Sube_Alanlar") or ""), str(b_row.get("Musteri_Unvani") or "")
+                    )
+                )
+                eklenen_beyan += 1
+        
+        if eklenen_beyan > 0:
+            _log(f"✔  {eklenen_beyan} beyanname önbelleğe alındı.")
 
 
         local.commit()
@@ -560,6 +622,69 @@ def _fmt_tarih(tarih_obj) -> str:
     except Exception:
         return str(tarih_obj)
 
+
+def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = "") -> list[dict]:
+    """
+    Yerel moy_beyannameler önbellek tablosundan ilgili tarihe ait beyannameleri bulur.
+    """
+    from db.database import get_connection
+    HESAP_BELGE_MAP = {
+        "770.01": ("KDV1", "KDV2", "MUHSGK"),
+        "730.08": ("MUHTAR", "MUHSGK"),
+    }
+    izinli_turler = HESAP_BELGE_MAP.get(hesap_kodu, None)
+    
+    conn = get_connection()
+    try:
+        if izinli_turler:
+            placeholders = ", ".join(["?"] * len(izinli_turler))
+            sql = f"""SELECT 
+                        kayit_no AS kayit_no,
+                        belge_tipi AS belge_tipi,
+                        belge_turu AS belge_turu,
+                        donem_no AS donem_no,
+                        donem_adi AS donem_adi,
+                        onay_tarihi AS onay_tarihi,
+                        belge_no AS belge_no,
+                        belge_durumu AS belge_durumu,
+                        beyan_tarih_1 AS beyan_tarih_1,
+                        beyan_tarih_2 AS beyan_tarih_2,
+                        sube_adi AS sgm_kodu, 
+                        sube_alanlar AS sgm_adi,
+                        musteri_unvani AS musteri_unvani
+                      FROM moy_beyannameler
+                      WHERE musteri_no = ?
+                        AND beyan_tarih_1 <= ?
+                        AND beyan_tarih_2 >= ?
+                        AND belge_turu IN ({placeholders})
+                      ORDER BY kayit_no DESC"""
+            params = (musteri_no, ilk_tarih, ilk_tarih, *izinli_turler)
+        else:
+            sql = """SELECT 
+                        kayit_no AS kayit_no,
+                        belge_tipi AS belge_tipi,
+                        belge_turu AS belge_turu,
+                        donem_no AS donem_no,
+                        donem_adi AS donem_adi,
+                        onay_tarihi AS onay_tarihi,
+                        belge_no AS belge_no,
+                        belge_durumu AS belge_durumu,
+                        beyan_tarih_1 AS beyan_tarih_1,
+                        beyan_tarih_2 AS beyan_tarih_2,
+                        sube_adi AS sgm_kodu, 
+                        sube_alanlar AS sgm_adi,
+                        musteri_unvani AS musteri_unvani
+                     FROM moy_beyannameler
+                     WHERE musteri_no = ?
+                       AND beyan_tarih_1 <= ?
+                       AND beyan_tarih_2 >= ?
+                     ORDER BY kayit_no DESC"""
+            params = (musteri_no, ilk_tarih, ilk_tarih)
+            
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Beyanname PDF — Moy'dan gerçek zamanlı çekme

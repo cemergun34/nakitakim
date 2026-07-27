@@ -413,4 +413,29 @@ WHERE NOT EXISTS (
     SELECT 1 FROM uyelik WHERE kullanici_adi = 'superadmin'
 );
 
+-- ── Moy Beyannameler Önbellek Tablosu ─────────────────────────────────────
+-- Moy'dan toplu veri çekme işlemi sırasında beyanname detaylarını önbelleğe alır
+CREATE TABLE IF NOT EXISTS moy_beyannameler (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    musteri_no       INTEGER NOT NULL,
+    kayit_no         INTEGER NOT NULL UNIQUE, -- Moy'daki Kayit_No (beyanname_listeleri)
+    belge_tipi       TEXT,
+    belge_turu       TEXT,
+    donem_no         TEXT,
+    donem_adi        TEXT,
+    onay_tarihi      TEXT,
+    belge_no         TEXT,
+    belge_durumu     TEXT,
+    beyan_tarih_1    TEXT,
+    beyan_tarih_2    TEXT,
+    sube_adi         TEXT,
+    sube_alanlar     TEXT,
+    musteri_unvani   TEXT,
+    created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_moy_beyannameler_musteri
+    ON moy_beyannameler(musteri_no, beyan_tarih_1, beyan_tarih_2);
+
 """
