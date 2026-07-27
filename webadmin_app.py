@@ -3,10 +3,12 @@ webadmin-nakitakim Flask Uygulamasi
 Port: 5050 (WEBADMIN_PORT env ile degistirilebilir)
 """
 import os
+import json
 import hashlib
 import logging
 from datetime import datetime, timedelta
 from functools import wraps
+from pathlib import Path
 
 from flask import (
     Flask, request, jsonify, session,
@@ -21,19 +23,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger('webadmin')
 
-# ── Config (ortam degiskenlerinden oku) ───────────────────────────────────────
+
+# ── DB Config: once db_config.json oku, yoksa env variable kullan ─────────────
+def _load_pg_config() -> dict:
+    """
+    PostgreSQL parametrelerini su sirada arar:
+    1. ~/NakitAkim/data/db_config.json  (nakitakim masaustu uygulamasi ile paylasilan config)
+    2. Ortam degiskenleri (PG_HOST, PG_PASS vb.)
+    3. Sabit varsayilan degerler
+    """
+    config_file = Path.home() / 'NakitAkim' / 'data' / 'db_config.json'
+    cfg = {}
+    if config_file.exists():
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            logger.info('DB config db_config.json dosyasindan yuklendi: %s', config_file)
+        except Exception as e:
+            logger.warning('db_config.json okunamadi, env variable kullanilacak: %s', e)
+
+    return {
+        'host':    os.environ.get('PG_HOST',    cfg.get('pg_host',   '127.0.0.1')),
+        'port':    int(os.environ.get('PG_PORT', cfg.get('pg_port',   5432))),
+        'dbname':  os.environ.get('PG_DB',      cfg.get('pg_db',     'neondb')),
+        'user':    os.environ.get('PG_USER',     cfg.get('pg_user',   'postgres')),
+        'password':os.environ.get('PG_PASS',     cfg.get('pg_pass',   '123')),
+        'sslmode': os.environ.get('PG_SSLMODE',  cfg.get('pg_sslmode','prefer')),
+    }
+
+
+_PG_CFG = _load_pg_config()   # Uygulama baslarken bir kez yukle
+
+# ── Config (ortam degiskenlerinden / db_config.json'dan) ─────────────────────
 SECRET_KEY = os.environ.get('WEBADMIN_SECRET_KEY', 'fallback-secret-key-change-me')
 DEBUG      = os.environ.get('WEBADMIN_DEBUG', 'false').lower() == 'true'
 PORT       = int(os.environ.get('WEBADMIN_PORT', 5050))
 HOST       = os.environ.get('WEBADMIN_HOST', '0.0.0.0')
 API_KEY    = os.environ.get('WEBADMIN_API_KEY', 'nakit-akim-api-key-2024-secure')
 
-PG_HOST    = os.environ.get('PG_HOST', '127.0.0.1')
-PG_PORT    = int(os.environ.get('PG_PORT', 5432))
-PG_DB      = os.environ.get('PG_DB', 'neondb')
-PG_USER    = os.environ.get('PG_USER', 'postgres')
-PG_PASS    = os.environ.get('PG_PASS', '123')
-PG_SSLMODE = os.environ.get('PG_SSLMODE', 'disable')
+# Geri uyumluluk icin (HTML template'lerinde kullaniliyor)
+PG_HOST    = _PG_CFG['host']
+PG_PORT    = _PG_CFG['port']
+PG_DB      = _PG_CFG['dbname']
+PG_USER    = _PG_CFG['user']
+PG_PASS    = _PG_CFG['password']
+PG_SSLMODE = _PG_CFG['sslmode']
 
 # ── Flask App ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -42,15 +76,33 @@ app.secret_key = SECRET_KEY
 
 # ── DB Baglantisi ─────────────────────────────────────────────────────────────
 def get_db():
+    """
+    Her cagirida yeni bir psycopg2 baglantisi acar.
+    TCP keepalive etkinlestirilmistir — bulut DB'lerde (Neon, Supabase)
+    uzun sureli bekleme sonrasi baglanti kopmasinı onler.
+    """
     import psycopg2
+    cfg = _PG_CFG
+    # Neon SNI endpoint fix
+    options = None
+    if 'neon.tech' in cfg['host']:
+        endpoint_id = cfg['host'].split('.')[0]
+        options = f'project={endpoint_id}'
+
     conn = psycopg2.connect(
-        host=PG_HOST,
-        port=PG_PORT,
-        dbname=PG_DB,
-        user=PG_USER,
-        password=PG_PASS,
-        sslmode=PG_SSLMODE,
-        connect_timeout=10
+        host=cfg['host'],
+        port=cfg['port'],
+        dbname=cfg['dbname'],
+        user=cfg['user'],
+        password=cfg['password'],
+        sslmode=cfg['sslmode'],
+        connect_timeout=15,
+        # TCP keepalive: hareketsiz baglantilar uzun sure bekledikten sonra kopmasin
+        keepalives=1,
+        keepalives_idle=30,    # 30 saniye hareketsizlik sonrasi keepalive gonder
+        keepalives_interval=10, # 10 saniyede bir tekrarla
+        keepalives_count=5,    # 5 basarisiz keepalive'dan sonra baglantıyı kes
+        **(({'options': options}) if options else {})
     )
     return conn
 
@@ -332,6 +384,7 @@ def api_womsis_accounts():
 # ── Yardimci Fonksiyonlar ─────────────────────────────────────────────────────
 def _authenticate(username: str, password: str):
     """uyelik tablosundan kullanici dogrula — duz metin / MD5 / bcrypt."""
+    conn = None
     try:
         conn = get_db()
         cur  = conn.cursor()
@@ -344,7 +397,6 @@ def _authenticate(username: str, password: str):
         )
         row = cur.fetchone()
         cur.close()
-        conn.close()
 
         if not row:
             return None
@@ -374,10 +426,18 @@ def _authenticate(username: str, password: str):
     except Exception as e:
         logger.error('Kimlik dogrulama DB hatasi: %s', e)
         return None
+    finally:
+        # Baglanti her durumda kapatilir (exception olsa bile)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _get_womsis_creds(userid: int):
     """vomsisbilgileri tablosundan Womsis bilgilerini getir."""
+    conn = None
     try:
         conn = get_db()
         cur  = conn.cursor()
@@ -387,7 +447,6 @@ def _get_womsis_creds(userid: int):
         )
         row = cur.fetchone()
         cur.close()
-        conn.close()
         if row:
             return {
                 'appkey': row[0] or '',
@@ -398,6 +457,12 @@ def _get_womsis_creds(userid: int):
     except Exception as e:
         logger.error('Womsis creds DB hatasi: %s', e)
         return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def _fetch_womsis_transactions(api_url, app_key, app_secret, start_dt, end_dt):
@@ -445,6 +510,7 @@ def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) 
     saved   = 0
     skipped = 0
     now     = datetime.now()
+    conn    = None   # UnboundLocalError'u onlemek icin onceden None yap
 
     try:
         conn = get_db()
@@ -515,14 +581,20 @@ def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) 
 
         conn.commit()
         cur.close()
-        conn.close()
     except Exception as e:
         logger.error('womsis DB kayit hatasi: %s', e, exc_info=True)
-        try:
-            conn.rollback()
-            conn.close()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        # Baglanti her durumda kapatilir — baglanti sızıntısını onler
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     return saved, skipped
 
@@ -551,4 +623,5 @@ if __name__ == '__main__':
     logger.info('DB     : %s@%s:%s/%s (ssl=%s)', PG_USER, PG_HOST, PG_PORT, PG_DB, PG_SSLMODE)
     logger.info('Debug  : %s', DEBUG)
     logger.info('=' * 50)
-    app.run(host=HOST, port=PORT, debug=DEBUG)
+    # threaded=True: zamanlayici ile UI istekleri birbirini bloklamasin
+    app.run(host=HOST, port=PORT, debug=DEBUG, threaded=True)
