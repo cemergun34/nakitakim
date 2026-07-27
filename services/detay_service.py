@@ -14,7 +14,8 @@ from typing import Optional
 from db.database import get_connection
 from db.db_compat import (
     yr, left4, tarih_yil_hareketler, tarih_iso_hareketler,
-    pg_musterino, pg_hesapkodu, pg_isinv, substr_mid
+    pg_musterino, pg_hesapkodu, pg_isinv, substr_mid,
+    numeric_cast,
 )
 from db.db_config import get_mode
 
@@ -593,11 +594,14 @@ def get_gider_pusulasi_sube_ozet(userid: int, musterino: int, yil: int) -> list[
     """
     conn = get_connection()
     try:
+        # numeric_cast: PG float4 precision kaybını önler, SQLite'da CAST(AS REAL)
+        _gc = numeric_cast("g.gelir")
+        _dc = numeric_cast("g.gider")
         rows = conn.execute(f"""
             SELECT
                 COALESCE(g.sube, '(Şubesiz)') AS sube_adi,
-                {_round_sql("SUM(CAST(g.gelir AS REAL))")} AS toplam_gelir,
-                {_round_sql("SUM(CAST(g.gider AS REAL))")} AS toplam_gider,
+                COALESCE(SUM({_gc}), 0) AS toplam_gelir,
+                COALESCE(SUM({_dc}), 0) AS toplam_gider,
                 COUNT(*) AS kayit_sayisi
             FROM genel_hesap_hareketleri g
             WHERE g.userid = ?

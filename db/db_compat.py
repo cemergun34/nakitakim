@@ -148,3 +148,18 @@ def pg_isinv() -> str:
 def pg_gelirgider() -> str:
     """nakitakis_Parametre: gelirGider (SQLite) | gelirgider (PG)"""
     return "gelirgider" if _pg() else "gelirGider"
+
+
+def numeric_cast(col: str) -> str:
+    """PostgreSQL float4 (real) kolon precision kaybını önlemek için NUMERIC cast.
+
+    PostgreSQL'de gider/gelir kolonları REAL (float4) tipinde saklanabilir.
+    Büyük SUM işlemlerinde float4 precision kaybeder (ör: 11,718,076.50 → 11,718,076.00).
+    Bu fonksiyon PostgreSQL'de ::NUMERIC, SQLite'da CAST(... AS REAL) döndürür.
+
+    Kullanım:
+        SUM({numeric_cast('gider')})   yerine   SUM(gider)
+    """
+    if _pg():
+        return f"({col})::NUMERIC"
+    return f"CAST({col} AS REAL)"

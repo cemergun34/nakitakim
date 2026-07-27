@@ -1330,7 +1330,7 @@ class DashboardScreen(QWidget):
     
         try:
             from db.database import get_connection
-            from db.db_compat import yr
+            from db.db_compat import yr, numeric_cast
             from services import detay_service
     
             wb = openpyxl.Workbook()
@@ -1542,8 +1542,8 @@ class DashboardScreen(QWidget):
                        COALESCE(kategori,'') AS Kategori,
                        COALESCE(teslim_sekli,'') AS "Teslim Şekli",
                        COALESCE(odeme_sekli,'') AS "Ödeme Şekli",
-                       COALESCE(gelir,0) AS "Gelir (₺)",
-                       COALESCE(gider,0) AS "Gider (₺)",
+                       COALESCE({numeric_cast('gelir')},0) AS "Gelir (₺)",
+                       COALESCE({numeric_cast('gider')},0) AS "Gider (₺)",
                        COALESCE(nerden_geliyor,'') AS Kaynak
                 FROM genel_hesap_hareketleri
                 WHERE userid=? AND musteri_no=? AND nerden_geliyor='kasa'
@@ -1644,8 +1644,8 @@ class DashboardScreen(QWidget):
                        COALESCE(aciklama,'') AS Açıklama,
                        COALESCE(teslim_sekli,'') AS "Teslim Şekli",
                        COALESCE(odeme_sekli,'') AS "Ödeme Şekli",
-                       COALESCE(gelir,0) AS "Gelir (₺)",
-                       COALESCE(gider,0) AS "Gider (₺)",
+                       COALESCE({numeric_cast('gelir')},0) AS "Gelir (₺)",
+                       COALESCE({numeric_cast('gider')},0) AS "Gider (₺)",
                        COALESCE(kategori,'') AS Kategori,
                        COALESCE(nerden_geliyor,'') AS Kaynak
                 FROM genel_hesap_hareketleri
@@ -1963,15 +1963,15 @@ class DashboardScreen(QWidget):
             # ═══════════════════════════════════════════════════════════════════
             prog.setLabelText("11/12 Genel Hesap Tablosu...")
             prog.setValue(10)
-            rows = conn.execute("""
+            rows = conn.execute(f"""
                 SELECT tarih_date AS Tarih, form_id AS "Form No",
                        COALESCE(sube,'(Şubesiz)') AS Şube,
                        COALESCE(aciklama,'') AS Açıklama,
                        COALESCE(kategori,'') AS Kategori,
                        COALESCE(teslim_sekli,'') AS "Teslim Şekli",
                        COALESCE(odeme_sekli,'') AS "Ödeme Şekli",
-                       COALESCE(gelir,0) AS "Gelir (₺)",
-                       COALESCE(gider,0) AS "Gider (₺)",
+                       COALESCE({numeric_cast('gelir')},0) AS "Gelir (₺)",
+                       COALESCE({numeric_cast('gider')},0) AS "Gider (₺)",
                        COALESCE(nerden_geliyor,'') AS Kaynak
                 FROM genel_hesap_hareketleri
                 WHERE userid=? AND musteri_no=? AND nerden_geliyor='genelHesap'
@@ -2004,8 +2004,8 @@ class DashboardScreen(QWidget):
                        COALESCE(kategori,'') AS Kategori,
                        COALESCE(teslim_sekli,'') AS "Teslim Şekli",
                        COALESCE(odeme_sekli,'') AS "Ödeme Şekli",
-                       COALESCE(gelir,0) AS "Gelir (₺)",
-                       COALESCE(gider,0) AS "Gider (₺)",
+                       COALESCE({numeric_cast('gelir')},0) AS "Gelir (₺)",
+                       COALESCE({numeric_cast('gider')},0) AS "Gider (₺)",
                        COALESCE(nerden_geliyor,'') AS Kaynak
                 FROM genel_hesap_hareketleri
                 WHERE userid=? AND musteri_no=? AND nerden_geliyor='genelHesap'

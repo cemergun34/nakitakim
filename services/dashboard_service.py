@@ -9,7 +9,8 @@ from db.database import get_connection
 from db.db_compat import (
     yr, mo, left4, right4,
     tarih_iso_hareketler, tarih_yil_hareketler,
-    tablo_var_expr, pg_musterino, pg_hesapkodu, pg_isinv, pg_gelirgider
+    tablo_var_expr, pg_musterino, pg_hesapkodu, pg_isinv, pg_gelirgider,
+    numeric_cast,
 )
 
 
@@ -38,34 +39,38 @@ def _get_genel_hesap_all(
             where_clause = f"{yr('tarih_date')} = ?"
             params = (userid, musterino, str(yil))
 
+        # numeric_cast: PG'de float4 precision kaybını önlemek için ::NUMERIC cast
+        _g = numeric_cast("gelir")
+        _d = numeric_cast("gider")
+
         row = conn.execute(f"""
             SELECT
                 -- Nakit Kasa (nerden_geliyor='kasa')
-                COALESCE(SUM(CASE WHEN nerden_geliyor='kasa' THEN gelir ELSE 0 END), 0) AS kasa_gelir,
-                COALESCE(SUM(CASE WHEN nerden_geliyor='kasa' THEN gider ELSE 0 END), 0) AS kasa_gider,
+                COALESCE(SUM(CASE WHEN nerden_geliyor='kasa' THEN {_g} ELSE 0 END), 0) AS kasa_gelir,
+                COALESCE(SUM(CASE WHEN nerden_geliyor='kasa' THEN {_d} ELSE 0 END), 0) AS kasa_gider,
 
                 -- Genel Hesap (nerden_geliyor='genelHesap')
-                COALESCE(SUM(CASE WHEN nerden_geliyor='genelHesap' THEN gelir ELSE 0 END), 0) AS gh_gelir,
-                COALESCE(SUM(CASE WHEN nerden_geliyor='genelHesap' THEN gider ELSE 0 END), 0) AS gh_gider,
+                COALESCE(SUM(CASE WHEN nerden_geliyor='genelHesap' THEN {_g} ELSE 0 END), 0) AS gh_gelir,
+                COALESCE(SUM(CASE WHEN nerden_geliyor='genelHesap' THEN {_d} ELSE 0 END), 0) AS gh_gider,
 
                 -- Gider Pusulası (teslim_sekli LIKE ...)
-                COALESCE(SUM(CASE WHEN (teslim_sekli LIKE '%%Parça Alımı (Cihaz)%%' OR teslim_sekli LIKE '%%Cihaz Alımı%%') THEN gelir ELSE 0 END), 0) AS pusulasi_gelir,
-                COALESCE(SUM(CASE WHEN (teslim_sekli LIKE '%%Parça Alımı (Cihaz)%%' OR teslim_sekli LIKE '%%Cihaz Alımı%%') THEN gider ELSE 0 END), 0) AS pusulasi_gider,
+                COALESCE(SUM(CASE WHEN (teslim_sekli LIKE '%%Parça Alımı (Cihaz)%%' OR teslim_sekli LIKE '%%Cihaz Alımı%%') THEN {_g} ELSE 0 END), 0) AS pusulasi_gelir,
+                COALESCE(SUM(CASE WHEN (teslim_sekli LIKE '%%Parça Alımı (Cihaz)%%' OR teslim_sekli LIKE '%%Cihaz Alımı%%') THEN {_d} ELSE 0 END), 0) AS pusulasi_gider,
 
                 -- Maaş/Kira/SMM
                 COALESCE(SUM(CASE WHEN nerden_geliyor='gider'
                     AND (teslim_sekli LIKE '%%Maaş%%' OR teslim_sekli LIKE '%%Kira%%'
                       OR teslim_sekli LIKE '%%Müşavirlik%%' OR teslim_sekli LIKE '%%SMM%%')
-                    THEN gider ELSE 0 END), 0) AS maas_kira_toplam,
+                    THEN {_d} ELSE 0 END), 0) AS maas_kira_toplam,
 
                 -- Kurum ödemeleri (genel_hesap kaynağı)
                 COALESCE(SUM(CASE WHEN nerden_geliyor='gider'
                     AND (teslim_sekli LIKE '%%Vergi%%' OR teslim_sekli LIKE '%%SGK%%'
                       OR teslim_sekli LIKE '%%Kurum%%')
-                    THEN gider ELSE 0 END), 0) AS kurum_toplam,
+                    THEN {_d} ELSE 0 END), 0) AS kurum_toplam,
 
                 -- Normal gider (nerden_geliyor='gider', tüm)
-                COALESCE(SUM(CASE WHEN nerden_geliyor='gider' THEN gider ELSE 0 END), 0) AS gider_toplam
+                COALESCE(SUM(CASE WHEN nerden_geliyor='gider' THEN {_d} ELSE 0 END), 0) AS gider_toplam
 
             FROM genel_hesap_hareketleri
             WHERE userid = ?
