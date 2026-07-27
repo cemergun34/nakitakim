@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
     QGridLayout, QFrame, QPushButton, QComboBox, QSizePolicy,
     QDateEdit, QSpacerItem, QDialog, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView
+    QHeaderView, QAbstractItemView, QLineEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate
 from PyQt6.QtGui import QFont
