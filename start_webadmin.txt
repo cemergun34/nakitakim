@@ -7,13 +7,13 @@ echo   Start time: %DATE% %TIME%
 echo ============================================================
 echo.
 
-REM PostgreSQL Settings
-set PG_HOST=127.0.0.1
-set PG_PORT=5432
-set PG_DB=neondb
-set PG_USER=postgres
-set PG_PASS=123
-set PG_SSLMODE=disable
+REM PostgreSQL Settings (Removed to use db_config.json)
+REM set PG_HOST=127.0.0.1
+REM set PG_PORT=5432
+REM set PG_DB=neondb
+REM set PG_USER=postgres
+REM set PG_PASS=123
+REM set PG_SSLMODE=disable
 
 REM Flask Settings
 set WEBADMIN_SECRET_KEY=FpproGizliAnahtar2024XYZ
