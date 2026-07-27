@@ -1719,7 +1719,11 @@ class DashboardScreen(QWidget):
                         son_t = byn.get("beyan_tarih_2", "") or ""
                     if not soz_tar:
                         soz_tar = byn.get("onay_tarihi", "") or ""
-                    byn_belge  = BELGE_TUR_ADI.get(byn.get("belge_turu", ""), byn.get("belge_turu", "") or "")
+                    _raw_bt = byn.get("belge_turu", "")
+                    if _raw_bt == "MUHSGK" and kod == "730.08":
+                        byn_belge = "Muhtasar ve Prim Hizmet Beyannamesi"
+                    else:
+                        byn_belge = BELGE_TUR_ADI.get(_raw_bt, _raw_bt or "")
                     byn_donem  = byn.get("donem_adi", "") or ""
                     byn_durum  = byn.get("belge_durumu", "") or ""
                 else:
@@ -2652,7 +2656,14 @@ class KurumOdemeDialog(QDialog):
 
             # Beyanname sütunları
             if byn:
-                byn_belge = BELGE_TUR_ADI.get(byn.get("belge_turu", ""), byn.get("belge_turu", ""))
+                raw_belge_turu = byn.get("belge_turu", "")
+                # MUHSGK belgesi hesap koduna göre farklı etiket alır:
+                # 770.01 (SGK ödemesi) → Tahakkuk Fişi
+                # 730.08 (Muhtasar)    → Muhtasar ve Prim Hizmet Beyannamesi
+                if raw_belge_turu == "MUHSGK" and kod == "730.08":
+                    byn_belge = "Muhtasar ve Prim Hizmet Beyannamesi"
+                else:
+                    byn_belge = BELGE_TUR_ADI.get(raw_belge_turu, raw_belge_turu)
                 byn_donem = byn.get("donem_adi", "") or ""
                 onay_raw  = byn.get("onay_tarihi", "") or ""
                 if len(str(onay_raw)) >= 8 and str(onay_raw)[:8].isdigit():
