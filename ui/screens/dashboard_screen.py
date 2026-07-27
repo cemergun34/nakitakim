@@ -2358,9 +2358,22 @@ class KurumOdemeDialog(QDialog):
 
         bar.addStretch()
 
+        # ── Arama Kutusu ──
+        bar.addWidget(self._lbl("Ara:"))
+        self._ara_le = QLineEdit()
+        self._ara_le.setPlaceholderText("Beyanname türü, unvan vb...")
+        self._ara_le.setFixedSize(160, 32)
+        self._ara_le.setStyleSheet(
+            "QLineEdit{background:white;border:1.5px solid #cbd5e1;"
+            "border-radius:6px;padding:0 8px;font-size:12px;color:#1e293b;}"
+            "QLineEdit:focus{border-color:#162C47;}"
+        )
+        self._ara_le.textChanged.connect(self._doldur)
+        bar.addWidget(self._ara_le)
+
         # Filtrele butonu
-        self._filtre_btn = QPushButton("🔍  Filtrele")
-        self._filtre_btn.setFixedSize(110, 32)
+        self._filtre_btn = QPushButton("🔍  Tarihi Filtrele")
+        self._filtre_btn.setFixedSize(130, 32)
         self._filtre_btn.setStyleSheet(
             "QPushButton{background:#162C47;color:white;border:none;"
             "border-radius:7px;font-size:12px;font-weight:600;}"
@@ -2528,12 +2541,10 @@ class KurumOdemeDialog(QDialog):
         self._tablo.setRowCount(0)
         toplam = 0.0
         sayilan_tutarlar = set()  # (id, tutar) → toplama bir kez say
+        
+        q = self._ara_le.text().strip().lower() if hasattr(self, "_ara_le") else ""
 
         for ri_idx, (row, byn) in enumerate(self._enriched):
-            ri = self._tablo.rowCount()
-            self._tablo.insertRow(ri)
-            self._tablo.setRowHeight(ri, 32)
-
             kod      = row.get("hesapKodu", "")
             beyan_t  = self.BEYANNAME_TUR.get(kod, self.HESAP_ACIKLAMA.get(kod, kod))
             vergino  = row.get("vergiNo", "") or ""
@@ -2564,6 +2575,13 @@ class KurumOdemeDialog(QDialog):
             else:
                 unvan = db_unvan if db_unvan and db_unvan not in ("-", "") else "-"
 
+            if q:
+                if q not in beyan_t.lower() and q not in unvan.lower() and q not in kod.lower():
+                    continue
+
+            ri = self._tablo.rowCount()
+            self._tablo.insertRow(ri)
+            self._tablo.setRowHeight(ri, 32)
 
             # Tutarı Python'da toplama — sadece sayım için
             row_key = (row.get("id", id(row)), tutar)
