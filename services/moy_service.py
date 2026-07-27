@@ -371,8 +371,8 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
         )
         data_361 = cursor.fetchall()
 
-        # ── Yıllık Beyanname Listelerini de Çek ──
-        _log("📄  Yıllık beyanname verileri çekiliyor...")
+        # ── Yıllık Beyanname (Byn) ve Tahakkuk (Thk) Listelerini Çek ──
+        _log("📄  Yıllık beyanname/tahakkuk verileri çekiliyor...")
         cursor.execute(
             """SELECT bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu, bl.Donem_No, bl.Donem_adi,
                       bl.Onay_Tarihi, bl.Belge_No, bl.Belge_Durumu,
@@ -383,7 +383,7 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No = bl.Sube_Kayit_No
                LEFT JOIN tanim_musteri_karti mk ON mk.Kayit_No = bl.Musteri_Kayit_No
                WHERE bl.Musteri_Kayit_No = %s
-                 AND bl.Belge_Tipi = 'Byn'
+                 AND bl.Belge_Tipi IN ('Byn', 'Thk')
                  AND (bl.Beyan_Tarih_1 BETWEEN %s AND %s OR bl.Beyan_Tarih_2 BETWEEN %s AND %s)""",
             (kayit_nom, t1, t2, t1, t2)
         )
@@ -628,16 +628,25 @@ def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = ""
     Yerel moy_beyannameler önbellek tablosundan ilgili tarihe ait beyannameleri bulur.
     """
     from db.database import get_connection
+    # 770.01 (SGK ödemeleri) → önce Tahakkuk (Thk/MUHSGK), sonra Beyanname (Byn/KDV)
+    # 730.08 (Muhtasar)      → yalnızca Beyanname (Byn/MUHSGK veya MUHTAR)
     HESAP_BELGE_MAP = {
-        "770.01": ("MUHSGK", "KDV1", "KDV2"),  # MUHSGK (SGK Tahakkuk Fişi (5510)) önce aranir
-        "730.08": ("MUHTAR", "MUHSGK"),
+        "770.01": [("Thk", "MUHSGK"), ("Byn", "KDV1"), ("Byn", "KDV2")],
+        "730.08": [("Byn", "MUHSGK"), ("Byn", "MUHTAR")],
     }
-    izinli_turler = HESAP_BELGE_MAP.get(hesap_kodu, None)
+    belge_tipleri_ve_turleri = HESAP_BELGE_MAP.get(hesap_kodu, None)
     
     conn = get_connection()
     try:
-        if izinli_turler:
-            placeholders = ", ".join(["?"] * len(izinli_turler))
+        if belge_tipleri_ve_turleri:
+            # Her kombinasyon için (belge_tipi, belge_turu) çiftleri
+            belge_tipi_listesi  = [bt for bt, _ in belge_tipleri_ve_turleri]
+            belge_turu_listesi  = [br for _, br in belge_tipleri_ve_turleri]
+            # Birden fazla (tip, tur) kombinasyonu için OR koşulu oluştur
+            where_parts = " OR ".join(["(belge_tipi = ? AND belge_turu = ?)" for _ in belge_tipleri_ve_turleri])
+            where_params = []
+            for bt, br in belge_tipleri_ve_turleri:
+                where_params.extend([bt, br])
             sql = f"""SELECT 
                         kayit_no AS kayit_no,
                         belge_tipi AS belge_tipi,
@@ -656,9 +665,9 @@ def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = ""
                       WHERE musteri_no = ?
                         AND beyan_tarih_1 <= ?
                         AND beyan_tarih_2 >= ?
-                        AND belge_turu IN ({placeholders})
+                        AND ({where_parts})
                       ORDER BY kayit_no DESC"""
-            params = (musteri_no, ilk_tarih, ilk_tarih, *izinli_turler)
+            params = (musteri_no, ilk_tarih, ilk_tarih, *where_params)
         else:
             sql = """SELECT 
                         kayit_no AS kayit_no,
@@ -684,10 +693,12 @@ def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = ""
         rows = conn.execute(sql, params).fetchall()
         result = [dict(r) for r in rows]
 
-        # SQL IN(...) order'ı sıralamayı garanti etmez — Python'da tercih sırasına göre sırala
-        if izinli_turler:
-            order_map = {t: i for i, t in enumerate(izinli_turler)}
-            result.sort(key=lambda r: order_map.get(r.get("belge_turu", ""), 999))
+        # Tercih sırasına göre sırala: (belge_tipi, belge_turu) çiftine göre
+        if belge_tipleri_ve_turleri:
+            order_map = {(bt, br): i for i, (bt, br) in enumerate(belge_tipleri_ve_turleri)}
+            result.sort(key=lambda r: order_map.get(
+                (r.get("belge_tipi", ""), r.get("belge_turu", "")), 999
+            ))
 
         return result
     finally:
