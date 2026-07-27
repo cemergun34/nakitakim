@@ -495,40 +495,46 @@ class IslemTablosu(QTableWidget):
 
         xml_bytes = None
 
-        if xml_path and os.path.exists(xml_path):
-            try:
-                with open(xml_path, "rb") as fh:
-                    xml_bytes = fh.read()
-            except Exception as exc:
-                QMessageBox.critical(self, "Hata", f"Yerel XML okunamadı:\n{exc}")
-                return
-        else:
+        # ── Önce sunucudan (webadmin) indirmeyi dene ─────────────────────────
+        # Sunucu yapılandırılmışsa her zaman oradan çek (güncel & çok kullanıcılı).
+        # Sunucu yoksa yerel diske düş (geliştirme ortamı veya tek kullanıcı).
+        _downloaded_from_server = False
+        try:
             from services.webadmin_client import WebAdminClient, get_webadmin_config
             userid = row_data.get("userid", 1)
             cfg = get_webadmin_config(userid)
-            if not cfg.get("enabled") or not cfg.get("base_url"):
-                QMessageBox.warning(
-                    self, "Sunucu Yapılandırması Yok",
-                    "Fatura XML dosyası bu bilgisayarda bulunamadı ve\n"
-                    "webadmin sunucusu yapılandırılmadığından indirilemedi.\n\n"
-                    "Ayarlar → WebAdmin bağlantısını kontrol edin."
-                )
-                return
-            client = WebAdminClient(base_url=cfg["base_url"], api_key=cfg["api_key"])
-            filename = os.path.basename(xml_path) if xml_path else f"fatura_{fatura_no}.xml"
-            temp_path = os.path.join(tempfile.gettempdir(), filename)
-            
-            res = client.download_fatura_xml(filename, temp_path)
-            if res.get("success"):
+            if cfg.get("enabled") and cfg.get("base_url"):
+                client   = WebAdminClient(base_url=cfg["base_url"], api_key=cfg["api_key"])
+                filename = os.path.basename(xml_path) if xml_path else f"fatura_{fatura_no}.xml"
+                sirket   = row_data.get("sirket") or row_data.get("firmaadi") or ""
+                temp_path = os.path.join(tempfile.gettempdir(), filename)
+                res = client.download_fatura_xml(filename, temp_path, sirket=sirket)
+                if res.get("success"):
+                    try:
+                        with open(temp_path, "rb") as fh:
+                            xml_bytes = fh.read()
+                        _downloaded_from_server = True
+                    except Exception:
+                        pass  # Okunamazsa yerel'e düş
+        except Exception:
+            pass  # webadmin_client import hatası vb. — yerel'e düş
+
+        # ── Sunucudan alınamadıysa yerel diskten oku (fallback) ───────────────
+        if xml_bytes is None:
+            if xml_path and os.path.exists(xml_path):
                 try:
-                    with open(temp_path, "rb") as fh:
+                    with open(xml_path, "rb") as fh:
                         xml_bytes = fh.read()
                 except Exception as exc:
-                    QMessageBox.critical(self, "Hata", f"İndirilen XML okunamadı:\n{exc}")
+                    QMessageBox.critical(self, "Hata", f"Yerel XML okunamadı:\n{exc}")
                     return
             else:
-                err_msg = res.get("error", "Bilinmeyen sunucu hatası")
-                QMessageBox.critical(self, "Hata", err_msg)
+                QMessageBox.warning(
+                    self, "Fatura Bulunamadı",
+                    f"Fatura XML ({fatura_no}) ne sunucuda ne de bu bilgisayarda bulunamadı.\n\n"
+                    "• Sunucu bağlantısını Ayarlar → WebAdmin'den kontrol edin.\n"
+                    "• Ya da faturayı yeniden XML olarak içe aktarın."
+                )
                 return
 
         # ── 3. lxml mevcutsa XSLT dönüşümü dene ────────────────────────────
