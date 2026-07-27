@@ -1686,26 +1686,66 @@ class DashboardScreen(QWidget):
             }
             
             kurum_rows_dialog, _toplam = get_kurum_odemeleri_detay_tarih(mno, ilk_yyyymmdd, son_yyyymmdd)
+            
+            # Yerel önbellekten beyanname bilgilerini çek
+            from services.moy_service import get_local_beyannameler
+            BELGE_TUR_ADI = {
+                "KDV1":     "KDV Beyannamesi (1.Tür)",
+                "KDV2":     "KDV Beyannamesi (2.Tür)",
+                "MUHSGK":   "SGK Tahakkuk Fişi (5510)",
+                "KGECICI":  "Kurumlar Vg. Geçici",
+                "KURUMLAR": "Kurumlar Vergisi",
+                "LEVHA":    "Levha Beyannamesi",
+                "MUHTAR":   "Muhtasar Beyanname",
+            }
+            
             kurum_export_rows = []
             for r in kurum_rows_dialog:
-                kod = get_val(r, "hesapKodu")
-                beyan_t = BEYANNAME_TUR.get(kod, HESAP_ACIKLAMA.get(kod, kod))
+                kod     = get_val(r, "hesapKodu")
+                ilk_t   = get_val(r, "ilkTarih") or ""
+                son_t   = get_val(r, "sonTarih") or ""
+                soz_no  = get_val(r, "sozlesmeNo") or ""
+                soz_tar = get_val(r, "sozlesmeTarih") or ""
+                
+                # Beyanname verisini yerel tablodan eşleştir
+                beyanlar = get_local_beyannameler(mno, ilk_t, kod) if ilk_t else []
+                byn = beyanlar[0] if beyanlar else None
+                
+                beyan_t  = BEYANNAME_TUR.get(kod, HESAP_ACIKLAMA.get(kod, kod))
+                
+                # Boş alanları beyanname verisinden doldur
+                if byn:
+                    if not son_t:
+                        son_t = byn.get("beyan_tarih_2", "") or ""
+                    if not soz_tar:
+                        soz_tar = byn.get("onay_tarihi", "") or ""
+                    byn_belge  = BELGE_TUR_ADI.get(byn.get("belge_turu", ""), byn.get("belge_turu", "") or "")
+                    byn_donem  = byn.get("donem_adi", "") or ""
+                    byn_durum  = byn.get("belge_durumu", "") or ""
+                else:
+                    byn_belge = ""
+                    byn_donem = ""
+                    byn_durum = ""
+                
                 kurum_export_rows.append({
-                    "Beyanname Türü": beyan_t,
-                    "Ünvan": get_val(r, "unvan") or "-",
-                    "Vergi No": get_val(r, "vergiNo") or "",
-                    "İlk Tarih": _fmt_goster_yyyymmdd(get_val(r, "ilkTarih")),
-                    "Son Tarih": _fmt_goster_yyyymmdd(get_val(r, "sonTarih")),
-                    "Sözleşme No": get_val(r, "sozlesmeNo") or "",
-                    "Sözl. Tarih": _fmt_goster_yyyymmdd(get_val(r, "sozlesmeTarih")),
-                    "Tutar (₺)": float(get_val(r, "tutar") or 0)
+                    "Beyanname Türü":  beyan_t,
+                    "Ünvan":           get_val(r, "unvan") or "-",
+                    "Vergi No":        get_val(r, "vergiNo") or "",
+                    "İlk Tarih":       _fmt_goster_yyyymmdd(ilk_t),
+                    "Son Tarih":       _fmt_goster_yyyymmdd(son_t),
+                    "Sözleşme No":     soz_no,
+                    "Sözl. Tarih":     _fmt_goster_yyyymmdd(soz_tar),
+                    "Tutar (₺)":       float(get_val(r, "tutar") or 0),
+                    "Belge Türü":      byn_belge,
+                    "Dönem":           byn_donem,
+                    "Belge Durum":     byn_durum,
                 })
                 
             _n, _g, _gd = _yeni_sheet(
                 title="Kurum Ödemeleri",
                 baslik=f"Kurum Ödemeleri — {ilk_goster} / {son_goster}",
                 alt_yazi=f"Kayıt: {len(kurum_export_rows):,}  •  {simdi}",
-                headers=["Beyanname Türü", "Ünvan", "Vergi No", "İlk Tarih", "Son Tarih", "Sözleşme No", "Sözl. Tarih", "Tutar (₺)"],
+                headers=["Beyanname Türü", "Ünvan", "Vergi No", "İlk Tarih", "Son Tarih", "Sözleşme No", "Sözl. Tarih", "Tutar (₺)", "Belge Türü", "Dönem", "Belge Durum"],
                 rows_data=kurum_export_rows,
                 para_sutunlar={"Tutar (₺)"},
                 hdr_color="FF1E3A8A",
