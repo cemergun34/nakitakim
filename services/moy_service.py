@@ -629,7 +629,7 @@ def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = ""
     """
     from db.database import get_connection
     HESAP_BELGE_MAP = {
-        "770.01": ("KDV1", "KDV2", "MUHSGK"),
+        "770.01": ("MUHSGK", "KDV1", "KDV2"),  # MUHSGK (SGK Tahakkuk Fişi (5510)) önce aranir
         "730.08": ("MUHTAR", "MUHSGK"),
     }
     izinli_turler = HESAP_BELGE_MAP.get(hesap_kodu, None)
@@ -698,8 +698,8 @@ def get_beyanname_listesi(musteri_no: int,
     Moy beyanname_listeleri: Beyan_Tarih_1 <= ilkTarih <= Beyan_Tarih_2
 
     hesap_kodu:
-        '770.01' → KDV ve SGK tahakkuk belgeleri (KDV1, KDV2, MUHSGK)
-        '730.08' → Muhtasar beyanname belgeleri (MUHTAR, MUHSGK)
+        '770.01' → KDV ve SGK tahakkuk belgeleri (KDV1, KDV2, MUHSGK (SGK Tahakkuk Fişi (5510)))
+        '730.08' → Muhtasar beyanname belgeleri (MUHTAR, MUHSGK (SGK Tahakkuk Fişi (5510)))
         ''       → Tüm belge türleri (filtre yok)
 
     Returns: [{'kayit_no', 'belge_turu', 'donem_adi', 'onay_tarihi',
