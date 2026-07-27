@@ -1692,7 +1692,7 @@ class DashboardScreen(QWidget):
             BELGE_TUR_ADI = {
                 "KDV1":     "KDV Beyannamesi (1.Tür)",
                 "KDV2":     "KDV Beyannamesi (2.Tür)",
-                "MUHSGK":   "SGK Tahakkuk Fişi (5510)",
+                "MUHSGK":   "Muhtasar ve SGK Beyannamesi",
                 "KGECICI":  "Kurumlar Vg. Geçici",
                 "KURUMLAR": "Kurumlar Vergisi",
                 "LEVHA":    "Levha Beyannamesi",
@@ -2587,7 +2587,7 @@ class KurumOdemeDialog(QDialog):
         BELGE_TUR_ADI = {
             "KDV1":     "KDV Beyannamesi (1.Tür)",
             "KDV2":     "KDV Beyannamesi (2.Tür)",
-            "MUHSGK":   "SGK Tahakkuk Fişi (5510)",   # PDF: TAHAKKUK FİŞİ (5510)
+            "MUHSGK":   "Muhtasar ve SGK Beyannamesi",
             "KGECICI":  "Kurumlar Vg. Geçici",
             "KURUMLAR": "Kurumlar Vergisi",
             "LEVHA":    "Levha Beyannamesi",
@@ -2860,7 +2860,7 @@ class BeyannamePreviewDialog(QDialog):
     BELGE_TUR_ADI = {
         "KDV1":     "KDV Beyannamesi (1.Tür)",
         "KDV2":     "KDV Beyannamesi (2.Tür)",
-        "MUHSGK":   "SGK Tahakkuk Fişi (5510)",   # PDF başlığıyla uyumlu
+        "MUHSGK":   "Muhtasar ve SGK Beyannamesi",
         "KGECICI":  "Kurumlar Vergisi Geçici Beyan",
         "KURUMLAR": "Kurumlar Vergisi Beyannamesi",
         "LEVHA":    "Levha Beyannamesi",
