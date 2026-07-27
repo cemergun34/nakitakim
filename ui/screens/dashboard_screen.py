@@ -2570,6 +2570,13 @@ class KurumOdemeDialog(QDialog):
             soztarih = self._fmt_goster(row.get("sozlesmeTarih", ""))
             tutar    = float(row.get("tutar") or 0)
 
+            # Son Tarih / Sözleşme Tarih → DB boşsa beyanname verilerinden doldur
+            if byn:
+                if not sonT:
+                    sonT = self._fmt_goster(byn.get("beyan_tarih_2", ""))
+                if not soztarih:
+                    soztarih = self._fmt_goster(byn.get("onay_tarihi", ""))
+
             # Ünvan: 1) DB unvanı (moy_kaydet_veriler'den), 2) Moy musteri_unvani, 3) SGM
             db_unvan = str(row.get("unvan", "") or "")
             if byn:
