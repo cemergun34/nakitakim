@@ -606,7 +606,7 @@ def get_gider_pusulasi_sube_ozet(userid: int, musterino: int, yil: int) -> list[
             FROM genel_hesap_hareketleri g
             WHERE g.userid = ?
               AND g.musteri_no = ?
-              AND (g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%' OR g.teslim_sekli LIKE '%Cihaz Alımı%')
+              AND g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%'
               AND {yr("g.tarih_date")} = ?
             GROUP BY g.sube
             ORDER BY toplam_gider DESC
@@ -620,7 +620,7 @@ def get_gider_pusulasi_detay(userid: int, musterino: int, yil: int,
                              teslim_sekli_filtre: str = None, sube_adi: str = None) -> list[dict]:
     """
     Gider Pusulası detay listesi.
-    genel_hesap_hareketleri tablosundan teslim_sekli IN ('Cihaz Alımı', 'Parça Alımı (Cihaz)')
+    genel_hesap_hareketleri tablosundan teslim_sekli = 'Parça Alımı (Cihaz)'
     filtresiyle çeker. Dashboard'daki _get_genel_hesap_all sorgusuyla aynı mantık.
 
     teslim_sekli_filtre: None → tüm pusulalar; belirli değer → sadece o teslim şekli
@@ -679,7 +679,7 @@ def get_gider_pusulasi_detay(userid: int, musterino: int, yil: int,
                   AND g.musteri_no = ?
                   AND {yr('g.tarih_date')} = ?
                   {sube_condition}
-                  AND (g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%' OR g.teslim_sekli LIKE '%Cihaz Alımı%')
+                  AND g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%'
                 ORDER BY g.tarih_date DESC, g.id DESC
                 LIMIT 3000
             """, tuple(params)).fetchall()

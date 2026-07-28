@@ -192,25 +192,53 @@ _INSERT_SQL = """
 
 def _bulk_insert(conn, batch: list) -> None:
     """
-    Toplu INSERT — PostgreSQL için psycopg2.extras.execute_values
-    (tek seferde tüm satırları gönderir, ~10x hızlı).
-    SQLite için standart executemany kullanılır.
+    Toplu INSERT — PostgreSQL icin psycopg2.extras.execute_values
+    (tek seferde tum satirlari gonderir, ~10x hizli).
+    SQLite icin standart executemany kullanilir.
+
+    NOT: Mukerrer engeli 'sil+yeniden yukle' yontemiyle saglanir:
+    google_sheets_aktar() once DELETE ile aralik temizler, sonra INSERT yapar.
+    Tabloda unique constraint olmadigi icin ON CONFLICT DO NOTHING etkisizdir.
     """
     if not batch:
         return
+
+    # execute_values, VALUES kisminda tek bir %s placeholder bekler.
+    _EV_SQL = (
+        "INSERT INTO genel_hesap_hareketleri "
+        "(tarih, tarih_date, form_id, sube, kategori, "
+        "teslim_sekli, teslim_sekli_id, aciklama, odeme_sekli, "
+        "gelir, gider, nerden_geliyor, "
+        "alt_hesap_kodu_id, userid, musteri_no, kayit_tarihi) "
+        "VALUES %s"
+    )
+
     try:
-        # PostgreSQL modu: _PgWrapper._conn üzerinden execute_values
         from psycopg2.extras import execute_values as _ev
-        from db.database import _to_pg_sql
-        pg_sql = _to_pg_sql(_INSERT_SQL).strip()
-        # execute_values VALUES kısmını tek seferde gönderir
-        raw_conn = conn._conn          # gerçek psycopg2 bağlantısı
+        raw_conn = conn._conn          # gercek psycopg2 baglantisi
         cur = raw_conn.cursor()
-        _ev(cur, pg_sql, batch, page_size=500)
+        _ev(cur, _EV_SQL, batch, page_size=500)
         cur.close()
-    except (AttributeError, ImportError, Exception):
-        # SQLite veya psycopg2 yok — standart executemany
+    except (AttributeError, ImportError):
+        # SQLite modu — standart executemany
         conn.executemany(_INSERT_SQL, batch)
+    except Exception:
+        # psycopg2 execute_values basarisiz → satir satir fallback
+        try:
+            raw_conn = conn._conn
+            cur = raw_conn.cursor()
+            pg_sql = (
+                "INSERT INTO genel_hesap_hareketleri "
+                "(tarih, tarih_date, form_id, sube, kategori, "
+                "teslim_sekli, teslim_sekli_id, aciklama, odeme_sekli, "
+                "gelir, gider, nerden_geliyor, "
+                "alt_hesap_kodu_id, userid, musteri_no, kayit_tarihi) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            )
+            cur.executemany(pg_sql, batch)
+            cur.close()
+        except Exception:
+            conn.executemany(_INSERT_SQL, batch)
 
 
 # ── Ana aktarım fonksiyonu ────────────────────────────────────────────────────
@@ -255,10 +283,13 @@ def google_sheets_aktar(
 
     conn = get_connection()
     try:
-        # ── Eski kayıtları temizle ────────────────────────────────────────────
+        # ── Eski kayıtları temizle (sil+yeniden yükle yöntemi) ───────────────
+        # Tabloda unique constraint olmadığından mükerrer engeli DELETE ile sağlanır:
+        # seçili tarih aralığı + kaynak türlerine göre eski kayıtlar silindi,
+        # ardından Google Sheets'ten taze veri eklenir.
         if kaynaklar:
             placeholders = ",".join(["?" for _ in kaynaklar])
-            conn.execute(
+            del_result = conn.execute(
                 f"""DELETE FROM genel_hesap_hareketleri
                     WHERE userid=? AND musteri_no=?
                     AND tarih_date >= ? AND tarih_date <= ?
@@ -269,7 +300,8 @@ def google_sheets_aktar(
                  *kaynaklar]
             )
             conn.commit()
-            emit(f"🗑️  {bas_tarih} — {bit_tarih} aralığındaki eski kayıtlar temizlendi.")
+            silinen = getattr(del_result, 'rowcount', '?')
+            emit(f"🗑️  {bas_tarih} — {bit_tarih} aralığındaki {silinen} eski kayıt temizlendi.")
 
         # ─────────────────────────────────────────────────────────────────────
         # 1) KASA
@@ -382,7 +414,15 @@ def google_sheets_aktar(
 
         # ─────────────────────────────────────────────────────────────────────
         # 3) GENEL HESAP
-        # Dinamik başlıklar: "Alınan Tutar"=gelir, "Tutar"=gider
+        # Kolon haritası (Excel/Sheets yapısı):
+        #   0:Tarih  1:Form  2:Şube  3:Kategori  4:Açıklama
+        #   5:Ödeme Şekli 1  6:Alınan Tutar  7:Ödeme Şekli 2  8:Alınan Tutar
+        #   9:Ödeme Şekli 3  10:Alınan Tutar  11:TOPLAM
+        #   12:Teslim Şekli  13:Tutar (gider)  14:Ödeme Şekli (gider için)
+        #
+        # Gelir: alinan_cols (6, 8, 10) → nerden_geliyor='genelHesap'
+        # Gider: gider_col (13 "Tutar") → nerden_geliyor='genelHesap'
+        #         tüm teslim şekli türleri için (Parça Alımı, Cihaz Alımı, iade vb.)
         # ─────────────────────────────────────────────────────────────────────
         if "genelHesap" in kaynaklar:
             emit("📥  GENEL HESAP — Google Sheet indiriliyor...")
@@ -395,20 +435,37 @@ def google_sheets_aktar(
 
                 emit(f"📊  GENEL HESAP — {len(rows)-1} satır okundu, başlıklar analiz ediliyor...")
 
-                # Başlıkları dinamik bul
+                # ── Başlıkları dinamik bul ────────────────────────────────────
                 headers      = rows[0]
                 alinan_cols: list[int] = []
                 gider_col    = -1
                 teslim_col   = -1
+                odeme_sekli_col = -1   # gider satırı için Ödeme Şekli kolonu
 
                 for c, h in enumerate(headers):
-                    h = h.strip()
-                    if "Alınan Tutar" in h or "alinan tutar" in h.lower():
+                    hn = h.strip().lower()
+                    # Alınan Tutar: "alınan tutar" veya "alinan tutar"
+                    if "alınan tutar" in hn or "alinan tutar" in hn:
                         alinan_cols.append(c)
-                    elif h.lower() == "tutar":
+                    # Tutar (gider): başlık tam "tutar" (küçük harf)
+                    elif hn in ("tutar",):
                         gider_col = c
-                    elif "teslim" in h.lower() and "şekl" in h.lower():
+                        # Sağ komşu Ödeme Şekli ise onu işaretle
+                        if c + 1 < len(headers):
+                            nxt = headers[c + 1].strip().lower()
+                            if "ödeme" in nxt or "odeme" in nxt:
+                                odeme_sekli_col = c + 1
+                    # Teslim Şekli: hem "teslim" hem "ekl" içermeli,
+                    # "ödeme"/"odeme" içermemeli (Ödeme Şekli ile karışmasın)
+                    elif ("teslim" in hn and ("şekl" in hn or "sekl" in hn)
+                          and "ödeme" not in hn and "odeme" not in hn):
                         teslim_col = c
+
+                emit(
+                    f"   Başlıklar → alinan_cols={alinan_cols}, "
+                    f"gider_col={gider_col}, teslim_col={teslim_col}, "
+                    f"odeme_sekli_col={odeme_sekli_col}"
+                )
 
                 batch = []
                 for row in rows[1:]:
@@ -419,15 +476,25 @@ def google_sheets_aktar(
                             or not _in_range(tarih, bas_tarih, bit_tarih)):
                         continue
 
-                    form_id = (row[1] if len(row) > 1 else "").strip()
-                    sube    = (row[2] if len(row) > 2 else "").strip()
-                    kat     = (row[3] if len(row) > 3 else "").strip()
-                    ack     = (row[4] if len(row) > 4 else "").strip()
-                    teslim  = (row[teslim_col] if teslim_col != -1 and len(row) > teslim_col else "").strip()
-                    alt_id  = _alt_hesap_id(conn, ack, userid) or _alt_hesap_id(conn, kat, userid)
-                    td      = _tarih_date(tarih)
+                    # form_id: float → int → str (veya string olduğu gibi)
+                    form_raw = (row[1] if len(row) > 1 else "").strip()
+                    if not form_raw or form_raw in ("-", "—", "None", "nan"):
+                        form_id = None
+                    else:
+                        try:
+                            form_id = str(int(float(form_raw)))
+                        except (ValueError, TypeError):
+                            form_id = form_raw
 
-                    # Gelir satırları
+                    sube   = (row[2] if len(row) > 2 else "").strip() or "Merkez"
+                    kat    = (row[3] if len(row) > 3 else "").strip() or None
+                    ack    = (row[4] if len(row) > 4 else "").strip() or None
+                    teslim = (row[teslim_col] if teslim_col != -1 and len(row) > teslim_col
+                              else "").strip() or None
+                    alt_id = _alt_hesap_id(conn, ack or "", userid) or _alt_hesap_id(conn, kat or "", userid)
+                    td     = _tarih_date(tarih)
+
+                    # ── Gelir satırları (Alınan Tutar kolonları) ──────────────
                     for col in alinan_cols:
                         gelir_val = _parse_float((row[col] if len(row) > col else "").strip())
                         if gelir_val <= 0:
@@ -440,14 +507,19 @@ def google_sheets_aktar(
                             alt_id, userid, musterino, now_str
                         ))
 
-                    # Gider satırı
+                    # ── Gider satırı (Tutar kolonu) ───────────────────────────
                     if gider_col != -1:
                         gider_val = _parse_float((row[gider_col] if len(row) > gider_col else "").strip())
                         if gider_val > 0:
-                            odeme = (row[gider_col + 1] if len(row) > gider_col + 1 else "").strip()
+                            if odeme_sekli_col != -1 and len(row) > odeme_sekli_col:
+                                odeme_g = (row[odeme_sekli_col] or "").strip() or None
+                            elif len(row) > gider_col + 1:
+                                odeme_g = (row[gider_col + 1] or "").strip() or None
+                            else:
+                                odeme_g = None
                             batch.append((
                                 tarih, td, form_id, sube, kat,
-                                teslim or None, None, ack, odeme,
+                                teslim, None, ack, odeme_g,
                                 None, gider_val, "genelHesap",
                                 alt_id, userid, musterino, now_str
                             ))
