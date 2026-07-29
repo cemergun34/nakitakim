@@ -1651,14 +1651,13 @@ class DashboardScreen(QWidget):
                 FROM genel_hesap_hareketleri
                 WHERE userid=? AND musteri_no=?
                   AND tarih_date >= ? AND tarih_date <= ?
-                  AND (teslim_sekli LIKE '%Cihaz Alımı%'
-                    OR teslim_sekli LIKE '%Parça Alımı (Cihaz)%')
+                  AND teslim_sekli LIKE '%Parça Alımı (Cihaz)%'
                 ORDER BY tarih_date ASC, id ASC
             """, (uid, mno, ilk_str, son_str)).fetchall()
             _n, _g, _gd = _yeni_sheet(
                 title="Gider Pusulası",
                 baslik=f"Gider Pusulası — {ilk_goster} / {son_goster}",
-                alt_yazi=f"Teslim: Cihaz Alımı | Parça Alımı  •  Kayıt: {len(rows):,}  •  {simdi}",
+                alt_yazi=f"Teslim: Parça Alımı (Cihaz)  •  Kayıt: {len(rows):,}  •  {simdi}",
                 headers=["Tarih","Form No","Şube","Açıklama","Teslim Şekli",
                          "Ödeme Şekli","Gelir (₺)","Gider (₺)","Kategori","Kaynak"],
                 rows_data=_rows_to_dicts(rows),
