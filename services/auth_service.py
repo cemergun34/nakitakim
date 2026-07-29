@@ -61,16 +61,51 @@ def _build_user(row: dict) -> dict:
     """Standart kullanıcı sözlüğü oluşturur.
     PG'de kolon adları küçük harf (firmaadi, hesapturu vb.)
     SQLite'da camelCase (firmaAdi, hesapTuru vb.)
-    """
-    # bagli_hesap > 0 ise o hesabın ID'si (userid), değilse kendi ID
-    bagli = int(row.get("bagli_hesap", -1) or -1)
-    user_id = bagli if bagli > 0 else int(row.get("id", 1) or 1)
 
-    # musterino: uyelik tablosundan doğrudan oku, yoksa 1 varsayılan
+    bagli_hesap mantığı:
+      > 0 → o hesabın ID'si ile sorgu yap (alt kullanıcı)
+      = -1 → bu ana hesap veya bağlanmamış
+             → aynı musterino'da veri olan userid'i otomatik bul
+    """
+    bagli = int(row.get("bagli_hesap", -1) or -1)
+    kendi_id = int(row.get("id", 1) or 1)
     musterino = int(row.get("musterino") or 1)
 
+    if bagli > 0:
+        # Açıkça bağlanmış → ana hesabı kullan
+        user_id = bagli
+    else:
+        # bagli_hesap=-1: önce genel_hesap_hareketleri'nde bu musterino için
+        # veri olan userid'i bul. Yoksa kendi id'ini kullan.
+        try:
+            conn = get_connection()
+            try:
+                found = conn.execute(
+                    """SELECT userid FROM genel_hesap_hareketleri
+                       WHERE musteri_no = ?
+                       GROUP BY userid
+                       ORDER BY COUNT(*) DESC
+                       LIMIT 1""",
+                    (musterino,)
+                ).fetchone()
+                user_id = int(found[0]) if found else kendi_id
+                # Eğer bulunan userid kendisi değilse bagli_hesap'ı otomatik güncelle
+                if user_id != kendi_id:
+                    try:
+                        conn.execute(
+                            "UPDATE uyelik SET bagli_hesap=? WHERE id=?",
+                            (user_id, kendi_id)
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
+            finally:
+                conn.close()
+        except Exception:
+            user_id = kendi_id
+
     return {
-        "Kayitno":      int(row.get("id", 1) or 1),
+        "Kayitno":      kendi_id,
         "Adi":          row.get("kullanici_adi", ""),
         "GercekUserId": user_id,
         "musterino":    musterino,   # uyelik.musterino sütunundan gelir
@@ -81,6 +116,7 @@ def _build_user(row: dict) -> dict:
         "hesapTuru":    row.get("hesapturu") if row.get("hesapturu") is not None
                         else row.get("hesapTuru", 0),
     }
+
 
 
 def get_user_by_id(user_id: int) -> dict | None:
