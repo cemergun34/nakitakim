@@ -160,7 +160,7 @@ def main():
 
         # ── Otomatik webadmin Sync ────────────────────────────────────────────
         # Login sonrası, DB'de webadmin yapılandırması varsa otomatik çek.
-        # Kullanıcı hiçbir butona basmak zorunda kalmaz.
+        # auto_sync_enabled=False ise (kullanıcı kapattıysa) hiç çalışmaz.
         def _auto_webadmin_sync():
             userid = user.get("id") or user.get("userid")
             if not userid:
@@ -170,6 +170,14 @@ def main():
                 cfg = get_webadmin_config(userid)
                 if not cfg.get("enabled"):
                     return   # Bu kullanıcı için webadmin tanımlı değil
+
+                # ── ON/OFF kontrolü ─────────────────────────────────────────
+                if not cfg.get("auto_sync_enabled", True):
+                    import logging
+                    logging.getLogger(__name__).info(
+                        "Otomatik sync KAPALI — kullanıcı tarafından durduruldu."
+                    )
+                    return
 
                 from datetime import datetime, timedelta
                 from ui.screens.ayarlar_screen import WebAdminSyncDialog
@@ -187,12 +195,57 @@ def main():
                     f"  ({cfg.get('firmaadi') or 'webadmin'})"
                 )
                 dlg.exec()
+
+                # ── Banka sync bitti → POS sync başlat (sıralı, paralel değil) ──
+                _auto_pos_sync()
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning("Otomatik webadmin sync hatası: %s", e)
 
+        # ── Otomatik Fiziksel POS (Womsis) Sync ───────────────────────────────
+        # BANKA SYNC BİTMEDEN başlamaz — _auto_webadmin_sync sonunda çağrılır.
+        def _auto_pos_sync():
+            userid = user.get("id") or user.get("userid")
+            if not userid:
+                return
+            try:
+                from services.webadmin_client import get_webadmin_config, WebAdminPosSyncWorker
+                cfg = get_webadmin_config(userid)
+                if not cfg.get("enabled"):
+                    return   # webadmin tanımlı değil
+
+                # ── ON/OFF kontrolü ─────────────────────────────────────────
+                if not cfg.get("auto_sync_enabled", True):
+                    return   # Kullanıcı sync'i kapattı
+
+                musterino = user.get("musterino", 1)
+                from datetime import datetime, timedelta
+                start_str = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                end_str   = datetime.now().strftime("%Y-%m-%d")
+
+                _pos_worker = WebAdminPosSyncWorker(
+                    userid=userid,
+                    musterino=musterino,
+                    start_date=start_str,
+                    end_date=end_str,
+                )
+
+                def _on_pos_done(r: dict):
+                    import logging as _lg
+                    _lg.getLogger(__name__).info(
+                        "Otomatik POS sync: %s", r.get("message", r.get("error", ""))
+                    )
+
+                _pos_worker.finished.connect(_on_pos_done)
+                _pos_worker.start()
+                app._pos_sync_worker = _pos_worker   # GC'den korunmak için
+
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Otomatik POS sync hatası: %s", e)
+
         from PyQt6.QtCore import QTimer
-        QTimer.singleShot(800, _auto_webadmin_sync)   # pencere tamamen açıldıktan sonra
+        QTimer.singleShot(800, _auto_webadmin_sync)   # pencere açıldıktan sonra başlar
 
         # ── Otomatik Moy Sync ─────────────────────────────────────────────────
         # Login sonrası arka planda sessizce moy_kaydet_veriler çalıştırır.

@@ -74,22 +74,19 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
 
-# ── DB Baglantisi ─────────────────────────────────────────────────────────────
-def get_db():
-    """
-    Her cagirida yeni bir psycopg2 baglantisi acar.
-    TCP keepalive etkinlestirilmistir — bulut DB'lerde (Neon, Supabase)
-    uzun sureli bekleme sonrasi baglanti kopmasinı onler.
-    """
-    import psycopg2
-    cfg = _PG_CFG
-    # Neon SNI endpoint fix
-    options = None
-    if 'neon.tech' in cfg['host']:
-        endpoint_id = cfg['host'].split('.')[0]
-        options = f'project={endpoint_id}'
+# ── DB Connection Pool ───────────────────────────────────────────────────────
+# "Sifre degistirince duzeliyor" = PostgreSQL max_connections dolup tasyiyor.
+# Her get_db() cagrisinda yeni baglanti acmak yerine havuzdan al/geri ver.
+# Havuz max 10 baglanti — PostgreSQL'in varsayilan 100 limitinin cok altinda.
+import threading as _threading
+_pool      = None           # ThreadedConnectionPool — app baslarken olusturulur
+_pool_lock = _threading.Lock()
 
-    conn = psycopg2.connect(
+
+def _build_dsn() -> dict:
+    """psycopg2.connect() icin kwargs sozlugu."""
+    cfg = _PG_CFG
+    kw = dict(
         host=cfg['host'],
         port=cfg['port'],
         dbname=cfg['dbname'],
@@ -97,14 +94,83 @@ def get_db():
         password=cfg['password'],
         sslmode=cfg['sslmode'],
         connect_timeout=15,
-        # TCP keepalive: hareketsiz baglantilar uzun sure bekledikten sonra kopmasin
         keepalives=1,
-        keepalives_idle=30,    # 30 saniye hareketsizlik sonrasi keepalive gonder
-        keepalives_interval=10, # 10 saniyede bir tekrarla
-        keepalives_count=5,    # 5 basarisiz keepalive'dan sonra baglantıyı kes
-        **(({'options': options}) if options else {})
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
     )
-    return conn
+    # Neon SNI endpoint fix
+    if 'neon.tech' in cfg['host']:
+        endpoint_id = cfg['host'].split('.')[0]
+        kw['options'] = f'project={endpoint_id}'
+    return kw
+
+
+def _get_pool():
+    """Havuzu singleton olarak olusturur (thread-safe)."""
+    global _pool
+    if _pool is not None:
+        return _pool
+    with _pool_lock:
+        if _pool is None:
+            import psycopg2.pool
+            _pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,   # max 10 esz. baglanti — server catlamasin
+                **_build_dsn()
+            )
+            logger.info('DB baglanti havuzu olusturuldu (min=1, max=10)')
+    return _pool
+
+
+class _PooledConn:
+    """
+    Context manager: 'with get_db() as conn:' seklinde kullanilir.
+    Blok bitince veya exception olursa baglanti havuza iade edilir — ASLA sizmiyor.
+    """
+    def __init__(self):
+        self._conn = None
+
+    def __enter__(self):
+        try:
+            pool = _get_pool()
+            self._conn = pool.getconn()
+            # Kapali/broken baglantilari otomatik yenile
+            if self._conn.closed:
+                pool.putconn(self._conn, close=True)
+                self._conn = pool.getconn()
+        except Exception:
+            # Havuz dolu/hatali ise dogrudan yeni baglanti ac (fallback)
+            import psycopg2
+            self._conn = psycopg2.connect(**_build_dsn())
+            self._conn._direct = True   # havuzdan degil, dogrudan acildi
+        return self._conn
+
+    def __exit__(self, exc_type, *_):
+        if self._conn is None:
+            return
+        try:
+            if exc_type:                 # exception olduysa rollback yap
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+            if getattr(self._conn, '_direct', False):
+                self._conn.close()       # dogrudan acilmissa kapat
+            else:
+                _get_pool().putconn(self._conn)  # havuza geri ver
+        except Exception as _pe:
+            logger.warning('DB havuz iade hatasi: %s', _pe)
+        self._conn = None
+
+
+def get_db():
+    """
+    Geriye donuk uyumluluk icin korunuyor.
+    Yeni kodlarda 'with get_db_ctx() as conn:' kullanin.
+    Context manager destekler: 'with get_db() as conn:'
+    """
+    return _PooledConn()
 
 
 # ── Dekoratörler ─────────────────────────────────────────────────────────────
@@ -432,85 +498,69 @@ def api_womsis_accounts():
 # ── Yardimci Fonksiyonlar ─────────────────────────────────────────────────────
 def _authenticate(username: str, password: str):
     """uyelik tablosundan kullanici dogrula — duz metin / MD5 / bcrypt."""
-    conn = None
     try:
-        conn = get_db()
-        cur  = conn.cursor()
-        cur.execute(
-            """SELECT id, kullanici_adi, sifre, musterino
-               FROM uyelik
-               WHERE kullanici_adi = %s OR eposta = %s
-               LIMIT 1""",
-            (username, username)
-        )
-        row = cur.fetchone()
-        cur.close()
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT id, kullanici_adi, sifre, musterino
+                   FROM uyelik
+                   WHERE kullanici_adi = %s OR eposta = %s
+                   LIMIT 1""",
+                (username, username)
+            )
+            row = cur.fetchone()
+            cur.close()
 
-        if not row:
-            return None
+            if not row:
+                return None
 
-        uid, uname, stored, musterino = row
-        stored = stored or ''
+            uid, uname, stored, musterino = row
+            stored = stored or ''
 
-        # 1. Duz metin
-        if stored == password:
-            return {'id': uid, 'kullanici_adi': uname, 'musterino': musterino or 1}
-
-        # 2. MD5
-        if stored == hashlib.md5(password.encode()).hexdigest():
-            return {'id': uid, 'kullanici_adi': uname, 'musterino': musterino or 1}
-
-        # 3. Bcrypt ($2y$ PHP uyumu)
-        try:
-            import bcrypt
-            check = stored.replace('$2y$', '$2b$', 1).encode()
-            if bcrypt.checkpw(password.encode(), check):
+            # 1. Duz metin
+            if stored == password:
                 return {'id': uid, 'kullanici_adi': uname, 'musterino': musterino or 1}
-        except Exception:
-            pass
 
-        return None
+            # 2. MD5
+            if stored == hashlib.md5(password.encode()).hexdigest():
+                return {'id': uid, 'kullanici_adi': uname, 'musterino': musterino or 1}
 
+            # 3. Bcrypt ($2y$ PHP uyumu)
+            try:
+                import bcrypt
+                check = stored.replace('$2y$', '$2b$', 1).encode()
+                if bcrypt.checkpw(password.encode(), check):
+                    return {'id': uid, 'kullanici_adi': uname, 'musterino': musterino or 1}
+            except Exception:
+                pass
+
+            return None
     except Exception as e:
         logger.error('Kimlik dogrulama DB hatasi: %s', e)
         return None
-    finally:
-        # Baglanti her durumda kapatilir (exception olsa bile)
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 
 def _get_womsis_creds(userid: int):
     """vomsisbilgileri tablosundan Womsis bilgilerini getir."""
-    conn = None
     try:
-        conn = get_db()
-        cur  = conn.cursor()
-        cur.execute(
-            "SELECT appkey, seckey, url FROM vomsisbilgileri WHERE userid = %s LIMIT 1",
-            (userid,)
-        )
-        row = cur.fetchone()
-        cur.close()
-        if row:
-            return {
-                'appkey': row[0] or '',
-                'seckey': row[1] or '',
-                'url':    row[2] or 'https://developers.vomsis.com/api/v2'
-            }
-        return None
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT appkey, seckey, url FROM vomsisbilgileri WHERE userid = %s LIMIT 1",
+                (userid,)
+            )
+            row = cur.fetchone()
+            cur.close()
+            if row:
+                return {
+                    'appkey': row[0] or '',
+                    'seckey': row[1] or '',
+                    'url':    row[2] or 'https://developers.vomsis.com/api/v2'
+                }
+            return None
     except Exception as e:
         logger.error('Womsis creds DB hatasi: %s', e)
         return None
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
 
 def _fetch_womsis_transactions(api_url, app_key, app_secret, start_dt, end_dt):
@@ -635,169 +685,127 @@ def _save_womsis_pos_to_db(transactions: list, userid: int = 1, musterino: int =
     saved   = 0
     skipped = 0
     now     = datetime.now()
-    conn    = None
 
     try:
-        conn = get_db()
-        cur  = conn.cursor()
+        with get_db() as conn:
+            cur = conn.cursor()
 
-        # womsi_pos tablosunu olustur (yoksa)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS womsi_pos (
-                id                   SERIAL PRIMARY KEY,
-                userid               INTEGER NOT NULL DEFAULT 0,
-                musterino            INTEGER NOT NULL DEFAULT 1,
-                isyerino             TEXT    DEFAULT '',
-                carihesap            TEXT    DEFAULT '',
-                hesabagecistarihi    TEXT    DEFAULT '',
-                islemtutari          NUMERIC DEFAULT 0,
-                islemtarihi          TEXT    DEFAULT '',
-                posno                TEXT    DEFAULT '',
-                isyeriucretitutar    NUMERIC DEFAULT 0,
-                nettutar             NUMERIC DEFAULT 0,
-                brand                TEXT    DEFAULT '',
-                kartno               TEXT    DEFAULT '',
-                islemtipi            TEXT    DEFAULT '',
-                aciklama             TEXT    DEFAULT '',
-                islemtarih           TEXT    DEFAULT '',
-                kayittarihi          TEXT    DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-
-        for tx in transactions:
-            # ── Alan eslemeleri — PHP womsisPosIsle.php ile birebir esleme ──
-            # PHP: $tx['workplace'] veya $workplaceNo
-            isyerino          = str(
-                tx.get('_workplace_no') or
-                tx.get('workplace')     or
-                tx.get('isyeriNo')      or
-                tx.get('merchantNo')    or
-                tx.get('shopCode')      or ''
-            )
-            # PHP: $bankTitle (station'dan geliyor)
-            carihesap         = str(
-                tx.get('_bank_title')   or
-                tx.get('cariHesap')     or
-                tx.get('accountNo')     or
-                tx.get('account')       or ''
-            )
-            # PHP: $tx['valor'] ?? $tx['transfer_to_account_date']
-            hesabagecistarihi = str(
-                tx.get('valor')                   or
-                tx.get('transfer_to_account_date') or
-                tx.get('settlementDate')           or
-                tx.get('hesabaGecisTarihi')        or
-                tx.get('valueDate')                or ''
-            )
-            # PHP: $tx['date']
-            islemtarihi       = str(
-                tx.get('date')            or
-                tx.get('transactionDate') or
-                tx.get('islemTarihi')     or ''
-            )
-            # PHP: $tx['station'] ?? $stationNo
-            posno             = str(
-                tx.get('station')         or
-                tx.get('_station_no')     or
-                tx.get('terminalId')      or
-                tx.get('posNo')           or
-                tx.get('terminal')        or ''
-            )
-            # PHP: $tx['sub_card_type'] ?? $tx['card_type']
-            brand             = str(
-                tx.get('sub_card_type')   or
-                tx.get('card_type')       or
-                tx.get('cardBrand')       or
-                tx.get('brand')           or
-                tx.get('scheme')          or ''
-            )
-            # PHP: $tx['card_number']
-            kartno            = str(
-                tx.get('card_number')     or
-                tx.get('maskedCardNo')    or
-                tx.get('kartNo')          or
-                tx.get('cardNo')          or ''
-            )
-            # PHP: $tx['transaction_type']
-            islemtipi         = str(
-                tx.get('transaction_type') or
-                tx.get('transactionType')  or
-                tx.get('islemTipi')        or
-                tx.get('type')             or ''
-            )
-            # PHP: $tx['description']
-            aciklama          = str(tx.get('description') or tx.get('aciklama') or '')[:255]
-            islemtarih        = now.strftime('%d/%m/%Y')  # PHP: date('d/m/Y')
-
-            try:
-                # PHP: $tx['gross_amount'], $tx['commission'], $tx['net_amount']
-                islemtutari       = round(abs(float(
-                    tx.get('gross_amount') or tx.get('amount') or tx.get('islemTutari') or 0
-                )), 2)
-                isyeriucretitutar = round(abs(float(
-                    tx.get('commission') or tx.get('commissionAmount') or tx.get('isyeriUcretiTutar') or tx.get('fee') or 0
-                )), 2)
-                nettutar          = round(abs(float(
-                    tx.get('net_amount') or tx.get('netAmount') or tx.get('netTutar') or tx.get('net') or 0
-                )), 2)
-            except (ValueError, TypeError):
-                islemtutari = isyeriucretitutar = nettutar = 0.0
-
-            # ── Mukerrer kontrolu — isyerino + islemtarihi + islemtutari + kartno ──
-            cur.execute(
-                'SELECT id FROM womsi_pos '
-                'WHERE userid=%s AND isyerino=%s AND islemtarihi=%s '
-                'AND islemtutari=%s AND kartno=%s LIMIT 1',
-                (userid, isyerino, islemtarihi, islemtutari, kartno)
-            )
-            if cur.fetchone():
-                skipped += 1
-                continue
-
+            # womsi_pos tablosunu olustur (yoksa)
             cur.execute("""
-                INSERT INTO womsi_pos
-                    (userid, musterino, isyerino, carihesap, hesabagecistarihi,
-                     islemtutari, islemtarihi, posno,
-                     isyeriucretitutar, nettutar, brand,
-                     kartno, islemtipi, aciklama, islemtarih, kayittarihi)
-                VALUES
-                    (%s, %s, %s, %s, %s,
-                     %s, %s, %s,
-                     %s, %s, %s,
-                     %s, %s, %s, %s, %s)
-            """, (
-                userid, musterino, isyerino, carihesap, hesabagecistarihi,
-                islemtutari, islemtarihi, posno,
-                isyeriucretitutar, nettutar, brand,
-                kartno, islemtipi, aciklama, islemtarih,
-                now.strftime('%Y-%m-%d %H:%M:%S')
-            ))
-            saved += 1
+                CREATE TABLE IF NOT EXISTS womsi_pos (
+                    id                   SERIAL PRIMARY KEY,
+                    userid               INTEGER NOT NULL DEFAULT 0,
+                    musterino            INTEGER NOT NULL DEFAULT 1,
+                    isyerino             TEXT    DEFAULT '',
+                    carihesap            TEXT    DEFAULT '',
+                    hesabagecistarihi    TEXT    DEFAULT '',
+                    islemtutari          NUMERIC DEFAULT 0,
+                    islemtarihi          TEXT    DEFAULT '',
+                    posno                TEXT    DEFAULT '',
+                    isyeriucretitutar    NUMERIC DEFAULT 0,
+                    nettutar             NUMERIC DEFAULT 0,
+                    brand                TEXT    DEFAULT '',
+                    kartno               TEXT    DEFAULT '',
+                    islemtipi            TEXT    DEFAULT '',
+                    aciklama             TEXT    DEFAULT '',
+                    islemtarih           TEXT    DEFAULT '',
+                    kayittarihi          TEXT    DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
 
-        conn.commit()
-        cur.close()
+            for tx in transactions:
+                # ── Alan eslemeleri — PHP womsisPosIsle.php ile birebir esleme ──
+                isyerino          = str(
+                    tx.get('_workplace_no') or tx.get('workplace')  or
+                    tx.get('isyeriNo')      or tx.get('merchantNo') or tx.get('shopCode') or ''
+                )
+                carihesap         = str(
+                    tx.get('_bank_title') or tx.get('cariHesap') or
+                    tx.get('accountNo')   or tx.get('account')    or ''
+                )
+                hesabagecistarihi = str(
+                    tx.get('valor')                    or tx.get('transfer_to_account_date') or
+                    tx.get('settlementDate')            or tx.get('hesabaGecisTarihi') or
+                    tx.get('valueDate')                 or ''
+                )
+                islemtarihi       = str(
+                    tx.get('date') or tx.get('transactionDate') or tx.get('islemTarihi') or ''
+                )
+                posno             = str(
+                    tx.get('station')    or tx.get('_station_no') or tx.get('terminalId') or
+                    tx.get('posNo')      or tx.get('terminal')    or ''
+                )
+                brand             = str(
+                    tx.get('sub_card_type') or tx.get('card_type') or tx.get('cardBrand') or
+                    tx.get('brand')         or tx.get('scheme')    or ''
+                )
+                kartno            = str(
+                    tx.get('card_number') or tx.get('maskedCardNo') or
+                    tx.get('kartNo')      or tx.get('cardNo')       or ''
+                )
+                islemtipi         = str(
+                    tx.get('transaction_type') or tx.get('transactionType') or
+                    tx.get('islemTipi')        or tx.get('type') or ''
+                )
+                aciklama   = str(tx.get('description') or tx.get('aciklama') or '')[:255]
+                islemtarih = now.strftime('%d/%m/%Y')  # PHP: date('d/m/Y')
+
+                try:
+                    islemtutari       = round(abs(float(
+                        tx.get('gross_amount') or tx.get('amount') or tx.get('islemTutari') or 0
+                    )), 2)
+                    isyeriucretitutar = round(abs(float(
+                        tx.get('commission') or tx.get('commissionAmount') or
+                        tx.get('isyeriUcretiTutar') or tx.get('fee') or 0
+                    )), 2)
+                    nettutar = round(abs(float(
+                        tx.get('net_amount') or tx.get('netAmount') or
+                        tx.get('netTutar')   or tx.get('net') or 0
+                    )), 2)
+                except (ValueError, TypeError):
+                    islemtutari = isyeriucretitutar = nettutar = 0.0
+
+                # ── Mukerrer kontrolu ──
+                cur.execute(
+                    'SELECT id FROM womsi_pos '
+                    'WHERE userid=%s AND isyerino=%s AND islemtarihi=%s '
+                    'AND islemtutari=%s AND kartno=%s LIMIT 1',
+                    (userid, isyerino, islemtarihi, islemtutari, kartno)
+                )
+                if cur.fetchone():
+                    skipped += 1
+                    continue
+
+                cur.execute("""
+                    INSERT INTO womsi_pos
+                        (userid, musterino, isyerino, carihesap, hesabagecistarihi,
+                         islemtutari, islemtarihi, posno,
+                         isyeriucretitutar, nettutar, brand,
+                         kartno, islemtipi, aciklama, islemtarih, kayittarihi)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    userid, musterino, isyerino, carihesap, hesabagecistarihi,
+                    islemtutari, islemtarihi, posno,
+                    isyeriucretitutar, nettutar, brand,
+                    kartno, islemtipi, aciklama, islemtarih,
+                    now.strftime('%Y-%m-%d %H:%M:%S')
+                ))
+                saved += 1
+
+            conn.commit()
+            cur.close()
     except Exception as e:
         logger.error('womsi_pos DB kayit hatasi: %s', e, exc_info=True)
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     return saved, skipped
 
 
 def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) -> tuple[int, int]:
     """
-    Womsis API'den gelen işlemleri womsis_banka tablosuna kaydeder.
-    Aynı womsiskey varsa atlar (mükerrer kayıt önleme).
+    Womsis API'den gelen islemleri womsis_banka tablosuna kaydeder.
+    Ayni womsiskey varsa atlar (mukerrer kayit onleme).
     Returns: (kaydedilen, atlanan)
     """
     if not transactions:
@@ -806,91 +814,72 @@ def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) 
     saved   = 0
     skipped = 0
     now     = datetime.now()
-    conn    = None   # UnboundLocalError'u onlemek icin onceden None yap
 
     try:
-        conn = get_db()
-        cur  = conn.cursor()
+        with get_db() as conn:
+            cur = conn.cursor()
 
-        for tx in transactions:
-            # womsiskey: tekil anahtar — account_id + transaction_id kombinasyonu
-            account_id = str(tx.get('accountId') or tx.get('account_id') or '')
-            tx_id      = str(tx.get('id') or tx.get('transactionId') or '')
-            womsiskey  = f"{account_id}_{tx_id}" if account_id and tx_id else ''
+            for tx in transactions:
+                account_id = str(tx.get('accountId') or tx.get('account_id') or '')
+                tx_id      = str(tx.get('id') or tx.get('transactionId') or '')
+                womsiskey  = f"{account_id}_{tx_id}" if account_id and tx_id else ''
 
-            # Tarih — Womsis genellikle 'YYYY-MM-DD' veya 'DD-MM-YYYY HH:MM:SS' döner
-            raw_tarih = str(tx.get('date') or tx.get('transactionDate') or tx.get('valueDate') or '')
-            tarih_iso = None
-            for fmt in ('%Y-%m-%d', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y', '%Y-%m-%dT%H:%M:%S'):
-                try:
-                    tarih_iso = datetime.strptime(raw_tarih[:len(fmt)], fmt).strftime('%Y-%m-%d')
-                    break
-                except Exception:
-                    continue
-            if not tarih_iso:
-                tarih_iso = now.strftime('%Y-%m-%d')
+                raw_tarih = str(tx.get('date') or tx.get('transactionDate') or tx.get('valueDate') or '')
+                tarih_iso = None
+                for fmt in ('%Y-%m-%d', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y', '%Y-%m-%dT%H:%M:%S'):
+                    try:
+                        tarih_iso = datetime.strptime(raw_tarih[:len(fmt)], fmt).strftime('%Y-%m-%d')
+                        break
+                    except Exception:
+                        continue
+                if not tarih_iso:
+                    tarih_iso = now.strftime('%Y-%m-%d')
 
-            # Tutar ve yön
-            tutar_raw    = tx.get('amount') or tx.get('tutar') or 0
-            tutar        = abs(float(tutar_raw))
-            debit        = float(tx.get('debit')  or 0)
-            credit       = float(tx.get('credit') or 0)
-            if credit > 0 and debit == 0:
-                gelirgider = 'gelir'
-            elif debit > 0 and credit == 0:
-                gelirgider = 'gider'
-            else:
-                gelirgider = 'gelir' if float(tutar_raw) >= 0 else 'gider'
+                tutar_raw  = tx.get('amount') or tx.get('tutar') or 0
+                tutar      = abs(float(tutar_raw))
+                debit      = float(tx.get('debit')  or 0)
+                credit     = float(tx.get('credit') or 0)
+                if credit > 0 and debit == 0:
+                    gelirgider = 'gelir'
+                elif debit > 0 and credit == 0:
+                    gelirgider = 'gider'
+                else:
+                    gelirgider = 'gelir' if float(tutar_raw) >= 0 else 'gider'
 
-            aciklama  = str(tx.get('description') or tx.get('aciklama') or '')[:255]
-            sube      = str(tx.get('accountName') or tx.get('bankName') or tx.get('sube') or '')
-            iban      = str(tx.get('iban') or '')
-            bakiye    = float(tx.get('balance') or tx.get('bakiye') or 0)
-            hesap_turu= str(tx.get('currency') or tx.get('hesap_turu') or 'TL')
-            dekont_no = str(tx.get('referenceNo') or tx.get('dekont_no') or '')
+                aciklama   = str(tx.get('description') or tx.get('aciklama') or '')[:255]
+                sube       = str(tx.get('accountName') or tx.get('bankName') or tx.get('sube') or '')
+                iban       = str(tx.get('iban') or '')
+                bakiye     = float(tx.get('balance') or tx.get('bakiye') or 0)
+                hesap_turu = str(tx.get('currency') or tx.get('hesap_turu') or 'TL')
+                dekont_no  = str(tx.get('referenceNo') or tx.get('dekont_no') or '')
 
-            # Mükerrer kontrol
-            if womsiskey:
-                cur.execute(
-                    'SELECT id FROM womsis_banka WHERE womsiskey = %s AND userid = %s LIMIT 1',
-                    (womsiskey, userid)
-                )
-                if cur.fetchone():
-                    skipped += 1
-                    continue
+                if womsiskey:
+                    cur.execute(
+                        'SELECT id FROM womsis_banka WHERE womsiskey = %s AND userid = %s LIMIT 1',
+                        (womsiskey, userid)
+                    )
+                    if cur.fetchone():
+                        skipped += 1
+                        continue
 
-            cur.execute("""
-                INSERT INTO womsis_banka
-                    (userid, musterino, tarih, aciklama, gelirgider, tutar,
-                     sube, faturaunvan, womsiskey, kaynak,
-                     created_at, bakiye, iban, hesap_turu, dekont_no)
-                VALUES
-                    (%s, %s, %s, %s, %s, %s,
-                     %s, %s, %s, %s,
-                     %s, %s, %s, %s, %s)
-            """, (
-                userid, musterino, tarih_iso, aciklama, gelirgider, tutar,
-                sube, '-', womsiskey, 'womsis_scheduler',
-                now, bakiye, iban, hesap_turu, dekont_no
-            ))
-            saved += 1
+                cur.execute("""
+                    INSERT INTO womsis_banka
+                        (userid, musterino, tarih, aciklama, gelirgider, tutar,
+                         sube, faturaunvan, womsiskey, kaynak,
+                         created_at, bakiye, iban, hesap_turu, dekont_no)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    userid, musterino, tarih_iso, aciklama, gelirgider, tutar,
+                    sube, '-', womsiskey, 'womsis_scheduler',
+                    now, bakiye, iban, hesap_turu, dekont_no
+                ))
+                saved += 1
 
-        conn.commit()
-        cur.close()
+            conn.commit()
+            cur.close()
     except Exception as e:
         logger.error('womsis DB kayit hatasi: %s', e, exc_info=True)
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-    finally:
-        # Baglanti her durumda kapatilir — baglanti sızıntısını onler
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     return saved, skipped
 

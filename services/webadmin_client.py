@@ -35,11 +35,12 @@ _DEFAULT_API_KEY  = "nakit-akim-api-key-2024-secure"
 
 def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
     defaults = {
-        "base_url": _DEFAULT_BASE_URL,
-        "api_key":  _DEFAULT_API_KEY,
-        "timeout":  60,
-        "enabled":  False,
-        "firmaadi": "",
+        "base_url":          _DEFAULT_BASE_URL,
+        "api_key":           _DEFAULT_API_KEY,
+        "timeout":           60,
+        "enabled":           False,
+        "firmaadi":          "",
+        "auto_sync_enabled": True,    # varsayilan: otomatik sync ACIK
     }
     try:
         from db.db_config import get_pg_params
@@ -50,7 +51,7 @@ def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
-            SELECT webadmin_url, api_key, aktif, firmaadi
+            SELECT webadmin_url, api_key, aktif, firmaadi, auto_sync_enabled
             FROM webadmin_sirket_config
             WHERE userid = %s AND musterino = %s
             LIMIT 1
@@ -61,7 +62,7 @@ def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
         if not row:
             cur.execute(
                 """
-                SELECT webadmin_url, api_key, aktif, firmaadi
+                SELECT webadmin_url, api_key, aktif, firmaadi, auto_sync_enabled
                 FROM webadmin_sirket_config
                 WHERE userid = %s
                 LIMIT 1
@@ -72,7 +73,7 @@ def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
         if not row:
             cur.execute(
                 """
-                SELECT webadmin_url, api_key, aktif, firmaadi
+                SELECT webadmin_url, api_key, aktif, firmaadi, auto_sync_enabled
                 FROM webadmin_sirket_config
                 WHERE aktif = TRUE
                 LIMIT 1
@@ -86,9 +87,59 @@ def get_webadmin_config(userid: int, musterino: int = 1) -> dict:
             defaults["api_key"]  = row["api_key"] or _DEFAULT_API_KEY
             defaults["enabled"]  = bool(row["aktif"])
             defaults["firmaadi"] = row["firmaadi"] or ""
+            # auto_sync_enabled: None ise varsayilan True
+            ase = row.get("auto_sync_enabled")
+            defaults["auto_sync_enabled"] = bool(ase) if ase is not None else True
     except Exception as e:
         logger.warning("webadmin_sirket_config okunamadı: %s", e)
     return defaults
+
+
+def set_auto_sync_enabled(userid: int, enabled: bool, musterino: int = 1) -> bool:
+    """
+    Otomatik sync'i ac/kapat.
+    webadmin_sirket_config tablosuna auto_sync_enabled kolonunu yazar.
+    Kolon yoksa otomatik olusturur (ALTER TABLE).
+    Returns: True = basarili, False = hata
+    """
+    try:
+        from db.db_config import get_pg_params
+        import psycopg2
+        params = get_pg_params()
+        conn = psycopg2.connect(**params)
+        cur = conn.cursor()
+        # Kolon yoksa ekle (ilk calismada)
+        cur.execute("""
+            ALTER TABLE webadmin_sirket_config
+            ADD COLUMN IF NOT EXISTS auto_sync_enabled BOOLEAN DEFAULT TRUE
+        """)
+        cur.execute(
+            """
+            UPDATE webadmin_sirket_config
+            SET auto_sync_enabled = %s
+            WHERE userid = %s AND musterino = %s
+            """,
+            (enabled, userid, musterino)
+        )
+        if cur.rowcount == 0:
+            # Kayit yoksa UPDATE etkilemedi — INSERT yap
+            cur.execute(
+                """
+                INSERT INTO webadmin_sirket_config (userid, musterino, auto_sync_enabled, aktif)
+                VALUES (%s, %s, %s, FALSE)
+                ON CONFLICT (userid, musterino) DO UPDATE SET auto_sync_enabled = EXCLUDED.auto_sync_enabled
+                """,
+                (userid, musterino, enabled)
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("auto_sync_enabled=%s (userid=%d)", enabled, userid)
+        return True
+    except Exception as e:
+        logger.error("set_auto_sync_enabled hatasi: %s", e)
+        return False
+
 
 
 def _load_client_config() -> dict:
@@ -227,6 +278,39 @@ class WebAdminClient:
         GET /api/womsis/accounts
         """
         return self._get("/api/womsis/accounts", {"userid": userid})
+
+    def sync_womsis_pos(
+            self,
+            userid:     int  = 1,
+            musterino:  int  = 1,
+            start_date: Optional[str] = None,
+            end_date:   Optional[str] = None) -> dict:
+        """
+        webadmin'e POST /api/womsis/pos-sync isteği gönderir.
+        webadmin Womsis API'den POS işlemlerini çekip womsi_pos tablosuna kaydeder.
+
+        Parametreler:
+            userid:     nakitAkim kullanıcı ID (default: 1)
+            musterino:  müşteri no (default: 1)
+            start_date: "YYYY-MM-DD" formatında, default: 30 gün önce
+            end_date:   "YYYY-MM-DD" formatında, default: bugün
+
+        Dönüş:
+            {
+              "success": True,
+              "count": 42,
+              "saved": 38,
+              "skipped": 4,
+              "timestamp": "2024-06-09T12:00:00",
+              "period": {"start": "...", "end": "..."}
+            }
+        """
+        body: dict = {"userid": userid, "musterino": musterino}
+        if start_date:
+            body["start_date"] = start_date
+        if end_date:
+            body["end_date"] = end_date
+        return self._post("/api/womsis/pos-sync", body)
 
     def ping(self) -> bool:
         """webadmin sunucusunun erişilebilir olduğunu kontrol eder."""
@@ -478,4 +562,126 @@ try:
 
 except ImportError:
     # PyQt6 yoksa (örn. test ortamında) Worker sınıfı tanımlanmaz
+    pass
+
+
+# ── PyQt6 QThread Worker — Fiziksel POS ──────────────────────────────────────
+
+try:
+    from PyQt6.QtCore import QThread, pyqtSignal
+
+    class WebAdminPosSyncWorker(QThread):
+        """
+        Fiziksel POS (womsi_pos) verilerini webadmin üzerinden çeken QThread.
+        WebAdminSyncWorker ile birebir aynı mimari — sadece /api/womsis/pos-sync çağırır.
+        Webadmin veriye yazarak womsi_pos tablosunu günceller; bu worker sadece
+        sonucu raporlar.
+
+        Kullanım:
+            self._pos_worker = WebAdminPosSyncWorker(
+                userid=self.userid,
+                musterino=self.musterino,
+                start_date="2026-01-01",
+                end_date="2026-07-27"
+            )
+            self._pos_worker.progress.connect(self._on_progress)
+            self._pos_worker.finished.connect(self._on_done)
+            self._pos_worker.start()
+        """
+        progress = pyqtSignal(str)   # durum mesajı
+        finished = pyqtSignal(dict)  # {'success': bool, 'count': int, 'saved': int, 'skipped': int}
+
+        def __init__(self,
+                     userid:     int  = 1,
+                     musterino:  int  = 1,
+                     start_date: Optional[str] = None,
+                     end_date:   Optional[str] = None,
+                     base_url:   Optional[str] = None,
+                     api_key:    Optional[str] = None):
+            super().__init__()
+            self._userid     = userid
+            self._musterino  = musterino
+            self._start_date = start_date
+            self._end_date   = end_date
+            self._base_url   = base_url
+            self._api_key    = api_key
+
+        def run(self):
+            # ── Şirket bazlı config ──────────────────────────────────────────
+            cfg = get_webadmin_config(self._userid, self._musterino)
+
+            base_url = self._base_url or cfg.get("base_url")
+            api_key  = self._api_key  or cfg.get("api_key")
+
+            if not cfg.get("enabled") and not self._base_url:
+                self.finished.emit({
+                    "success":    False,
+                    "error_code": "webadmin_not_configured",
+                    "error":      "Bu şirket için webadmin bağlantısı tanımlanmamış.",
+                    "count":      0,
+                    "saved":      0,
+                    "skipped":    0,
+                })
+                return
+
+            client = WebAdminClient(base_url=base_url, api_key=api_key)
+            firma  = cfg.get("firmaadi") or f"userid={self._userid}"
+            self.progress.emit(f"🏪  [{firma}] Fiziksel POS verileri çekiliyor...")
+
+            if not client.ping():
+                self.finished.emit({
+                    "success": False,
+                    "error":   f"webadmin sunucusuna ulaşılamadı ({client.base_url}).",
+                    "count":   0,
+                    "saved":   0,
+                    "skipped": 0,
+                })
+                return
+
+            self.progress.emit("📡  Womsis POS verileri webadmin üzerinden çekiliyor...")
+            result = client.sync_womsis_pos(
+                userid=self._userid,
+                musterino=self._musterino,
+                start_date=self._start_date,
+                end_date=self._end_date,
+            )
+
+            if not result.get("success"):
+                if result.get("error_code") == "no_sirket_profili":
+                    self.finished.emit({
+                        "success":    False,
+                        "error_code": "no_sirket_profili",
+                        "error":      "Şirket profili tanımlanmadan Womsis POS verisi çekilemez.",
+                        "count":      0,
+                        "saved":      0,
+                        "skipped":    0,
+                    })
+                    return
+
+                err = result.get("error") or result.get("message") or "Bilinmeyen hata"
+                self.finished.emit({
+                    "success":  False,
+                    "error":    err,
+                    "count":    0,
+                    "saved":    0,
+                    "skipped":  0,
+                })
+                return
+
+            count   = result.get("count",   0)
+            saved   = result.get("saved",   0)
+            skipped = result.get("skipped", 0)
+            self.progress.emit(
+                f"✅  POS tamamlandı: {count} çekildi, {saved} kaydedildi, {skipped} atlandı."
+            )
+
+            self.finished.emit({
+                "success":  True,
+                "message":  f"{saved} yeni POS kaydı eklendi, {skipped} mevcut atlandı (toplam {count})",
+                "count":    count,
+                "saved":    saved,
+                "skipped":  skipped,
+            })
+
+except ImportError:
     pass

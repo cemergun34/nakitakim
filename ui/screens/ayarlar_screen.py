@@ -5005,6 +5005,57 @@ class WebAdminConfigCard(QFrame):
 
         root.addLayout(row1)
 
+        # ── Otomatik Sync On/Off ──────────────────────────────────────────────
+        sync_row = QHBoxLayout()
+        sync_row.setSpacing(10)
+
+        sync_ic = QLabel("⏱️")
+        sync_ic.setStyleSheet("font-size:18px;")
+        sync_row.addWidget(sync_ic)
+
+        sync_lbl = QLabel("Otomatik Sync (Login sonrası)")
+        sync_lbl.setStyleSheet("font-size:13px;font-weight:600;color:#1e293b;")
+        sync_row.addWidget(sync_lbl)
+        sync_row.addStretch()
+
+        self._sync_on_btn  = QPushButton("▶  AÇIK")
+        self._sync_off_btn = QPushButton("⏸  KAPALI")
+
+        for btn in (self._sync_on_btn, self._sync_off_btn):
+            btn.setFixedHeight(30)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setCheckable(True)
+
+        self._sync_on_btn.setStyleSheet(
+            "QPushButton{background:#dcfce7;color:#166534;border:2px solid #16a34a;"
+            "border-radius:7px;font-size:12px;font-weight:700;padding:0 12px;}"
+            "QPushButton:checked{background:#16a34a;color:white;}"
+            "QPushButton:hover{background:#bbf7d0;}"
+        )
+        self._sync_off_btn.setStyleSheet(
+            "QPushButton{background:#f1f5f9;color:#64748b;border:2px solid #e2e8f0;"
+            "border-radius:7px;font-size:12px;font-weight:700;padding:0 12px;}"
+            "QPushButton:checked{background:#64748b;color:white;}"
+            "QPushButton:hover{background:#e2e8f0;}"
+        )
+
+        self._sync_on_btn.clicked.connect(lambda: self._set_sync_enabled(True))
+        self._sync_off_btn.clicked.connect(lambda: self._set_sync_enabled(False))
+
+        sync_row.addWidget(self._sync_on_btn)
+        sync_row.addWidget(self._sync_off_btn)
+        root.addLayout(sync_row)
+
+        sync_note = QLabel(
+            "💡  KAPALI yapıldığında login sonrası otomatik banka ve POS verisi çekilmez."
+        )
+        sync_note.setWordWrap(True)
+        sync_note.setStyleSheet(
+            "font-size:11px;color:#64748b;background:#f8fafc;"
+            "border-radius:6px;padding:6px 10px;"
+        )
+        root.addWidget(sync_note)
+
         # ── SSH Tünel Bölümü (toggle) ──
         self._ssh_toggle = QPushButton("🔐  SSH Tünel  ▸")
         self._ssh_toggle.setCheckable(True)
@@ -5017,6 +5068,7 @@ class WebAdminConfigCard(QFrame):
         )
         self._ssh_toggle.clicked.connect(self._toggle_ssh)
         root.addWidget(self._ssh_toggle)
+
 
         self._ssh_frame = QFrame()
         self._ssh_frame.setStyleSheet(
@@ -5223,6 +5275,34 @@ class WebAdminConfigCard(QFrame):
         except Exception:
             pass
         self._check_cert()
+        # ── Otomatik sync toggle durumunu DB'den oku ──
+        try:
+            from services.webadmin_client import get_webadmin_config
+            wcfg = get_webadmin_config(self._userid)
+            is_on = wcfg.get("auto_sync_enabled", True)
+            self._sync_on_btn.setChecked(is_on)
+            self._sync_off_btn.setChecked(not is_on)
+        except Exception:
+            self._sync_on_btn.setChecked(True)
+            self._sync_off_btn.setChecked(False)
+
+    def _set_sync_enabled(self, enabled: bool):
+        """Otomatik sync toggle — DB'ye yazar, butonları günceller."""
+        self._sync_on_btn.setChecked(enabled)
+        self._sync_off_btn.setChecked(not enabled)
+        try:
+            from services.webadmin_client import set_auto_sync_enabled
+            ok = set_auto_sync_enabled(self._userid, enabled)
+            if ok:
+                durum = "AÇIK ▶" if enabled else "KAPALI ⏸"
+                self._show_status(
+                    f"✅  Otomatik Sync {durum} — ayar kaydedildi.",
+                    "#059669" if enabled else "#64748b"
+                )
+            else:
+                self._show_status("⚠️  Ayar kaydedilemedi (DB hatası).", "#92400e")
+        except Exception as e:
+            self._show_status(f"Hata: {e}", "#dc2626")
 
     # ── Kaydetme ─────────────────────────────────────────────────────────────
 
