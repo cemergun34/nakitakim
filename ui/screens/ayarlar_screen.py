@@ -498,6 +498,7 @@ class WomsisPosIsleWorker(QThread):
     """
     PHP: #btnGiderlerIsle click → ajax/ayarlar/womsisPosIsle.php
     VOMSİS POS terminal hareketlerini çekip womsi_pos tablosuna yazar.
+    PHP womsisPosIsle.php ile birebir alan eşlemesi yapılmıştır.
     """
     progress = pyqtSignal(str)
     finished = pyqtSignal(dict)
@@ -519,9 +520,9 @@ class WomsisPosIsleWorker(QThread):
             from services.vomsis_service import (
                 vomsis_authenticate, vomsis_get_terminals, vomsis_get_terminal_transactions
             )
-            from services.fiziksel_pos_service import ensure_tables
 
-            ensure_tables()
+            CHUNK_DAYS = 14  # PHP: $CHUNK_DAYS = 14
+
             self.progress.emit("🔑  VOMSİS POS token alınıyor...")
             token, err_msg = vomsis_authenticate(
                 self._api_base, self._app_key, self._app_secret
@@ -529,7 +530,7 @@ class WomsisPosIsleWorker(QThread):
             if not token:
                 self.finished.emit({
                     "success": False,
-                    "message": err_msg or "Token alınamadı.",
+                    "message": err_msg or "Token alınamadı: VOMSİS sunucusuna ulaşılamadı.",
                     "count": 0
                 })
                 return
@@ -544,64 +545,178 @@ class WomsisPosIsleWorker(QThread):
                 })
                 return
 
-            begin_str = self._start_dt.strftime("%d-%m-%Y %H:%M:%S")
-            end_str   = self._end_dt.replace(hour=23, minute=59, second=59).strftime("%d-%m-%Y %H:%M:%S")
-
-            total_inserted = 0
-            conn = get_connection()
-            try:
-                bas_str_norm = self._start_dt.strftime("%Y-%m-%d")
-                bit_str_norm = self._end_dt.strftime("%Y-%m-%d")
-                conn.execute(
-                    "DELETE FROM womsi_pos WHERE userid=? AND musterino=? AND islemtarihi >= ? AND islemtarihi <= ?",
-                    (self._userid, self._musterino, bas_str_norm, bit_str_norm)
+            # ── PHP: $CHUNK_DAYS = 14 ─────────────────────────────────────────
+            # Tarih aralığını 14 günlük parçalara böl
+            chunks = []
+            current = self._start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_norm = self._end_dt.replace(hour=23, minute=59, second=59)
+            while current <= end_norm:
+                chunk_end = min(
+                    current + datetime.timedelta(days=CHUNK_DAYS - 1),
+                    end_norm
                 )
-                conn.commit()
+                chunks.append({
+                    "begin": current.strftime("%d-%m-%Y %H:%M"),
+                    "end":   chunk_end.strftime("%d-%m-%Y %H:%M"),
+                })
+                current = (chunk_end + datetime.timedelta(seconds=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
 
+            now_str    = datetime.datetime.now().strftime("%d/%m/%Y")
+            conn       = get_connection()
+            total_ins  = 0
+            total_skip = 0
+
+            try:
                 for idx, terminal in enumerate(terminals):
-                    tid = terminal.get("id") or terminal.get("stationId") or ""
-                    tname = terminal.get("name") or terminal.get("terminalNo") or str(tid)
-                    self.progress.emit(
-                        f"💳  Terminal {idx+1}/{len(terminals)}: {tname} çekiliyor..."
-                    )
-                    txs = vomsis_get_terminal_transactions(
-                        self._api_base, token, tid, begin_str, end_str
-                    )
-                    for tx in txs:
-                        islem_tarihi     = tx.get("transactionDate") or tx.get("date") or ""
-                        islem_tutari     = float(str(tx.get("amount", 0)).replace(",", ".") or 0)
-                        net_tutar        = float(str(tx.get("netAmount", 0)).replace(",", ".") or 0)
-                        isyeri_ucreti    = float(str(tx.get("commissionAmount", 0)).replace(",", ".") or 0)
-                        islem_tipi       = tx.get("type") or tx.get("transactionType") or ""
-                        kart_no          = tx.get("maskedCardNumber") or tx.get("cardNo") or ""
-                        brand            = tx.get("brand") or tx.get("cardBrand") or ""
-                        aciklama         = tx.get("description") or ""
-                        isyeri_no        = tx.get("merchantId") or str(tid)
+                    # ── PHP: $station (terminal nesnesi) ────────────────────
+                    tid          = terminal.get("id") or terminal.get("stationId") or ""
+                    station_no   = str(terminal.get("station_no") or terminal.get("no") or tid)
+                    workplace_no = str(terminal.get("workplace_no") or terminal.get("merchantNo") or "")
+                    bank_title   = str(terminal.get("bank_title") or terminal.get("bank_name") or terminal.get("bankTitle") or "")
 
-                        conn.execute(
-                            """INSERT INTO womsi_pos
-                               (userid, musterino, isyerino, islemtarihi, islemtutari,
-                                nettutar, isyeriucretitutar, islemtipi, kartno, brand, aciklama)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (self._userid, self._musterino, isyeri_no, islem_tarihi, islem_tutari,
-                             net_tutar, isyeri_ucreti, islem_tipi, kart_no, brand, aciklama)
-                        )
-                        total_inserted += 1
+                    if not tid:
+                        continue
+
+                    self.progress.emit(
+                        f"💳  Terminal {idx+1}/{len(terminals)} "
+                        f"[{station_no}] çekiliyor... ({len(chunks)} dönem)"
+                    )
+
+                    for chunk in chunks:
+                        try:
+                            txs = vomsis_get_terminal_transactions(
+                                self._api_base, token, tid,
+                                chunk["begin"], chunk["end"]
+                            )
+                        except Exception as ce:
+                            self.progress.emit(
+                                f"⚠️  Terminal {station_no} chunk hatası: {ce}"
+                            )
+                            continue
+
+                        for tx in txs:
+                            # ── Alan eşlemeleri — PHP womsisPosIsle.php ile birebir ──
+                            # PHP: $tx['workplace'] veya $workplaceNo (station'dan)
+                            isyerino = str(
+                                tx.get("workplace")   or tx.get("workplaceNo") or
+                                tx.get("merchantNo")  or tx.get("merchantId")  or
+                                workplace_no          or ""
+                            )
+                            # PHP: $bankTitle (station'dan)
+                            carihesap = str(
+                                tx.get("cariHesap")  or tx.get("accountNo") or
+                                bank_title           or ""
+                            )
+                            # PHP: $tx['valor'] ?? $tx['transfer_to_account_date']
+                            hesabagecistarihi = str(
+                                tx.get("valor")                    or
+                                tx.get("transfer_to_account_date") or
+                                tx.get("settlementDate")           or
+                                tx.get("valueDate")                or ""
+                            )
+                            # PHP: $tx['date']
+                            islemtarihi = str(
+                                tx.get("date")            or
+                                tx.get("transactionDate") or
+                                tx.get("islemTarihi")     or ""
+                            )
+                            # PHP: $tx['station'] ?? $stationNo
+                            posno = str(
+                                tx.get("station")    or tx.get("stationNo") or
+                                tx.get("terminalId") or station_no or ""
+                            )
+                            # PHP: $tx['sub_card_type'] ?? $tx['card_type']
+                            brand = str(
+                                tx.get("sub_card_type") or tx.get("card_type") or
+                                tx.get("cardBrand")     or tx.get("brand")     or
+                                tx.get("scheme")        or ""
+                            )
+                            # PHP: $tx['card_number']
+                            kartno = str(
+                                tx.get("card_number")        or
+                                tx.get("maskedCardNumber")   or
+                                tx.get("maskedCardNo")       or
+                                tx.get("cardNo")             or ""
+                            )
+                            # PHP: $tx['transaction_type']
+                            islemtipi = str(
+                                tx.get("transaction_type") or tx.get("transactionType") or
+                                tx.get("islemTipi")        or tx.get("type") or ""
+                            )
+                            # PHP: $tx['description']
+                            aciklama = str(tx.get("description") or tx.get("aciklama") or "")[:255]
+
+                            # PHP: $tx['gross_amount'], $tx['commission'], $tx['net_amount']
+                            try:
+                                islemtutari = round(abs(float(
+                                    tx.get("gross_amount") or tx.get("amount") or
+                                    tx.get("islemTutari")  or 0
+                                )), 2)
+                                isyeriucretitutar = round(abs(float(
+                                    tx.get("commission")        or tx.get("commissionAmount") or
+                                    tx.get("isyeriUcretiTutar") or tx.get("fee") or 0
+                                )), 2)
+                                nettutar = round(abs(float(
+                                    tx.get("net_amount") or tx.get("netAmount") or
+                                    tx.get("netTutar")   or tx.get("net") or 0
+                                )), 2)
+                            except (ValueError, TypeError):
+                                islemtutari = isyeriucretitutar = nettutar = 0.0
+
+                            # ── Mükerrer kontrol (PHP: INSERT IGNORE mantığı) ──
+                            existing = conn.execute(
+                                "SELECT id FROM womsi_pos "
+                                "WHERE userid=? AND isyerino=? AND islemtarihi=? "
+                                "AND islemtutari=? AND kartno=? LIMIT 1",
+                                (self._userid, isyerino, islemtarihi, islemtutari, kartno)
+                            ).fetchone()
+                            if existing:
+                                total_skip += 1
+                                continue
+
+                            conn.execute(
+                                """INSERT INTO womsi_pos
+                                   (userid, musterino, isyerino, carihesap, hesabagecistarihi,
+                                    islemtutari, islemtarihi, posno,
+                                    isyeriucretitutar, nettutar, brand,
+                                    kartno, islemtipi, aciklama, islemtarih)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (
+                                    self._userid, self._musterino,
+                                    isyerino, carihesap, hesabagecistarihi,
+                                    islemtutari, islemtarihi, posno,
+                                    isyeriucretitutar, nettutar, brand,
+                                    kartno, islemtipi, aciklama, now_str
+                                )
+                            )
+                            total_ins += 1
+
                 conn.commit()
             except Exception as exc:
                 conn.rollback()
-                self.finished.emit({"success": False, "message": str(exc), "count": total_inserted})
+                self.finished.emit({
+                    "success": False,
+                    "message": str(exc),
+                    "count": total_ins
+                })
                 return
             finally:
                 conn.close()
 
             self.finished.emit({
                 "success": True,
-                "message": f"{total_inserted} POS hareketi aktarıldı ({len(terminals)} terminal).",
-                "count": total_inserted
+                "message": (
+                    f"{total_ins} POS hareketi eklendi, {total_skip} mükerrer atlandı "
+                    f"({len(terminals)} terminal, {len(chunks)} dönem)."
+                ),
+                "count": total_ins
             })
         except Exception as exc:
             self.finished.emit({"success": False, "message": f"Beklenmeyen hata: {exc}", "count": 0})
+
+
 
 
 class PaytrTopluIsleWorker(QThread):
