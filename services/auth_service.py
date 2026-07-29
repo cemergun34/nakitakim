@@ -37,7 +37,12 @@ def authenticate(kullanici_adi: str, sifre: str) -> dict | None:
         if stored_sifre == md5_sifre:
             return _build_user(row_dict)
 
-        # 3. Bcrypt ($2y$ → $2b$ PHP uyumu)
+        # 3. SHA-256 karşılaştırma (webadmin/fppro bazı versiyonları bu algoritmayı kullanır)
+        sha256_sifre = hashlib.sha256(sifre.encode()).hexdigest()
+        if stored_sifre == sha256_sifre:
+            return _build_user(row_dict)
+
+        # 4. Bcrypt ($2y$ → $2b$ PHP uyumu)
         try:
             import bcrypt
             # PHP $2y$ → Python bcrypt $2b$ uyumu
