@@ -319,6 +319,54 @@ def api_womsis_sync():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/womsis/pos-sync', methods=['POST'])
+@require_api_key
+def api_womsis_pos_sync():
+    """
+    Womsis API'den fiziksel POS (womsiPos) verilerini cekip womsi_pos tablosuna kaydeder.
+    Banka hareketi sync (/api/womsis/sync) ile birebir ayni mimari.
+    """
+    try:
+        data      = request.get_json() or {}
+        userid    = int(data.get('userid', 1))
+        musterino = int(data.get('musterino', 1))
+        start     = data.get('start_date') or (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        end       = data.get('end_date')   or datetime.now().strftime('%Y-%m-%d')
+
+        creds = _get_womsis_creds(userid)
+        if not creds:
+            return jsonify({
+                'success': False,
+                'error_code': 'no_sirket_profili',
+                'error': 'Bu kullanici icin Womsis bilgisi tanimli degil.'
+            })
+
+        start_dt = datetime.strptime(start, '%Y-%m-%d')
+        end_dt   = datetime.strptime(end,   '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+
+        transactions = _fetch_womsis_pos_transactions(
+            creds['url'], creds['appkey'], creds['seckey'],
+            start_dt, end_dt
+        )
+
+        saved, skipped = _save_womsis_pos_to_db(transactions, userid=userid, musterino=musterino)
+        logger.info('womsis/pos-sync: %d cekildi, %d kaydedildi, %d atlandi (userid=%d, musterino=%d)',
+                    len(transactions), saved, skipped, userid, musterino)
+
+        return jsonify({
+            'success':   True,
+            'count':     len(transactions),
+            'saved':     saved,
+            'skipped':   skipped,
+            'timestamp': datetime.now().isoformat(),
+            'period':    {'start': start, 'end': end}
+        })
+
+    except Exception as e:
+        logger.error('womsis/pos-sync hatasi: %s', e, exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/womsis/test', methods=['POST'])
 @require_api_key
 def api_womsis_test():
@@ -496,6 +544,254 @@ def _fetch_womsis_transactions(api_url, app_key, app_secret, start_dt, end_dt):
         current = (current + timedelta(days=7)).replace(hour=0, minute=0, second=0)
 
     return results
+
+
+def _fetch_womsis_pos_transactions(api_url, app_key, app_secret, start_dt, end_dt):
+    """
+    Womsis API'den fiziksel POS islemlerini cek.
+    PHP: womsisPosIsle.php mantigi — once terminal listesi al,
+    sonra her terminal icin /pos-rapor/stations/{id}/transactions endpoint'ini
+    14 gunluk parcalar halinde sorgula.
+    """
+    import requests as req
+    from urllib.parse import urlencode
+
+    CHUNK_DAYS = 14  # PHP: $CHUNK_DAYS = 14
+
+    # ── 1. Token al (PHP: vomsisReq authenticate) ────────────────────────────
+    auth_url = api_url.rstrip('/') + '/authenticate'
+    resp  = req.post(auth_url, json={'app_key': app_key, 'app_secret': app_secret}, timeout=15)
+    token = resp.json().get('token')
+    if not token:
+        raise ValueError('Womsis token alinamadi (pos-sync): ' + str(resp.json()))
+
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+
+    # ── 2. Terminal (station) listesi al (PHP: /pos-rapor/stations) ──────────
+    stations_url  = api_url.rstrip('/') + '/pos-rapor/stations'
+    stations_resp = req.get(stations_url, headers=headers, timeout=20)
+    stations      = stations_resp.json().get('data', [])
+
+    if not stations:
+        logger.info('pos-sync: Sistemde kayitli fiziksel POS terminali bulunamadi.')
+        return []
+
+    # ── 3. 14 gunluk chunk'lar olustur (PHP: $CHUNK_DAYS = 14) ───────────────
+    chunks  = []
+    current = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    while current <= end_dt:
+        chunk_end = min(current + timedelta(days=CHUNK_DAYS - 1), end_dt)
+        chunks.append({
+            'begin': current.strftime('%d-%m-%Y'),
+            'end':   chunk_end.strftime('%d-%m-%Y'),
+        })
+        current = chunk_end + timedelta(days=1)
+        current = current.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # ── 4. Her terminal x her chunk icin islemleri cek ────────────────────────
+    results = []
+    for station in stations:
+        station_id   = station.get('id')
+        station_no   = station.get('station_no') or station.get('id') or ''
+        workplace_no = station.get('workplace_no') or ''
+        bank_title   = station.get('bank_title') or station.get('bank_name') or ''
+
+        if not station_id:
+            continue
+
+        for chunk in chunks:
+            tx_url = (
+                f"{api_url.rstrip('/')}/pos-rapor/stations/{station_id}/transactions?"
+                + urlencode({'beginDate': chunk['begin'], 'endDate': chunk['end']})
+            )
+            try:
+                r    = req.get(tx_url, headers=headers, timeout=30)
+                data = r.json()
+                txs  = data.get('transactions', [])
+                # Her islem kaydina terminal bilgisini ekle (alan esleme icin)
+                for tx in txs:
+                    tx.setdefault('_station_no',   str(station_no))
+                    tx.setdefault('_workplace_no', str(workplace_no))
+                    tx.setdefault('_bank_title',   str(bank_title))
+                results.extend(txs)
+                logger.info('pos-sync terminal=%s chunk [%s → %s]: %d kayit',
+                            station_id, chunk['begin'], chunk['end'], len(txs))
+            except Exception as ce:
+                logger.warning('POS terminal=%s chunk [%s] hatasi: %s',
+                               station_id, chunk['begin'], ce)
+
+    return results
+
+
+def _save_womsis_pos_to_db(transactions: list, userid: int = 1, musterino: int = 1) -> tuple:
+    """
+    Womsis API'den gelen POS islemlerini womsi_pos tablosuna kaydeder.
+    Mukerrer onleme: isyeriNo + islemTarihi + islemTutari + kartNo kombinasyonu.
+    Returns: (kaydedilen, atlanan)
+    """
+    if not transactions:
+        return 0, 0
+
+    saved   = 0
+    skipped = 0
+    now     = datetime.now()
+    conn    = None
+
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+
+        # womsi_pos tablosunu olustur (yoksa)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS womsi_pos (
+                id                   SERIAL PRIMARY KEY,
+                userid               INTEGER NOT NULL DEFAULT 0,
+                musterino            INTEGER NOT NULL DEFAULT 1,
+                isyerino             TEXT    DEFAULT '',
+                carihesap            TEXT    DEFAULT '',
+                hesabagecistarihi    TEXT    DEFAULT '',
+                islemtutari          NUMERIC DEFAULT 0,
+                islemtarihi          TEXT    DEFAULT '',
+                posno                TEXT    DEFAULT '',
+                isyeriucretitutar    NUMERIC DEFAULT 0,
+                nettutar             NUMERIC DEFAULT 0,
+                brand                TEXT    DEFAULT '',
+                kartno               TEXT    DEFAULT '',
+                islemtipi            TEXT    DEFAULT '',
+                aciklama             TEXT    DEFAULT '',
+                islemtarih           TEXT    DEFAULT '',
+                kayittarihi          TEXT    DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+
+        for tx in transactions:
+            # ── Alan eslemeleri — PHP womsisPosIsle.php ile birebir esleme ──
+            # PHP: $tx['workplace'] veya $workplaceNo
+            isyerino          = str(
+                tx.get('_workplace_no') or
+                tx.get('workplace')     or
+                tx.get('isyeriNo')      or
+                tx.get('merchantNo')    or
+                tx.get('shopCode')      or ''
+            )
+            # PHP: $bankTitle (station'dan geliyor)
+            carihesap         = str(
+                tx.get('_bank_title')   or
+                tx.get('cariHesap')     or
+                tx.get('accountNo')     or
+                tx.get('account')       or ''
+            )
+            # PHP: $tx['valor'] ?? $tx['transfer_to_account_date']
+            hesabagecistarihi = str(
+                tx.get('valor')                   or
+                tx.get('transfer_to_account_date') or
+                tx.get('settlementDate')           or
+                tx.get('hesabaGecisTarihi')        or
+                tx.get('valueDate')                or ''
+            )
+            # PHP: $tx['date']
+            islemtarihi       = str(
+                tx.get('date')            or
+                tx.get('transactionDate') or
+                tx.get('islemTarihi')     or ''
+            )
+            # PHP: $tx['station'] ?? $stationNo
+            posno             = str(
+                tx.get('station')         or
+                tx.get('_station_no')     or
+                tx.get('terminalId')      or
+                tx.get('posNo')           or
+                tx.get('terminal')        or ''
+            )
+            # PHP: $tx['sub_card_type'] ?? $tx['card_type']
+            brand             = str(
+                tx.get('sub_card_type')   or
+                tx.get('card_type')       or
+                tx.get('cardBrand')       or
+                tx.get('brand')           or
+                tx.get('scheme')          or ''
+            )
+            # PHP: $tx['card_number']
+            kartno            = str(
+                tx.get('card_number')     or
+                tx.get('maskedCardNo')    or
+                tx.get('kartNo')          or
+                tx.get('cardNo')          or ''
+            )
+            # PHP: $tx['transaction_type']
+            islemtipi         = str(
+                tx.get('transaction_type') or
+                tx.get('transactionType')  or
+                tx.get('islemTipi')        or
+                tx.get('type')             or ''
+            )
+            # PHP: $tx['description']
+            aciklama          = str(tx.get('description') or tx.get('aciklama') or '')[:255]
+            islemtarih        = now.strftime('%d/%m/%Y')  # PHP: date('d/m/Y')
+
+            try:
+                # PHP: $tx['gross_amount'], $tx['commission'], $tx['net_amount']
+                islemtutari       = round(abs(float(
+                    tx.get('gross_amount') or tx.get('amount') or tx.get('islemTutari') or 0
+                )), 2)
+                isyeriucretitutar = round(abs(float(
+                    tx.get('commission') or tx.get('commissionAmount') or tx.get('isyeriUcretiTutar') or tx.get('fee') or 0
+                )), 2)
+                nettutar          = round(abs(float(
+                    tx.get('net_amount') or tx.get('netAmount') or tx.get('netTutar') or tx.get('net') or 0
+                )), 2)
+            except (ValueError, TypeError):
+                islemtutari = isyeriucretitutar = nettutar = 0.0
+
+            # ── Mukerrer kontrolu — isyerino + islemtarihi + islemtutari + kartno ──
+            cur.execute(
+                'SELECT id FROM womsi_pos '
+                'WHERE userid=%s AND isyerino=%s AND islemtarihi=%s '
+                'AND islemtutari=%s AND kartno=%s LIMIT 1',
+                (userid, isyerino, islemtarihi, islemtutari, kartno)
+            )
+            if cur.fetchone():
+                skipped += 1
+                continue
+
+            cur.execute("""
+                INSERT INTO womsi_pos
+                    (userid, musterino, isyerino, carihesap, hesabagecistarihi,
+                     islemtutari, islemtarihi, posno,
+                     isyeriucretitutar, nettutar, brand,
+                     kartno, islemtipi, aciklama, islemtarih, kayittarihi)
+                VALUES
+                    (%s, %s, %s, %s, %s,
+                     %s, %s, %s,
+                     %s, %s, %s,
+                     %s, %s, %s, %s, %s)
+            """, (
+                userid, musterino, isyerino, carihesap, hesabagecistarihi,
+                islemtutari, islemtarihi, posno,
+                isyeriucretitutar, nettutar, brand,
+                kartno, islemtipi, aciklama, islemtarih,
+                now.strftime('%Y-%m-%d %H:%M:%S')
+            ))
+            saved += 1
+
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        logger.error('womsi_pos DB kayit hatasi: %s', e, exc_info=True)
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    return saved, skipped
 
 
 def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) -> tuple[int, int]:
