@@ -607,7 +607,7 @@ def get_gider_pusulasi_sube_ozet(userid: int, musterino: int, yil: int) -> list[
             FROM genel_hesap_hareketleri g
             WHERE g.userid = ?
               AND g.musteri_no = ?
-              AND g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%'
+              AND (g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%' OR g.teslim_sekli LIKE '%Cihaz Alımı%')
               AND {yr("g.tarih_date")} = ?
             GROUP BY g.sube
             ORDER BY toplam_gider DESC
@@ -680,7 +680,7 @@ def get_gider_pusulasi_detay(userid: int, musterino: int, yil: int,
                   AND g.musteri_no = ?
                   AND {yr('g.tarih_date')} = ?
                   {sube_condition}
-                  AND g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%'
+                  AND (g.teslim_sekli LIKE '%Parça Alımı (Cihaz)%' OR g.teslim_sekli LIKE '%Cihaz Alımı%')
                 ORDER BY g.tarih_date DESC, g.id DESC
                 LIMIT 3000
             """, tuple(params)).fetchall()

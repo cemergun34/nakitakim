@@ -33,15 +33,16 @@ class ImportWorker(QThread):
     progress = pyqtSignal(int, int, str, str)  # (current, total, dosya, durum)
     finished = pyqtSignal(int, int, int, int, int)  # (basarili, atlandi, hatali, eslesmez, tip_filtresi)
 
-    def __init__(self, paths: list[str], userid: int):
+    def __init__(self, paths: list[str], userid: int, musterino: int = 1):
         super().__init__()
         self.paths = paths
         self.userid = userid
+        self.musterino = musterino
 
     def run(self):
         basarili = atlandi = hatali = eslesmez = tip_filtresi = 0
         for i, path in enumerate(self.paths):
-            res = import_xml(path, self.userid)
+            res = import_xml(path, self.userid, musterino=self.musterino)
             if res.get("skipped") and res.get("skip_reason") == "tip_filtresi":
                 tip_filtresi += 1
                 durum = "tip_filtresi"
@@ -67,9 +68,10 @@ class ImportWorker(QThread):
 class EFaturaCard(QFrame):
     data_changed = pyqtSignal()   # Import bitince dashboard'u yenilemek için
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self.userid = userid
+        self.musterino = musterino
         self._worker: ImportWorker | None = None
 
         self.setStyleSheet(
@@ -210,7 +212,7 @@ class EFaturaCard(QFrame):
         self.progress.setValue(0)
         self.progress.show()
 
-        self._worker = ImportWorker(paths, self.userid)
+        self._worker = ImportWorker(paths, self.userid, getattr(self, "musterino", 1))
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_import_done)
         self._worker.start()
@@ -2136,7 +2138,7 @@ class VomsisCard(QFrame):
 class FaturaYonetimCard(QFrame):
     """Yıl + mod seçerek fatura kayıtlarını silen yönetim paneli."""
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid = userid
         self.setStyleSheet(
@@ -2889,7 +2891,7 @@ class VergiMuhtasarCard(QFrame):
     COL_VERG   = 4   # vergkestutar — inline düzenlenebilir
     COL_SIL    = 5
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid       = userid
         self._yukle_worker: VergiMuhtasarYukleWorker | None = None
@@ -4072,7 +4074,7 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._manuel_toplu_card)
 
         # Eklentiler kartı
-        self._efatura_card = EFaturaCard(self._userid)
+        self._efatura_card = EFaturaCard(self._userid, self._musterino)
         self._content_layout.addWidget(self._efatura_card)
 
         # Fatura Yönetim kartı
@@ -4187,7 +4189,7 @@ class KullaniciYonetimCard(QFrame):
         "3": ("#fef9c3", "#a16207", "📊 Analist"),
     }
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid = userid
         self.setStyleSheet(
@@ -4490,7 +4492,7 @@ class HesapTanimCard(QFrame):
       - Şema CSV'sini indir
     """
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid = userid
         self.setStyleSheet(
@@ -4958,7 +4960,7 @@ class AyarlarScreen(QWidget):
         self._content_layout.addWidget(self._manuel_toplu_card)
 
         # Eklentiler kartı
-        self._efatura_card = EFaturaCard(self._userid)
+        self._efatura_card = EFaturaCard(self._userid, self._musterino)
         self._content_layout.addWidget(self._efatura_card)
 
         # Fatura Yönetim kartı
@@ -5060,7 +5062,7 @@ class WebAdminConfigCard(QFrame):
     Ayarlar → Eklentiler → VOMSİS API kartının altında görünür.
     """
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid = userid
         self.setStyleSheet(
@@ -5929,7 +5931,7 @@ class WomsisExcelImportDialog(QDialog):
          "-", "TR...", "-", "-", "-"],
     ]
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid = userid
         self._import_worker = None
@@ -8035,7 +8037,7 @@ class WomsisPosExcelImportDialog(QDialog):
     Zorunlu kolonlar: İŞLEM TARİHİ, İŞLEM TUTARI, NET TUTAR
     """
 
-    def __init__(self, userid: int, parent=None):
+    def __init__(self, userid: int, musterino: int = 1, parent=None):
         super().__init__(parent)
         self._userid  = userid
         self._worker: WomsisPosExcelWorker | None = None

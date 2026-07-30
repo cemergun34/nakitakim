@@ -102,7 +102,8 @@ def _ensure_cari_hesap(conn, unvan: str, vergi_no: str, vergi_daire: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def import_xml(xml_path: str, userid: int, mod: str = None,
-               izin_verilen_tipler: tuple[str, ...] | None = None) -> dict:
+               izin_verilen_tipler: tuple[str, ...] | None = None,
+               musterino: int = 1) -> dict:
     """
     Tek UBL-TR XML dosyasını parse edip veritabanına kaydeder.
     mod verilmezse VKN karsilastirmasi ile otomatik tespit edilir.
@@ -261,12 +262,12 @@ def import_xml(xml_path: str, userid: int, mod: str = None,
                     """SELECT form_id, sube
                        FROM genel_hesap_hareketleri
                        WHERE userid = ?
-                         AND musteri_no = 1
+                         AND musteri_no = ?
                          AND LOWER(TRIM(aciklama)) = LOWER(TRIM(?))
                          AND form_id IS NOT NULL AND form_id != ''
                        ORDER BY id DESC
                        LIMIT 1""",
-                    (userid, unvan)
+                    (userid, musterino, unvan)
                 ).fetchone()
                 if ghh_row:
                     found_formno = ghh_row[0]
@@ -280,11 +281,11 @@ def import_xml(xml_path: str, userid: int, mod: str = None,
                (userid, unvan, vergino, vergiDairesi, toplam, fatura,
                 tarih, hash, gruplama, gelirGiderMod, faturano, kaynak, xml_dosya, musterino,
                 formNo)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT DO NOTHING""",
             (userid, unvan, vergi_no, vergi_daire, toplam, meta_json,
              tarih, fatura_hash, gruplama, mod, fatura_no, "xml", dest_path,
-             found_formno)
+             musterino, found_formno)
         )
         fatura_id = cur.lastrowid
 
@@ -325,7 +326,7 @@ def import_xml(xml_path: str, userid: int, mod: str = None,
 
 
 def toplu_isle(fatura_ids: list[int], hesap_kodu_id: int,
-               cari_str: str, mod: str, userid: int) -> dict:
+               cari_str: str, mod: str, userid: int, musterino: int = 1) -> dict:
     """
     Seçilen faturaları hareketler tablosuna toplu olarak işler.
     PHP ajax/ayarlar/faturaTopluisle.php'nin karşılığı.
@@ -436,15 +437,15 @@ def toplu_isle(fatura_ids: list[int], hesap_kodu_id: int,
                     """INSERT INTO hareketler
                        (tarih, hesapKodu, aciklama, gelirGider, kategori_id,
                         kaynak, carihesapId, faturaNo, faturaUnvan,
-                        alinan_tutar1, musteriNo)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        alinan_tutar1, userid, musteriNo)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (tarih_fmt, hesap_kodu_gercek,
                      fat_unvan or cari_unvan,
                      mod, 0,
                      "fatura", cari_id,
                      fat_no or "",
                      fat_unvan or cari_unvan,
-                     tutar, userid)
+                     tutar, userid, musterino)
                 )
 
                 # faturalar tablosunu güncelle — işlenmiş olarak işaretle

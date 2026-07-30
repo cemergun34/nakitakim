@@ -53,9 +53,9 @@ def _get_genel_hesap_all(
                 COALESCE(SUM(CASE WHEN nerden_geliyor='genelHesap' THEN {_g} ELSE 0 END), 0) AS gh_gelir,
                 COALESCE(SUM(CASE WHEN nerden_geliyor='genelHesap' THEN {_d} ELSE 0 END), 0) AS gh_gider,
 
-                -- Gider Pusulası (teslim_sekli = 'Parça Alımı (Cihaz)')
-                COALESCE(SUM(CASE WHEN teslim_sekli LIKE '%%Parça Alımı (Cihaz)%%' THEN {_g} ELSE 0 END), 0) AS pusulasi_gelir,
-                COALESCE(SUM(CASE WHEN teslim_sekli LIKE '%%Parça Alımı (Cihaz)%%' THEN {_d} ELSE 0 END), 0) AS pusulasi_gider,
+                -- Gider Pusulası (teslim_sekli = 'Parça Alımı (Cihaz)' veya 'Cihaz Alımı')
+                COALESCE(SUM(CASE WHEN (teslim_sekli LIKE '%%Parça Alımı (Cihaz)%%' OR teslim_sekli LIKE '%%Cihaz Alımı%%') THEN {_g} ELSE 0 END), 0) AS pusulasi_gelir,
+                COALESCE(SUM(CASE WHEN (teslim_sekli LIKE '%%Parça Alımı (Cihaz)%%' OR teslim_sekli LIKE '%%Cihaz Alımı%%') THEN {_d} ELSE 0 END), 0) AS pusulasi_gider,
 
                 -- Maaş/Kira/SMM
                 COALESCE(SUM(CASE WHEN nerden_geliyor='gider'
