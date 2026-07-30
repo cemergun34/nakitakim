@@ -365,14 +365,24 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
 
     try:
         cnx = _moy_connect(host, user, password)
+        # MySQL sorgu zaman aşımını 30 saniye olarak ayarla
+        # (büyük JOIN'lerin bloke olmasını önler)
+        try:
+            _cur = cnx.cursor()
+            _cur.execute("SET SESSION wait_timeout=30")
+            _cur.execute("SET SESSION interactive_timeout=30")
+            _cur.close()
+        except Exception:
+            pass
     except Exception as e:
         return {"success": False, "message": f"Moy bağlantı hatası: {e}", "eklenen": 0}
 
     try:
         cursor = cnx.cursor(dictionary=True)
 
-        # ── 360 hesabı — Tahakkuk_No bazlı, beyanname INNER JOIN ─────────────
-        # Her Tahakkuk_No = bir vergi ödemesi → doğrudan beyanname belgesiyle eşleşir.
+        # ── 360 hesabı — Tahakkuk_No bazlı, beyanname_listeleri.Kayit_No JOIN ─
+        # Tahakkuk_No = beyanname_listeleri.Belge_No → kesin, 1-to-1 eşleşme.
+        # Boş / NULL Tahakkuk_No'lar JOIN'e katılmaz (doğru davranış).
         _log("📊  360 hesap kodu (Tahakkuk_No bazlı) sorgulanıyor...")
         cursor.execute(
             """SELECT
@@ -397,6 +407,8 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                  AND ht.islem_Tarihi BETWEEN %s AND %s
                  AND ht.Musteri_Kayit_No = %s
                  AND ht.Hesap_Kodu_1 = '360'
+                 AND ht.Tahakkuk_No IS NOT NULL
+                 AND ht.Tahakkuk_No != ''
                GROUP BY ht.Tahakkuk_No, ht.islem_Tarihi, ht.Sube_Kayit_No,
                         mk.Soyadi_Unvani, s.Adi, s.Alanlar,
                         bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu,
@@ -967,7 +979,12 @@ def get_beyanname_listesi(musteri_no: int,
 def get_beyanname_pdf_bytes(musteri_no: int, kayit_no: int) -> Optional[bytes]:
     """
     beyanname_gib.Belge_Data alanından PDF ham verisini (bytes) döndürür.
-    kayit_no: beyanname_listeleri.Kayit_No değeri
+
+    kayit_no: beyanname_listeleri.Kayit_No değeri.
+
+    Arama sırası (PHP kodu moy-olustur.php?kayit_ID=data_Kayit_No mantığı):
+      1. beyanname_gib WHERE Byn_Kayit_No = kayit_no   (Kayit_No direkt)
+      2. beyanname_listeleri'nden Data_Kayit_No'yu bul, sonra gib'den ara
 
     Returns: PDF bytes veya None
     """
@@ -977,18 +994,36 @@ def get_beyanname_pdf_bytes(musteri_no: int, kayit_no: int) -> Optional[bytes]:
     try:
         cnx = _moy_connect(bilgi["url"], bilgi["username"], bilgi["sifre"])
         cursor = cnx.cursor()
+
+        # Deneme 1: Byn_Kayit_No = kayit_no (beyanname_listeleri.Kayit_No)
         cursor.execute(
             "SELECT Belge_Data FROM beyanname_gib WHERE Byn_Kayit_No = %s LIMIT 1",
             (kayit_no,)
         )
         row = cursor.fetchone()
+
+        if not (row and row[0]):
+            # Deneme 2: PHP mantığı — data_Kayit_No üzerinden
+            cursor.execute(
+                """SELECT gib.Belge_Data
+                   FROM beyanname_listeleri bl
+                   JOIN beyanname_gib gib ON gib.Byn_Kayit_No = bl.Data_Kayit_No
+                   WHERE bl.Kayit_No = %s
+                   LIMIT 1""",
+                (kayit_no,)
+            )
+            row = cursor.fetchone()
+
         cursor.close()
         cnx.close()
+
         if row and row[0]:
             data = row[0]
-            # bytes veya bytearray olabilir
             return bytes(data) if not isinstance(data, bytes) else data
         return None
     except Exception as e:
-        logger.error("Beyanname PDF çekme hatası: %s", e)
+        logger.error("Beyanname PDF çekme hatası (kayit_no=%s): %s", kayit_no, e)
         return None
+
+
+
