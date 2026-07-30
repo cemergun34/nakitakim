@@ -2424,6 +2424,17 @@ class KurumOdemeDialog(QDialog):
         )
         self._filtre_btn.clicked.connect(self._load)
         bar.addWidget(self._filtre_btn)
+
+        # Excel export butonu
+        self._excel_btn = QPushButton("📊  Excel")
+        self._excel_btn.setFixedSize(90, 32)
+        self._excel_btn.setStyleSheet(
+            "QPushButton{background:#166534;color:white;border:none;"
+            "border-radius:7px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:#15803d;}"
+        )
+        self._excel_btn.clicked.connect(self._excel_export)
+        bar.addWidget(self._excel_btn)
         root.addLayout(bar)
 
         # ── Özet bant ──
@@ -2850,6 +2861,208 @@ class KurumOdemeDialog(QDialog):
             f"Toplam: <b>{self._sql_toplam:,.2f} ₺</b>"
         )
         self._ozet_lbl.setTextFormat(Qt.TextFormat.RichText)
+
+    # ── Excel Export ─────────────────────────────────────────────────────────
+
+    def _excel_export(self):
+        """Tablodaki mevcut satırları Excel'e aktarır."""
+        import os, subprocess, sys
+        from datetime import datetime
+
+        if not self._enriched:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Excel", "Aktarılacak veri yok.")
+            return
+
+        try:
+            import openpyxl
+            from openpyxl.styles import (Font, PatternFill, Alignment,
+                                          Border, Side, numbers)
+        except ImportError:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Eksik Paket",
+                "openpyxl kurulu değil.\n\nTerminalde şunu çalıştırın:\n  pip install openpyxl")
+            return
+
+        # ── Sütun başlıkları ─────────────────────────────────────────────────
+        BASLIKLAR = [
+            "Tür", "Ünvan / İşyeri", "Vergi No / Şube",
+            "İlk Tarih", "Son Tarih", "Sözleşme No", "Sözleşme Tarihi",
+            "Tutar (₺)", "Belge Türü", "Dönem", "Onay Tarihi", "Belge Durum",
+        ]
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Kurum Ödemeleri"
+
+        # Başlık stili
+        HDR_FILL  = PatternFill("solid", fgColor="166534")
+        HDR_FONT  = Font(bold=True, color="FFFFFF", size=11)
+        HDR_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        BORDER    = Border(
+            left  =Side(style="thin", color="CBD5E1"),
+            right =Side(style="thin", color="CBD5E1"),
+            top   =Side(style="thin", color="CBD5E1"),
+            bottom=Side(style="thin", color="CBD5E1"),
+        )
+
+        ws.row_dimensions[1].height = 28
+        for ci, bas in enumerate(BASLIKLAR, start=1):
+            c = ws.cell(row=1, column=ci, value=bas)
+            c.fill  = HDR_FILL
+            c.font  = HDR_FONT
+            c.alignment = HDR_ALIGN
+            c.border = BORDER
+
+        # ── Veri satırları ───────────────────────────────────────────────────
+        BELGE_TUR_ADI = {
+            "KDV1":     "KDV Beyannamesi (1.Tür)",
+            "KDV2":     "KDV Beyannamesi (2.Tür)",
+            "MUHSGK":   "SGK Tahakkuk Fişi (5510)",
+            "KGECICI":  "Kurumlar Vg. Geçici",
+            "KURUMLAR": "Kurumlar Vergisi",
+            "LEVHA":    "Levha Beyannamesi",
+            "MUHTAR":   "Muhtasar Beyanname",
+        }
+
+        ara_q = getattr(self, "_ara_le", None)
+        q = ara_q.text().strip().lower() if ara_q else ""
+
+        DATA_ALIGN_R = Alignment(horizontal="right",  vertical="center")
+        DATA_ALIGN_L = Alignment(horizontal="left",   vertical="center")
+        DATA_ALIGN_C = Alignment(horizontal="center", vertical="center")
+        ROW_FILL_ALT = PatternFill("solid", fgColor="F0FDF4")  # açık yeşil (çift satır)
+        TUTAR_FMT    = '#,##0.00 ₺'
+
+        ri_excel = 2
+        toplam_excel = 0.0
+
+        for row, byn in self._enriched:
+            kod     = row.get("hesapKodu", "")
+            beyan_t = self.BEYANNAME_TUR.get(kod, self.HESAP_ACIKLAMA.get(kod, kod))
+            vergino = row.get("vergiNo", "") or ""
+            ilkT    = self._fmt_goster(row.get("ilkTarih", ""))
+            sonT    = self._fmt_goster(row.get("sonTarih", ""))
+            sozno   = row.get("sozlesmeNo", "") or ""
+            soztarih= self._fmt_goster(row.get("sozlesmeTarih", ""))
+            tutar   = float(row.get("tutar") or 0)
+
+            db_unvan = str(row.get("unvan", "") or "")
+            if byn:
+                _mu = byn.get("musteri_unvani", "") or ""
+                unvan = db_unvan if db_unvan and db_unvan not in ("-", "") else (_mu or "-")
+                if not sonT:
+                    sonT = self._fmt_goster(byn.get("beyan_tarih_2", ""))
+                if not soztarih:
+                    soztarih = self._fmt_goster(byn.get("onay_tarihi", ""))
+            else:
+                unvan = db_unvan if db_unvan and db_unvan not in ("-", "") else "-"
+
+            # Arama filtresi uygula
+            if q and q not in beyan_t.lower() and q not in unvan.lower() and q not in kod.lower():
+                continue
+
+            if byn:
+                raw_bt = byn.get("belge_turu", "")
+                if raw_bt == "MUHSGK" and kod == "730.08":
+                    byn_belge = "Muhtasar ve Prim Hizmet Beyannamesi"
+                else:
+                    byn_belge = BELGE_TUR_ADI.get(raw_bt, raw_bt)
+                byn_donem = byn.get("donem_adi", "") or ""
+                onay_raw  = byn.get("onay_tarihi", "") or ""
+                if len(str(onay_raw)) >= 8 and str(onay_raw)[:8].isdigit():
+                    s = str(onay_raw)
+                    byn_onay = f"{s[6:8]}.{s[4:6]}.{s[0:4]}"
+                else:
+                    byn_onay = str(onay_raw)
+                byn_durum = byn.get("belge_durumu", "") or ""
+            else:
+                byn_belge = byn_donem = byn_onay = byn_durum = ""
+
+            deger = [
+                beyan_t, unvan, vergino, ilkT, sonT,
+                sozno, soztarih, tutar,
+                byn_belge, byn_donem, byn_onay, byn_durum,
+            ]
+
+            alt_fill = ROW_FILL_ALT if ri_excel % 2 == 0 else None
+            ws.row_dimensions[ri_excel].height = 20
+
+            for ci, val in enumerate(deger, start=1):
+                c = ws.cell(row=ri_excel, column=ci, value=val)
+                c.border  = BORDER
+                if alt_fill:
+                    c.fill = alt_fill
+                if ci == 8:          # Tutar
+                    c.number_format = TUTAR_FMT
+                    c.alignment     = DATA_ALIGN_R
+                    c.font          = Font(bold=True, color="0F766E")
+                elif ci in (4, 5, 7, 11):  # Tarihler
+                    c.alignment = DATA_ALIGN_C
+                else:
+                    c.alignment = DATA_ALIGN_L
+
+            toplam_excel += tutar
+            ri_excel += 1
+
+        # ── Toplam satırı ─────────────────────────────────────────────────────
+        TOT_ROW = ri_excel
+        ws.row_dimensions[TOT_ROW].height = 22
+        tc = ws.cell(row=TOT_ROW, column=7, value="TOPLAM")
+        tc.font      = Font(bold=True, size=11)
+        tc.alignment = DATA_ALIGN_R
+        tv = ws.cell(row=TOT_ROW, column=8, value=toplam_excel)
+        tv.number_format = TUTAR_FMT
+        tv.font          = Font(bold=True, size=11, color="0F766E")
+        tv.alignment     = DATA_ALIGN_R
+        tv.fill          = PatternFill("solid", fgColor="DCFCE7")
+
+        # ── Sütun genişlikleri ────────────────────────────────────────────────
+        GENISLIK = [20, 28, 22, 12, 12, 14, 14, 15, 30, 10, 12, 12]
+        for ci, g in enumerate(GENISLIK, start=1):
+            ws.column_dimensions[
+                openpyxl.utils.get_column_letter(ci)
+            ].width = g
+
+        # ── Dosyayı kaydet ve aç ──────────────────────────────────────────────
+        zaman = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = os.path.expanduser("~/NakitAkim/data/export")
+        os.makedirs(export_dir, exist_ok=True)
+        dosya = os.path.join(export_dir, f"kurum_odemeleri_{zaman}.xlsx")
+        wb.save(dosya)
+
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", dosya])
+            elif sys.platform == "win32":
+                os.startfile(dosya)
+            else:
+                subprocess.Popen(["xdg-open", dosya])
+        except Exception:
+            pass
+
+        # Bilgi mesajı
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton as _PB
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Excel Hazır")
+        dlg.setFixedSize(360, 140)
+        dlg.setStyleSheet("""
+            QDialog  { background:#1e293b; }
+            QLabel   { color:#f1f5f9; font-size:13px; padding:6px; }
+            QPushButton { background:#166534; color:white; border:none;
+                          border-radius:6px; padding:6px 24px;
+                          font-size:12px; font-weight:600; }
+            QPushButton:hover { background:#15803d; }
+        """)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            f"✅  {ri_excel - 2} satır Excel'e aktarıldı.\n\n"
+            f"📁  {os.path.basename(dosya)}"
+        ))
+        btn = _PB("Tamam")
+        btn.clicked.connect(dlg.accept)
+        lay.addWidget(btn)
+        dlg.exec()
 
     # ── PDF Aç (Kayıt No ile) ────────────────────────────────────────────────
 
