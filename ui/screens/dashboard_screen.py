@@ -2516,12 +2516,26 @@ class KurumOdemeDialog(QDialog):
 
     def _on_ay_change(self, idx: int):
         """
-        Ay combobox değişince sadece tabloyu yeniden çizer (DB sorgusu yok).
-        Filtre _doldur() içinde donem_adi metin eşleşmesiyle yapılır.
+        Ay combobox değişince tarihleri set edip otomatik yükler.
+        Şubat → ilkTarih=01.02.YYYY, sonTarih=28.02.YYYY → _load()
+        Hepsi → ilkTarih=01.01.YYYY, sonTarih=bugün → _load()
         """
+        import calendar
         if self._ay_degisiyor:
             return
-        self._doldur()
+        self._ay_degisiyor = True
+        ay  = self._ay_cb.currentData()   # 0=hepsi, 1=Ocak…12=Aralık
+        yil = self._yil
+        if ay and ay > 0:
+            son_gun = calendar.monthrange(yil, ay)[1]
+            self._ilk_de.setDate(QDate(yil, ay, 1))
+            self._son_de.setDate(QDate(yil, ay, son_gun))
+        else:
+            self._ilk_de.setDate(QDate(yil, 1, 1))
+            self._son_de.setDate(QDate.currentDate())
+        self._ay_degisiyor = False
+        # Dönem değişince hemen yükle (filtre butonu yok)
+        self._load()
 
     # ── Veri yükleme ─────────────────────────────────────────────────────────
 
@@ -2529,9 +2543,10 @@ class KurumOdemeDialog(QDialog):
         from services.detay_service import get_kurum_odemeleri_detay_tarih
         from db.database import get_connection
 
-        # Yılın tamamını çek — ay filtresi _doldur() içinde donem_adi metin eşleşmesiyle
-        ilk_str = f"{self._yil}0101"
-        son_str = f"{self._yil}1231"
+        ilk = self._ilk_de.date()
+        son = self._son_de.date()
+        ilk_str = f"{ilk.year()}{ilk.month():02d}{ilk.day():02d}"
+        son_str = f"{son.year()}{son.month():02d}{son.day():02d}"
 
         self._rows, self._sql_toplam = get_kurum_odemeleri_detay_tarih(
             self._musterino, ilk_str, son_str
@@ -2617,15 +2632,8 @@ class KurumOdemeDialog(QDialog):
         self._tablo.setRowCount(0)
         toplam = 0.0
         sayilan_tutarlar = set()  # (id, tutar) → toplama bir kez say
-
+        
         q = self._ara_le.text().strip().lower() if hasattr(self, "_ara_le") else ""
-
-        # Dönem filtresi: seçili ay adı donem_adi içinde geçiyor mu?
-        # "Mart" seçilince donem_adi'nde "MART" içeren satırlar görünür.
-        ay_idx = self._ay_cb.currentData() if hasattr(self, "_ay_cb") else 0
-        ay_filtre = ""
-        if ay_idx and ay_idx > 0:
-            ay_filtre = self.AY_ADLARI[ay_idx].upper()  # "MART", "ŞUBAT" vb.
 
         for ri_idx, (row, byn) in enumerate(self._enriched):
             kod      = row.get("hesapKodu", "")
@@ -2667,12 +2675,6 @@ class KurumOdemeDialog(QDialog):
 
             if q:
                 if q not in beyan_t.lower() and q not in unvan.lower() and q not in kod.lower():
-                    continue
-
-            # Dönem filtresi: donem_adi içinde seçili ay adı geçmeli
-            if ay_filtre:
-                donem_adi_raw = (byn.get("donem_adi", "") or "") if byn else ""
-                if ay_filtre not in donem_adi_raw.upper():
                     continue
 
             ri = self._tablo.rowCount()
