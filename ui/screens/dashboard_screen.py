@@ -2369,35 +2369,23 @@ class KurumOdemeDialog(QDialog):
         bar = QHBoxLayout()
         bar.setSpacing(8)
 
-        # Ay seçici
-        bar.addWidget(self._lbl("Ay:"))
+        # Ay seçici — değişince otomatik yükler
+        bar.addWidget(self._lbl("Dönem:"))
         self._ay_cb = QComboBox()
-        self._ay_cb.setFixedSize(100, 32)
+        self._ay_cb.setFixedSize(110, 32)
         self._ay_cb.setStyleSheet(self._CBS)
         for i, a in enumerate(self.AY_ADLARI):
             self._ay_cb.addItem(a, i)
         self._ay_cb.currentIndexChanged.connect(self._on_ay_change)
         bar.addWidget(self._ay_cb)
 
-        # İlk Tarih DateEdit
-        bar.addWidget(self._lbl("İlk Tarih:"))
+        # Tarih DateEdit'leri: gizli tutulur, _on_ay_change içinden set edilir
         self._ilk_de = QDateEdit()
-        self._ilk_de.setCalendarPopup(True)
-        self._ilk_de.setDisplayFormat("dd.MM.yyyy")
-        self._ilk_de.setFixedSize(120, 32)
-        self._ilk_de.setStyleSheet(self._DES)
         self._ilk_de.setDate(QDate(self._yil, 1, 1))
-        bar.addWidget(self._ilk_de)
-
-        # Son Tarih DateEdit
-        bar.addWidget(self._lbl("Son Tarih:"))
+        self._ilk_de.hide()
         self._son_de = QDateEdit()
-        self._son_de.setCalendarPopup(True)
-        self._son_de.setDisplayFormat("dd.MM.yyyy")
-        self._son_de.setFixedSize(120, 32)
-        self._son_de.setStyleSheet(self._DES)
         self._son_de.setDate(QDate.currentDate())
-        bar.addWidget(self._son_de)
+        self._son_de.hide()
 
         bar.addStretch()
 
@@ -2414,19 +2402,8 @@ class KurumOdemeDialog(QDialog):
         self._ara_le.textChanged.connect(self._doldur)
         bar.addWidget(self._ara_le)
 
-        # Filtrele butonu
-        self._filtre_btn = QPushButton("🔍  Tarihi Filtrele")
-        self._filtre_btn.setFixedSize(130, 32)
-        self._filtre_btn.setStyleSheet(
-            "QPushButton{background:#162C47;color:white;border:none;"
-            "border-radius:7px;font-size:12px;font-weight:600;}"
-            "QPushButton:hover{background:#1e3a5f;}"
-        )
-        self._filtre_btn.clicked.connect(self._load)
-        bar.addWidget(self._filtre_btn)
-
         # Excel export butonu
-        self._excel_btn = QPushButton("📊  Excel")
+        self._excel_btn = QPushButton("\U0001f4ca  Excel")
         self._excel_btn.setFixedSize(90, 32)
         self._excel_btn.setStyleSheet(
             "QPushButton{background:#166534;color:white;border:none;"
@@ -2539,14 +2516,15 @@ class KurumOdemeDialog(QDialog):
 
     def _on_ay_change(self, idx: int):
         """
-        Şubat seçilirse → ilkTarih=01.02.YYYY, sonTarih=28.02.YYYY
-        Hepsi seçilirse → ilkTarih=01.01.YYYY, sonTarih=bugün
+        Ay combobox değişince tarihleri set edip otomatik yükler.
+        Şubat → ilkTarih=01.02.YYYY, sonTarih=28.02.YYYY → _load()
+        Hepsi → ilkTarih=01.01.YYYY, sonTarih=bugün → _load()
         """
         import calendar
         if self._ay_degisiyor:
             return
         self._ay_degisiyor = True
-        ay = self._ay_cb.currentData()   # 0=hepsi, 1=Ocak…12=Aralık
+        ay  = self._ay_cb.currentData()   # 0=hepsi, 1=Ocak…12=Aralık
         yil = self._yil
         if ay and ay > 0:
             son_gun = calendar.monthrange(yil, ay)[1]
@@ -2556,6 +2534,8 @@ class KurumOdemeDialog(QDialog):
             self._ilk_de.setDate(QDate(yil, 1, 1))
             self._son_de.setDate(QDate.currentDate())
         self._ay_degisiyor = False
+        # Dönem değişince hemen yükle (filtre butonu yok)
+        self._load()
 
     # ── Veri yükleme ─────────────────────────────────────────────────────────
 
