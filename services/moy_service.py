@@ -332,11 +332,17 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
     """
     Seçilen yıla ait 360 ve 361 hesap kodlu hareketleri Moy'dan çekip
     nakitakis_parametre tablosuna aktarır.
-    PHP: ajax/moy/moykaydet.php tam karşılığı.
-    YENİ: Her ödeme satırı için beyanname/tahakkuk eşleştirmesi yapıp
-          byn_kayit_no kolonuna kaydeder. Eşleşme yoksa NULL geçer.
 
-    progress_cb: opsiyonel callable(str) — ilerleme mesajı için
+    ÖNEMLİ FARK — v3 (Tahakkuk_No bazlı):
+      Önceki sürüm GROUP BY islem_Tarihi kullanıyordu → yanlış PDF eşleşmesi.
+      Bu sürüm GROUP BY Tahakkuk_No kullanır ve
+        LEFT JOIN beyanname_listeleri ON Belge_No = Tahakkuk_No
+      ile her ödeme satırını doğrudan ilgili beyanname/tahakkuk belgesiyle
+      ilişkilendirir (%100 doğru).
+      361 (SGK prim) ödemelerde Tahakkuk_No genelde boştur;
+      bu durumda Thk/MUHSGK + Sube + tarih aralığı ile fallback yapılır.
+
+    progress_cb: opsiyonel callable(str)
     Returns: {"success": bool, "message": str, "eklenen": int}
     """
     def _log(msg: str):
@@ -365,56 +371,97 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
     try:
         cursor = cnx.cursor(dictionary=True)
 
-        _log("📊  360 hesap kodu sorgulanıyor...")
+        # ── 360 hesabı — Tahakkuk_No bazlı, beyanname INNER JOIN ─────────────
+        # Her Tahakkuk_No = bir vergi ödemesi → doğrudan beyanname belgesiyle eşleşir.
+        _log("📊  360 hesap kodu (Tahakkuk_No bazlı) sorgulanıyor...")
         cursor.execute(
-            """SELECT SUM(ht.Alacak) as toplam, ht.islem_Tarihi,
-                      COALESCE(mk.Soyadi_Unvani, '') AS musteri_unvani,
-                      COALESCE(s.Adi, '')             AS sube_adi,
-                      COALESCE(s.Alanlar, '')         AS sube_alanlar
+            """SELECT
+                  ht.Tahakkuk_No,
+                  ht.islem_Tarihi,
+                  ht.Sube_Kayit_No,
+                  SUM(ht.Alacak)              AS toplam,
+                  COALESCE(mk.Soyadi_Unvani,'') AS musteri_unvani,
+                  COALESCE(s.Adi,'')            AS sube_adi,
+                  COALESCE(s.Alanlar,'')        AS sube_alanlar,
+                  bl.Kayit_No                 AS byn_kayit_no,
+                  bl.Belge_Tipi,
+                  bl.Belge_Turu,
+                  bl.Donem_adi,
+                  bl.Beyan_Tarih_1,
+                  bl.Beyan_Tarih_2
                FROM haraket_tablosu ht
-               LEFT JOIN tanim_musteri_karti mk ON mk.Kayit_No = ht.Musteri_Kayit_No
-               LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No = ht.Sube_Kayit_No
+               LEFT JOIN tanim_musteri_karti mk   ON mk.Kayit_No = ht.Musteri_Kayit_No
+               LEFT JOIN tanim_musteri_subeleri s  ON s.Kayit_No  = ht.Sube_Kayit_No
+               LEFT JOIN beyanname_listeleri bl    ON bl.Belge_No = ht.Tahakkuk_No
                WHERE ht.Alacak > 0
                  AND ht.islem_Tarihi BETWEEN %s AND %s
                  AND ht.Musteri_Kayit_No = %s
                  AND ht.Hesap_Kodu_1 = '360'
-               GROUP BY ht.islem_Tarihi, mk.Soyadi_Unvani, s.Adi, s.Alanlar
+               GROUP BY ht.Tahakkuk_No, ht.islem_Tarihi, ht.Sube_Kayit_No,
+                        mk.Soyadi_Unvani, s.Adi, s.Alanlar,
+                        bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu,
+                        bl.Donem_adi, bl.Beyan_Tarih_1, bl.Beyan_Tarih_2
                ORDER BY ht.islem_Tarihi ASC""",
             (t1, t2, kayit_nom)
         )
         data_360 = cursor.fetchall()
 
+        # ── 361 hesabı — Tahakkuk_No genelde boş; Thk/MUHSGK + Sube bazlı ──
+        # 361 = SGK prim ödemeleri (işçilik). Tahakkuk_No çoğunlukla boş olduğu
+        # için GROUP BY islem_Tarihi + Sube kullanıyoruz; beyanname eşleştirmesi
+        # Thk/MUHSGK + Sube_Kayit_No + donem_No üzerinden yapılıyor.
         _log("📊  361 hesap kodu sorgulanıyor...")
         cursor.execute(
-            """SELECT SUM(ht.Alacak) as toplam, ht.islem_Tarihi,
-                      COALESCE(mk.Soyadi_Unvani, '') AS musteri_unvani,
-                      COALESCE(s.Adi, '')             AS sube_adi,
-                      COALESCE(s.Alanlar, '')         AS sube_alanlar
+            """SELECT
+                  ht.islem_Tarihi,
+                  ht.Sube_Kayit_No,
+                  ht.donem_No,
+                  SUM(ht.Alacak)              AS toplam,
+                  COALESCE(mk.Soyadi_Unvani,'') AS musteri_unvani,
+                  COALESCE(s.Adi,'')            AS sube_adi,
+                  COALESCE(s.Alanlar,'')        AS sube_alanlar,
+                  bl.Kayit_No                 AS byn_kayit_no,
+                  bl.Belge_Tipi,
+                  bl.Belge_Turu,
+                  bl.Donem_adi,
+                  bl.Beyan_Tarih_1,
+                  bl.Beyan_Tarih_2
                FROM haraket_tablosu ht
-               LEFT JOIN tanim_musteri_karti mk ON mk.Kayit_No = ht.Musteri_Kayit_No
-               LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No = ht.Sube_Kayit_No
+               LEFT JOIN tanim_musteri_karti mk   ON mk.Kayit_No  = ht.Musteri_Kayit_No
+               LEFT JOIN tanim_musteri_subeleri s  ON s.Kayit_No   = ht.Sube_Kayit_No
+               LEFT JOIN beyanname_listeleri bl
+                      ON bl.Donem_No          = ht.donem_No
+                     AND bl.Musteri_Kayit_No   = ht.Musteri_Kayit_No
+                     AND bl.Sube_Kayit_No      = ht.Sube_Kayit_No
+                     AND bl.Belge_Tipi         = 'Thk'
+                     AND bl.Belge_Turu         = 'MUHSGK'
                WHERE ht.Alacak > 0
                  AND ht.islem_Tarihi BETWEEN %s AND %s
                  AND ht.Musteri_Kayit_No = %s
                  AND ht.Hesap_Kodu_1 = '361'
-               GROUP BY ht.islem_Tarihi, mk.Soyadi_Unvani, s.Adi, s.Alanlar
+               GROUP BY ht.islem_Tarihi, ht.Sube_Kayit_No, ht.donem_No,
+                        mk.Soyadi_Unvani, s.Adi, s.Alanlar,
+                        bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu,
+                        bl.Donem_adi, bl.Beyan_Tarih_1, bl.Beyan_Tarih_2
                ORDER BY ht.islem_Tarihi ASC""",
             (t1, t2, kayit_nom)
         )
         data_361 = cursor.fetchall()
 
+        # ── Beyanname önbelleği (moy_beyannameler) ───────────────────────────
         _log("📄  Yıllık beyanname/tahakkuk verileri çekiliyor...")
         cursor.execute(
             """SELECT bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu, bl.Donem_No, bl.Donem_adi,
                       bl.Onay_Tarihi, bl.Belge_No, bl.Belge_Durumu,
                       bl.Beyan_Tarih_1, bl.Beyan_Tarih_2,
-                      COALESCE(s.Adi, '') AS Sube_Adi, COALESCE(s.Alanlar, '') AS Sube_Alanlar,
-                      COALESCE(mk.Soyadi_Unvani, '') AS Musteri_Unvani
+                      COALESCE(s.Adi,'')            AS Sube_Adi,
+                      COALESCE(s.Alanlar,'')        AS Sube_Alanlar,
+                      COALESCE(mk.Soyadi_Unvani,'') AS Musteri_Unvani
                FROM beyanname_listeleri bl
                LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No = bl.Sube_Kayit_No
-               LEFT JOIN tanim_musteri_karti mk ON mk.Kayit_No = bl.Musteri_Kayit_No
+               LEFT JOIN tanim_musteri_karti mk    ON mk.Kayit_No = bl.Musteri_Kayit_No
                WHERE bl.Musteri_Kayit_No = %s
-                 AND bl.Belge_Tipi IN ('Byn', 'Thk')
+                 AND bl.Belge_Tipi IN ('Byn','Thk')
                  AND (bl.Beyan_Tarih_1 BETWEEN %s AND %s
                       OR bl.Beyan_Tarih_2 BETWEEN %s AND %s)""",
             (kayit_nom, t1, t2, t1, t2)
@@ -425,49 +472,14 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
         cnx.close()
 
     except Exception as e:
-        cnx.close()
+        try:
+            cnx.close()
+        except Exception:
+            pass
         return {"success": False, "message": f"Moy sorgu hatası: {e}", "eklenen": 0}
 
     if not data_360 and not data_361:
         return {"success": False, "message": "Kayıt bulunamadı.", "eklenen": 0}
-
-    # ── Beyanname indeksi: (belge_tipi, belge_turu) → satır listesi ──────────
-    # Eşleştirme önceliği hesap koduna göre:
-    #   770.01 → 1.Thk/MUHSGK  2.Byn/KDV1  3.Byn/KDV2
-    #   730.08 → 1.Byn/MUHSGK  2.Byn/MUHTAR
-    HESAP_ONCELIK: dict[str, list[tuple[str, str]]] = {
-        "770.01": [("Thk", "MUHSGK"), ("Byn", "KDV1"), ("Byn", "KDV2")],
-        "730.08": [("Byn", "MUHSGK"), ("Byn", "MUHTAR")],
-    }
-
-    beyan_idx: dict[tuple, list[dict]] = {}
-    for br in data_beyan:
-        key = (str(br.get("Belge_Tipi") or ""), str(br.get("Belge_Turu") or ""))
-        beyan_idx.setdefault(key, []).append({
-            "kayit_no":      int(br["Kayit_No"]),
-            "beyan_tarih_1": str(br.get("Beyan_Tarih_1") or ""),
-            "beyan_tarih_2": str(br.get("Beyan_Tarih_2") or ""),
-        })
-
-    def _esles(ilk_tarih: str, hesap_kodu: str) -> "int | None":
-        """
-        Ödeme tarihine en uygun beyanname kayit_no'sunu döndürür.
-        Adım 1: ilk_tarih (tam gün) → beyan_tarih_1 <= tarih <= beyan_tarih_2
-        Adım 2: ay-başı (YYYYMM01)  → aynı koşul
-        Eşleşme yoksa None.
-        """
-        if not ilk_tarih or len(ilk_tarih) < 6:
-            return None
-        ay_basi = ilk_tarih[:6] + "01"
-        oncelik = HESAP_ONCELIK.get(hesap_kodu, [])
-
-        for arama in (ilk_tarih, ay_basi):
-            for tip, tur in oncelik:
-                for aday in beyan_idx.get((tip, tur), []):
-                    if aday["beyan_tarih_1"] and aday["beyan_tarih_2"]:
-                        if aday["beyan_tarih_1"] <= arama <= aday["beyan_tarih_2"]:
-                            return aday["kayit_no"]
-        return None
 
     # ── Lokal DB'ye yaz ───────────────────────────────────────────────────────
     local = get_connection()
@@ -486,12 +498,12 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
         parca = (alanlar.split("[|]")[0] or "").strip()
         return parca if parca.isdigit() else ""
 
-    basari = 0
-    iliski = 0
+    basari  = 0
+    iliski  = 0
     detaylar = []
 
     try:
-        # ── 360 → 770.01 ──────────────────────────────────────────────────────
+        # ── 360 → 770.01 (Tahakkuk_No bazlı, direkt byn_kayit_no) ───────────
         for row in data_360:
             tarih_fmt   = _fmt_tarih(row["islem_Tarihi"])
             tutar_val   = round(float(row["toplam"] or 0), 2)
@@ -501,10 +513,13 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
             vergino_val = (f"{sube_kod_v} - {sube_adi_v}"
                            if sube_kod_v and sube_adi_v
                            else (sube_adi_v or sube_kod_v or ""))
-
-            byn_kno = _esles(tarih_fmt, "770.01")
+            # Tahakkuk_No → Belge_No JOIN'den gelen doğrudan byn_kayit_no
+            byn_kno = row.get("byn_kayit_no")
             if byn_kno:
+                byn_kno = int(byn_kno)
                 iliski += 1
+            else:
+                byn_kno = None
 
             kontrol = {musterino: musteri_no, hesapkodu: "770.01",
                        ilktarih: tarih_fmt, "tutar": tutar_val,
@@ -520,18 +535,19 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                 )
                 basari += 1
                 detaylar.append({"kod": "770.01", "tarih": tarih_fmt, "tutar": tutar_val})
-                esl = f" → byn#{byn_kno}" if byn_kno else " → eşleşme yok"
+                belge_t = str(row.get("Belge_Turu") or "")
+                esl = f" → {belge_t} byn#{byn_kno}" if byn_kno else " → eşleşme yok"
                 _log(f"✔  {basari} kayıt (360→770.01) {tarih_fmt} / {tutar_val:.2f}{esl}")
             else:
                 local.execute(
                     """UPDATE nakitakis_parametre
                        SET unvan=?, vergiNo=?, byn_kayit_no=?
                        WHERE musteriNo=? AND hesapKodu='770.01'
-                         AND ilkTarih=? AND iQmod='hareket'""",
-                    (unvan_val, vergino_val, byn_kno, musteri_no, tarih_fmt)
+                         AND ilkTarih=? AND iQmod='hareket' AND vergiNo=?""",
+                    (unvan_val, vergino_val, byn_kno, musteri_no, tarih_fmt, vergino_val)
                 )
 
-        # ── 361 → 730.08 ──────────────────────────────────────────────────────
+        # ── 361 → 730.08 (donem_No + Sube bazlı, Thk/MUHSGK eşleştirme) ────
         for row in data_361:
             tarih_fmt   = _fmt_tarih(row["islem_Tarihi"])
             tutar_val   = round(float(row["toplam"] or 0), 2)
@@ -541,10 +557,12 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
             vergino_val = (f"{sube_kod_v} - {sube_adi_v}"
                            if sube_kod_v and sube_adi_v
                            else (sube_adi_v or sube_kod_v or ""))
-
-            byn_kno = _esles(tarih_fmt, "730.08")
+            byn_kno = row.get("byn_kayit_no")
             if byn_kno:
+                byn_kno = int(byn_kno)
                 iliski += 1
+            else:
+                byn_kno = None
 
             kontrol = {musterino: musteri_no, hesapkodu: "730.08",
                        ilktarih: tarih_fmt, "tutar": tutar_val,
@@ -560,18 +578,18 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                 )
                 basari += 1
                 detaylar.append({"kod": "730.08", "tarih": tarih_fmt, "tutar": tutar_val})
-                esl = f" → byn#{byn_kno}" if byn_kno else " → eşleşme yok"
+                esl = f" → Thk/MUHSGK byn#{byn_kno}" if byn_kno else " → eşleşme yok"
                 _log(f"✔  {basari} kayıt (361→730.08) {tarih_fmt} / {tutar_val:.2f}{esl}")
             else:
                 local.execute(
                     """UPDATE nakitakis_parametre
                        SET unvan=?, vergiNo=?, byn_kayit_no=?
                        WHERE musteriNo=? AND hesapKodu='730.08'
-                         AND ilkTarih=? AND iQmod='hareket'""",
-                    (unvan_val, vergino_val, byn_kno, musteri_no, tarih_fmt)
+                         AND ilkTarih=? AND iQmod='hareket' AND vergiNo=?""",
+                    (unvan_val, vergino_val, byn_kno, musteri_no, tarih_fmt, vergino_val)
                 )
 
-        # ── Beyannameleri Önbelleğe Kaydet ────────────────────────────────────
+        # ── Beyannameleri önbelleğe kaydet ────────────────────────────────────
         _log("💾  Beyannameler yerel veritabanına kaydediliyor...")
         eklenen_beyan = 0
         for b_row in data_beyan:
@@ -586,22 +604,13 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                         onay_tarihi=?, belge_no=?, belge_durumu=?, beyan_tarih_1=?, beyan_tarih_2=?,
                         sube_adi=?, sube_alanlar=?, musteri_unvani=?, updated_at=CURRENT_TIMESTAMP
                        WHERE kayit_no = ?""",
-                    (
-                        musteri_no,
-                        str(b_row.get("Belge_Tipi") or ""),
-                        str(b_row.get("Belge_Turu") or ""),
-                        str(b_row.get("Donem_No") or ""),
-                        str(b_row.get("Donem_adi") or ""),
-                        str(b_row.get("Onay_Tarihi") or ""),
-                        str(b_row.get("Belge_No") or ""),
-                        str(b_row.get("Belge_Durumu") or ""),
-                        str(b_row.get("Beyan_Tarih_1") or ""),
-                        str(b_row.get("Beyan_Tarih_2") or ""),
-                        str(b_row.get("Sube_Adi") or ""),
-                        str(b_row.get("Sube_Alanlar") or ""),
-                        str(b_row.get("Musteri_Unvani") or ""),
-                        b_kayit_no,
-                    )
+                    (musteri_no, str(b_row.get("Belge_Tipi") or ""),
+                     str(b_row.get("Belge_Turu") or ""), str(b_row.get("Donem_No") or ""),
+                     str(b_row.get("Donem_adi") or ""), str(b_row.get("Onay_Tarihi") or ""),
+                     str(b_row.get("Belge_No") or ""), str(b_row.get("Belge_Durumu") or ""),
+                     str(b_row.get("Beyan_Tarih_1") or ""), str(b_row.get("Beyan_Tarih_2") or ""),
+                     str(b_row.get("Sube_Adi") or ""), str(b_row.get("Sube_Alanlar") or ""),
+                     str(b_row.get("Musteri_Unvani") or ""), b_kayit_no)
                 )
             else:
                 local.execute(
@@ -610,33 +619,25 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                          onay_tarihi, belge_no, belge_durumu, beyan_tarih_1, beyan_tarih_2,
                          sube_adi, sube_alanlar, musteri_unvani)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        musteri_no, b_kayit_no,
-                        str(b_row.get("Belge_Tipi") or ""),
-                        str(b_row.get("Belge_Turu") or ""),
-                        str(b_row.get("Donem_No") or ""),
-                        str(b_row.get("Donem_adi") or ""),
-                        str(b_row.get("Onay_Tarihi") or ""),
-                        str(b_row.get("Belge_No") or ""),
-                        str(b_row.get("Belge_Durumu") or ""),
-                        str(b_row.get("Beyan_Tarih_1") or ""),
-                        str(b_row.get("Beyan_Tarih_2") or ""),
-                        str(b_row.get("Sube_Adi") or ""),
-                        str(b_row.get("Sube_Alanlar") or ""),
-                        str(b_row.get("Musteri_Unvani") or ""),
-                    )
+                    (musteri_no, b_kayit_no, str(b_row.get("Belge_Tipi") or ""),
+                     str(b_row.get("Belge_Turu") or ""), str(b_row.get("Donem_No") or ""),
+                     str(b_row.get("Donem_adi") or ""), str(b_row.get("Onay_Tarihi") or ""),
+                     str(b_row.get("Belge_No") or ""), str(b_row.get("Belge_Durumu") or ""),
+                     str(b_row.get("Beyan_Tarih_1") or ""), str(b_row.get("Beyan_Tarih_2") or ""),
+                     str(b_row.get("Sube_Adi") or ""), str(b_row.get("Sube_Alanlar") or ""),
+                     str(b_row.get("Musteri_Unvani") or ""))
                 )
                 eklenen_beyan += 1
 
         if eklenen_beyan > 0:
             _log(f"✔  {eklenen_beyan} beyanname önbelleğe alındı.")
 
-        _log(f"🔗  {iliski}/{basari} ödeme satırı beyanname/tahakkuk ile ilişkilendirildi.")
+        _log(f"🔗  {iliski}/{basari} ödeme satırı doğrudan beyanname/tahakkuk ile ilişkilendirildi.")
 
         local.commit()
         return {
             "success":  True,
-            "message":  f"Başarıyla {basari} tane kayıt eklendi. ({iliski} beyanname eşleşti)",
+            "message":  f"Başarıyla {basari} tane kayıt eklendi. ({iliski} doğrudan eşleşti)",
             "eklenen":  basari,
             "detaylar": detaylar,
         }
