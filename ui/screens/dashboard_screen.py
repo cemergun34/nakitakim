@@ -2694,6 +2694,12 @@ class KurumOdemeDialog(QDialog):
                 else:
                     byn_onay = str(onay_raw)
                 byn_durum  = byn.get("belge_durumu", "") or ""
+                # Belge tipi etiketi: Thk (tahakkuk) olsa bile 'Byn' göster
+                _btipi = str(byn.get("belge_tipi", "") or "")
+                _btipi_etiket = {"Thk": "Byn", "Byn": "Byn",
+                                  "Hiz": "Byn", "Blg": "Byn"}.get(_btipi, _btipi)
+                if _btipi_etiket:
+                    byn_durum = f"{_btipi_etiket}  {byn_durum}".strip()
                 byn_kayit  = byn.get("kayit_no", None)
             else:
                 byn_belge = "—"
@@ -2807,10 +2813,27 @@ class KurumOdemeDialog(QDialog):
         import tempfile, os, subprocess, sys
         pdf_bytes = get_beyanname_pdf_bytes(musterino, kayit_no)
         if not pdf_bytes:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "PDF Bulunamadı",
-                "Bu beyanname için PDF verisi bulunamadı.\n"
-                "(beyanname_gib tablosunda kayıt yok)")
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton as _PB
+            dlg = QDialog(self)
+            dlg.setWindowTitle("PDF Bulunamadı")
+            dlg.setFixedSize(380, 160)
+            dlg.setStyleSheet("""
+                QDialog  { background:#1e293b; }
+                QLabel   { color:#f1f5f9; font-size:13px; padding:8px; }
+                QPushButton { background:#0f766e; color:white; border:none;
+                              border-radius:6px; padding:6px 24px;
+                              font-size:12px; font-weight:600; }
+                QPushButton:hover { background:#0d9488; }
+            """)
+            lay = QVBoxLayout(dlg)
+            lay.addWidget(QLabel(
+                "⚠️  Bu ödeme için PDF verisi bulunamadı.\n\n"
+                "Beyanname Moy'da kaydedilmemiş olabilir."
+            ))
+            btn = _PB("Kapat")
+            btn.clicked.connect(dlg.accept)
+            lay.addWidget(btn)
+            dlg.exec()
             return
         workspace_tmp = os.path.expanduser("~/NakitAkim/data/tmp")
         os.makedirs(workspace_tmp, exist_ok=True)
