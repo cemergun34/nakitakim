@@ -151,8 +151,14 @@ def _moy_connect(host: str, user: str, password: str):
     """
     Uzak Moy MySQL sunucusuna bağlanır.
     PHP: moyconnect.php, baglanMoy.php
-    utf8mb4 desteklenmiyor ise utf8'e düşer (eski MySQL 5.5/5.6 sunucular).
-    Returns: mysql.connector.connection objesi
+
+    Deneme sırası:
+      1. use_pure=True, charset=utf8, auth_plugin=mysql_native_password
+      2. use_pure=True, charset=utf8mb4, auth_plugin=mysql_native_password
+      3. use_pure=True, charset=latin1, auth_plugin=mysql_native_password
+      4. use_pure=False (C ext), charset döngüsü
+    use_pure=True önceliklidir — C extension bazı ortamlarda şifreyi
+    'using password: NO' hatası ile reddedebilir.
     """
     mc = _get_mysql()
     base_cfg = dict(
@@ -160,28 +166,56 @@ def _moy_connect(host: str, user: str, password: str):
         port=MOY_PORT,
         database=MOY_DB,
         user=user,
-        password=password,
-        connection_timeout=15
+        password=str(password),   # str() garantisi
+        connection_timeout=15,
     )
-    # C extension bazı ortamlarda parolayı iletemiyor (using password: NO).
-    # Önce C extension, başarısız olursa use_pure=True ile dene.
-    for use_pure in (False, True):
-        for charset in ("utf8", "utf8mb4", "latin1"):
+
+    last_err: Exception | None = None
+
+    # use_pure=True önce dene — C extension şifre sorununun güvenli çözümü
+    for charset in ("utf8", "utf8mb4", "latin1"):
+        for auth in ("mysql_native_password", None):
+            cfg = {**base_cfg, "charset": charset, "use_pure": True}
+            if auth:
+                cfg["auth_plugin"] = auth
             try:
-                cnx = mc.connect(**base_cfg, charset=charset, use_pure=use_pure)
-                logger.debug("Moy bağlantısı charset=%s use_pure=%s ile kuruldu", charset, use_pure)
+                cnx = mc.connect(**cfg)
+                logger.debug("Moy bağlantısı kuruldu: charset=%s auth=%s use_pure=True", charset, auth)
                 return cnx
             except mc.errors.DatabaseError as e:
                 err = str(e)
+                last_err = e
                 if "1115" in err or "Unknown character set" in err:
-                    logger.warning("Charset %s desteklenmiyor, deneniyor...", charset)
-                    continue
-                if not use_pure and ("1045" in err or "using password: NO" in err):
-                    # C extension parola sorunu → use_pure=True'ya geç
-                    logger.warning("C extension bağlantı hatası, pure Python deneniyor: %s", e)
-                    break  # iç charset döngüsünü kır, use_pure=True'ya geç
-                raise
-    raise RuntimeError("Moy bağlantısı kurulamadı. Tüm charset/driver kombinasyonları denendi.")
+                    logger.warning("Charset %s desteklenmiyor, atlanıyor.", charset)
+                    break   # bu charset'i atla, bir sonraki charset'e geç
+                # Diğer hata (örn. 1045 şifre): bir sonraki auth/charset dene
+                logger.debug("Bağlantı başarısız (charset=%s auth=%s): %s", charset, auth, e)
+                continue
+            except Exception as e:
+                last_err = e
+                logger.debug("Beklenmedik hata (charset=%s auth=%s): %s", charset, auth, e)
+                continue
+
+    # C extension ile de dene (bazı sunucularda use_pure çalışmayabilir)
+    for charset in ("utf8", "utf8mb4", "latin1"):
+        try:
+            cnx = mc.connect(**base_cfg, charset=charset, use_pure=False)
+            logger.debug("Moy bağlantısı kuruldu: charset=%s use_pure=False", charset)
+            return cnx
+        except mc.errors.DatabaseError as e:
+            err = str(e)
+            last_err = e
+            if "1115" in err or "Unknown character set" in err:
+                logger.warning("Charset %s (C ext) desteklenmiyor, atlanıyor.", charset)
+                continue
+            logger.debug("C ext bağlantı başarısız (charset=%s): %s", charset, e)
+        except Exception as e:
+            last_err = e
+
+    raise RuntimeError(
+        f"Moy bağlantısı kurulamadı — tüm kombinasyonlar denendi. "
+        f"Son hata: {last_err}"
+    )
 
 
 
