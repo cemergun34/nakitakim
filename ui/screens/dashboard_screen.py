@@ -2603,6 +2603,24 @@ class KurumOdemeDialog(QDialog):
 
             self._enriched.append((row, byn))
 
+        # ── Beyanname pair index: (donem_no, belge_turu, sube_adi) → {Byn/Thk: kayit_no} ─
+        # Aynı dönem+tür için hem Byn hem Thk kaydı olabilir.
+        # İndeks sayesinde her satırda her ikisini de bulabiliriz.
+        pair_idx: dict[tuple, dict] = {}
+        for kno, b in beyan_cache.items():
+            key = (
+                str(b.get("donem_no", "") or ""),
+                str(b.get("belge_turu", "") or ""),
+                str(b.get("sgm_kodu", "") or ""),   # sube_adi
+            )
+            if key not in pair_idx:
+                pair_idx[key] = {}
+            tipi = str(b.get("belge_tipi", "") or "")
+            if tipi not in pair_idx[key]:
+                pair_idx[key][tipi] = kno
+        self._pair_idx  = pair_idx
+        self._beyan_cache = beyan_cache
+
         self._doldur()
 
 
@@ -2753,47 +2771,88 @@ class KurumOdemeDialog(QDialog):
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self._tablo.setItem(ri, ci, it)
 
-            # ── PDF butonu (sütun 12) — her zaman göster, tıklayınca Moy'a bağlan ──
+            # ── PDF butonları (sütun 12) — Byn + Tah yan yana ───────────────
             ilk_tarih_row  = str(row.get("ilkTarih", "") or "")
             hesap_kodu_row = str(row.get("hesapKodu", "") or "")
 
-            if byn_kayit is not None:
-                # Beyanname zaten yüklü — direkt aç
-                def _make_handler(kno, mno):
-                    def _h():
-                        self._pdf_ac_kayit(kno, mno)
-                    return _h
-                pdf_btn = QPushButton("📄 PDF")
-                pdf_btn.setFixedHeight(26)
-                pdf_btn.setStyleSheet(
-                    "QPushButton{background:#0f766e;color:white;border:none;"
-                    "border-radius:5px;font-size:11px;font-weight:600;padding:0 6px;}"
-                    "QPushButton:hover{background:#0d9488;}"
+            # Pair index'ten Byn ve Thk kayit_no'larını bul
+            byn_kno_btn = None
+            thk_kno_btn = None
+            if byn:
+                _pair_key = (
+                    str(byn.get("donem_no", "") or ""),
+                    str(byn.get("belge_turu", "") or ""),
+                    str(byn.get("sgm_kodu", "") or ""),
                 )
-                pdf_btn.clicked.connect(_make_handler(byn_kayit, self._musterino))
-                self._tablo.setCellWidget(ri, 12, pdf_btn)
-            elif ilk_tarih_row:
-                # Moy'dan o an beyanname listesi çek → kayit_no bul → PDF aç
-                def _make_lazy_handler(ilk_t, hkod, mno):
-                    def _h():
-                        self._pdf_ac_lazy(ilk_t, hkod, mno)
-                    return _h
-                pdf_btn = QPushButton("📄 PDF")
-                pdf_btn.setFixedHeight(26)
-                pdf_btn.setStyleSheet(
-                    "QPushButton{background:#0f766e;color:white;border:none;"
-                    "border-radius:5px;font-size:11px;font-weight:600;padding:0 6px;}"
-                    "QPushButton:hover{background:#0d9488;}"
-                )
-                pdf_btn.clicked.connect(
-                    _make_lazy_handler(ilk_tarih_row, hesap_kodu_row, self._musterino)
-                )
-                self._tablo.setCellWidget(ri, 12, pdf_btn)
-            else:
-                no_pdf = QLabel("—")
-                no_pdf.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                no_pdf.setStyleSheet("color:#94a3b8;font-size:11px;")
-                self._tablo.setCellWidget(ri, 12, no_pdf)
+                _pair = getattr(self, "_pair_idx", {}).get(_pair_key, {})
+                byn_kno_btn = _pair.get("Byn") or _pair.get("Hiz")
+                thk_kno_btn = _pair.get("Thk") or _pair.get("Blg")
+                # Fallback: mevcut byn_kayit uygun tipe ata
+                if byn_kayit is not None:
+                    _cur_tipi = str(byn.get("belge_tipi", "") or "")
+                    if _cur_tipi in ("Thk", "Blg") and thk_kno_btn is None:
+                        thk_kno_btn = byn_kayit
+                    elif _cur_tipi in ("Byn", "Hiz") and byn_kno_btn is None:
+                        byn_kno_btn = byn_kayit
+
+            # Widget container
+            btn_widget  = QWidget()
+            btn_layout  = QHBoxLayout(btn_widget)
+            btn_layout.setContentsMargins(2, 2, 2, 2)
+            btn_layout.setSpacing(4)
+
+            _BTN_STYLE_BYN = (
+                "QPushButton{background:#0f766e;color:white;border:none;"
+                "border-radius:5px;font-size:11px;font-weight:600;padding:0 6px;}"
+                "QPushButton:hover{background:#0d9488;}"
+            )
+            _BTN_STYLE_TAH = (
+                "QPushButton{background:#7c3aed;color:white;border:none;"
+                "border-radius:5px;font-size:11px;font-weight:600;padding:0 6px;}"
+                "QPushButton:hover{background:#6d28d9;}"
+            )
+
+            def _make_pdf_handler(kno, mno):
+                def _h():
+                    self._pdf_ac_kayit(kno, mno)
+                return _h
+
+            if byn_kno_btn is not None:
+                b_btn = QPushButton("📄 Byn")
+                b_btn.setFixedHeight(26)
+                b_btn.setStyleSheet(_BTN_STYLE_BYN)
+                b_btn.clicked.connect(_make_pdf_handler(byn_kno_btn, self._musterino))
+                btn_layout.addWidget(b_btn)
+
+            if thk_kno_btn is not None:
+                t_btn = QPushButton("📄 Tah")
+                t_btn.setFixedHeight(26)
+                t_btn.setStyleSheet(_BTN_STYLE_TAH)
+                t_btn.clicked.connect(_make_pdf_handler(thk_kno_btn, self._musterino))
+                btn_layout.addWidget(t_btn)
+
+            if byn_kno_btn is None and thk_kno_btn is None:
+                # Hic PDF yok — lazy fallback veya — göster
+                if ilk_tarih_row:
+                    def _make_lazy_handler(ilk_t, hkod, mno):
+                        def _h():
+                            self._pdf_ac_lazy(ilk_t, hkod, mno)
+                        return _h
+                    lazy_btn = QPushButton("📄 PDF")
+                    lazy_btn.setFixedHeight(26)
+                    lazy_btn.setStyleSheet(_BTN_STYLE_BYN)
+                    lazy_btn.clicked.connect(
+                        _make_lazy_handler(ilk_tarih_row, hesap_kodu_row, self._musterino)
+                    )
+                    btn_layout.addWidget(lazy_btn)
+                else:
+                    no_pdf = QLabel("—")
+                    no_pdf.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    no_pdf.setStyleSheet("color:#94a3b8;font-size:11px;")
+                    btn_layout.addWidget(no_pdf)
+
+            btn_layout.addStretch()
+            self._tablo.setCellWidget(ri, 12, btn_widget)
 
 
         # Özet
