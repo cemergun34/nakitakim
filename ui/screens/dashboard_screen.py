@@ -2832,24 +2832,10 @@ class KurumOdemeDialog(QDialog):
                 btn_layout.addWidget(t_btn)
 
             if byn_kno_btn is None and thk_kno_btn is None:
-                # Hic PDF yok — lazy fallback veya — göster
-                if ilk_tarih_row:
-                    def _make_lazy_handler(ilk_t, hkod, mno):
-                        def _h():
-                            self._pdf_ac_lazy(ilk_t, hkod, mno)
-                        return _h
-                    lazy_btn = QPushButton("📄 PDF")
-                    lazy_btn.setFixedHeight(26)
-                    lazy_btn.setStyleSheet(_BTN_STYLE_BYN)
-                    lazy_btn.clicked.connect(
-                        _make_lazy_handler(ilk_tarih_row, hesap_kodu_row, self._musterino)
-                    )
-                    btn_layout.addWidget(lazy_btn)
-                else:
-                    no_pdf = QLabel("—")
-                    no_pdf.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    no_pdf.setStyleSheet("color:#94a3b8;font-size:11px;")
-                    btn_layout.addWidget(no_pdf)
+                no_pdf = QLabel("—")
+                no_pdf.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                no_pdf.setStyleSheet("color:#94a3b8;font-size:11px;")
+                btn_layout.addWidget(no_pdf)
 
             btn_layout.addStretch()
             self._tablo.setCellWidget(ri, 12, btn_widget)
