@@ -3042,26 +3042,77 @@ class KurumOdemeDialog(QDialog):
             pass
 
         # Bilgi mesajı
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton as _PB
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Excel Hazır")
-        dlg.setFixedSize(360, 140)
-        dlg.setStyleSheet("""
-            QDialog  { background:#1e293b; }
-            QLabel   { color:#f1f5f9; font-size:13px; padding:6px; }
-            QPushButton { background:#166534; color:white; border:none;
-                          border-radius:6px; padding:6px 24px;
-                          font-size:12px; font-weight:600; }
-            QPushButton:hover { background:#15803d; }
-        """)
-        lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel(
+        self._bilgi_dlg(
             f"✅  {ri_excel - 2} satır Excel'e aktarıldı.\n\n"
-            f"📁  {os.path.basename(dosya)}"
-        ))
-        btn = _PB("Tamam")
+            f"📁  {os.path.basename(dosya)}",
+            baslik="Excel Hazır",
+            renk="#166534"
+        )
+
+    # ── Ortak bilgi diyalog yardımcısı ──────────────────────────────────────
+
+    def _bilgi_dlg(self, metin: str, baslik: str = "Bilgi", renk: str = "#0f766e"):
+        """macOS uyumlu koyu-tema bilgi diyalogu.
+        QDialog.setStyleSheet background macOS'ta alt widget'lara gecmediginden
+        QPalette + setAutoFillBackground kullaniliyor.
+        """
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                     QFrame, QLabel, QPushButton)
+        from PyQt6.QtGui import QColor, QPalette
+        from PyQt6.QtCore import Qt
+
+        BG = QColor("#1e293b")
+        FG = QColor("#f1f5f9")
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(baslik)
+        dlg.setFixedSize(390, 160)
+
+        # Dialog arka planini zorla
+        dlg_pal = dlg.palette()
+        dlg_pal.setColor(QPalette.ColorRole.Window, BG)
+        dlg.setPalette(dlg_pal)
+        dlg.setAutoFillBackground(True)
+
+        # Ic cerceve
+        frame = QFrame(dlg)
+        frame_pal = frame.palette()
+        frame_pal.setColor(QPalette.ColorRole.Window, BG)
+        frame.setPalette(frame_pal)
+        frame.setAutoFillBackground(True)
+
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+
+        inner = QVBoxLayout(frame)
+        inner.setContentsMargins(20, 18, 20, 14)
+        inner.setSpacing(14)
+
+        lbl = QLabel(metin)
+        lbl.setWordWrap(True)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # Hem stylesheet hem palette — ikisi birlikte macOS'ta garantili calisir
+        lbl.setStyleSheet("color:#f1f5f9; font-size:13px; background:transparent;")
+        lbl_pal = lbl.palette()
+        lbl_pal.setColor(QPalette.ColorRole.WindowText, FG)
+        lbl_pal.setColor(QPalette.ColorRole.Text, FG)
+        lbl.setPalette(lbl_pal)
+        inner.addWidget(lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn = QPushButton("Tamam")
+        btn.setFixedSize(90, 30)
+        btn.setStyleSheet(
+            f"QPushButton{{background:{renk};color:white;border:none;"
+            f"border-radius:6px;font-size:12px;font-weight:600;}}"
+            f"QPushButton:hover{{background:{QColor(renk).lighter(115).name()};}}"
+        )
         btn.clicked.connect(dlg.accept)
-        lay.addWidget(btn)
+        btn_row.addWidget(btn)
+        inner.addLayout(btn_row)
+
         dlg.exec()
 
     # ── PDF Aç (Kayıt No ile) ────────────────────────────────────────────────
@@ -3071,27 +3122,12 @@ class KurumOdemeDialog(QDialog):
         import tempfile, os, subprocess, sys
         pdf_bytes = get_beyanname_pdf_bytes(musterino, kayit_no)
         if not pdf_bytes:
-            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton as _PB
-            dlg = QDialog(self)
-            dlg.setWindowTitle("PDF Bulunamadı")
-            dlg.setFixedSize(380, 160)
-            dlg.setStyleSheet("""
-                QDialog  { background:#1e293b; }
-                QLabel   { color:#f1f5f9; font-size:13px; padding:8px; }
-                QPushButton { background:#0f766e; color:white; border:none;
-                              border-radius:6px; padding:6px 24px;
-                              font-size:12px; font-weight:600; }
-                QPushButton:hover { background:#0d9488; }
-            """)
-            lay = QVBoxLayout(dlg)
-            lay.addWidget(QLabel(
+            self._bilgi_dlg(
                 "⚠️  Bu ödeme için PDF verisi bulunamadı.\n\n"
-                "Beyanname Moy'da kaydedilmemiş olabilir."
-            ))
-            btn = _PB("Kapat")
-            btn.clicked.connect(dlg.accept)
-            lay.addWidget(btn)
-            dlg.exec()
+                "Beyanname Moy'da kaydedilmemiş olabilir.",
+                baslik="PDF Bulunamadı",
+                renk="#0f766e"
+            )
             return
         workspace_tmp = os.path.expanduser("~/NakitAkim/data/tmp")
         os.makedirs(workspace_tmp, exist_ok=True)
@@ -3127,8 +3163,11 @@ class KurumOdemeDialog(QDialog):
             return
 
         if not beyanlar:
-            QMessageBox.information(self, "PDF Bulunamadı",
-                "Bu tarihe ait beyanname bulunamadı.")
+            self._bilgi_dlg(
+                "⚠️  Bu tarihe ait beyanname bulunamadı.",
+                baslik="Beyanname Yok",
+                renk="#0f766e"
+            )
             return
 
         if len(beyanlar) == 1:
