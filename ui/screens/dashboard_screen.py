@@ -3053,62 +3053,71 @@ class KurumOdemeDialog(QDialog):
 
     def _bilgi_dlg(self, metin: str, baslik: str = "Bilgi", renk: str = "#0f766e"):
         """macOS uyumlu koyu-tema bilgi diyalogu.
-        QDialog.setStyleSheet background macOS'ta alt widget'lara gecmediginden
-        QPalette + setAutoFillBackground kullaniliyor.
+
+        FramelessWindowHint + WA_TranslucentBackground: macOS native pencere
+        chrome'u devreye girmiyor, ic QFrame tum rengi stylesheet'ten aliyor.
+        Bu yaklasim Qt5/Qt6 macOS'ta garantili calisir.
         """
         from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                                      QFrame, QLabel, QPushButton)
-        from PyQt6.QtGui import QColor, QPalette
+        from PyQt6.QtGui  import QColor
         from PyQt6.QtCore import Qt
-
-        BG = QColor("#1e293b")
-        FG = QColor("#f1f5f9")
 
         dlg = QDialog(self)
         dlg.setWindowTitle(baslik)
-        dlg.setFixedSize(390, 160)
+        dlg.setFixedSize(400, 165)
+        dlg.setWindowFlags(
+            Qt.WindowType.Dialog |
+            Qt.WindowType.FramelessWindowHint
+        )
+        dlg.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        # Dialog arka planini zorla
-        dlg_pal = dlg.palette()
-        dlg_pal.setColor(QPalette.ColorRole.Window, BG)
-        dlg.setPalette(dlg_pal)
-        dlg.setAutoFillBackground(True)
-
-        # Ic cerceve
-        frame = QFrame(dlg)
-        frame_pal = frame.palette()
-        frame_pal.setColor(QPalette.ColorRole.Window, BG)
-        frame.setPalette(frame_pal)
-        frame.setAutoFillBackground(True)
-
+        # Dis katman: transparan, sadece golge efekti icin padding
         outer = QVBoxLayout(dlg)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(frame)
+        outer.setContentsMargins(10, 10, 10, 10)
 
-        inner = QVBoxLayout(frame)
+        # Ic kart: tum renkleri buradan aliyor
+        card = QFrame()
+        card.setObjectName("card")
+        card.setStyleSheet(f"""
+            QFrame#card {{
+                background: #1e293b;
+                border-radius: 12px;
+                border: 1px solid #334155;
+            }}
+            QLabel {{
+                color: #f1f5f9;
+                font-size: 13px;
+                background: transparent;
+            }}
+            QPushButton {{
+                background: {renk};
+                color: white;
+                border: none;
+                border-radius: 7px;
+                font-size: 12px;
+                font-weight: 600;
+                padding: 0 20px;
+            }}
+            QPushButton:hover {{
+                background: {QColor(renk).lighter(120).name()};
+            }}
+        """)
+        outer.addWidget(card)
+
+        inner = QVBoxLayout(card)
         inner.setContentsMargins(20, 18, 20, 14)
         inner.setSpacing(14)
 
         lbl = QLabel(metin)
         lbl.setWordWrap(True)
         lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        # Hem stylesheet hem palette — ikisi birlikte macOS'ta garantili calisir
-        lbl.setStyleSheet("color:#f1f5f9; font-size:13px; background:transparent;")
-        lbl_pal = lbl.palette()
-        lbl_pal.setColor(QPalette.ColorRole.WindowText, FG)
-        lbl_pal.setColor(QPalette.ColorRole.Text, FG)
-        lbl.setPalette(lbl_pal)
         inner.addWidget(lbl)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         btn = QPushButton("Tamam")
-        btn.setFixedSize(90, 30)
-        btn.setStyleSheet(
-            f"QPushButton{{background:{renk};color:white;border:none;"
-            f"border-radius:6px;font-size:12px;font-weight:600;}}"
-            f"QPushButton:hover{{background:{QColor(renk).lighter(115).name()};}}"
-        )
+        btn.setFixedHeight(30)
         btn.clicked.connect(dlg.accept)
         btn_row.addWidget(btn)
         inner.addLayout(btn_row)
