@@ -625,29 +625,33 @@ def _fmt_tarih(tarih_obj) -> str:
 
 def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = "") -> list[dict]:
     """
-    Yerel moy_beyannameler önbellek tablosundan ilgili tarihe ait beyannameleri bulur.
+    Yerel moy_beyannameler onbellegi tablosundan ilgili tarihe ait beyannameleri bulur.
+    Tarih eslestirmesi iki adimli:
+      1. Tam odeme tarihi (ilk_tarih) ile dene
+      2. Eslesme yoksa o ayin ilk gunu (YYYYMM01) ile tekrar dene
     """
     from db.database import get_connection
-    # 770.01 (SGK ödemeleri) → önce Tahakkuk (Thk/MUHSGK), sonra Beyanname (Byn/KDV)
-    # 730.08 (Muhtasar)      → yalnızca Beyanname (Byn/MUHSGK veya MUHTAR)
+    # 770.01 (SGK odemeleri) -> once Tahakkuk (Thk/MUHSGK), sonra Beyanname (Byn/KDV)
+    # 730.08 (Muhtasar)      -> yalnizca Beyanname (Byn/MUHSGK veya MUHTAR)
     HESAP_BELGE_MAP = {
         "770.01": [("Thk", "MUHSGK"), ("Byn", "KDV1"), ("Byn", "KDV2")],
         "730.08": [("Byn", "MUHSGK"), ("Byn", "MUHTAR")],
     }
     belge_tipleri_ve_turleri = HESAP_BELGE_MAP.get(hesap_kodu, None)
-    
-    conn = get_connection()
-    try:
+
+    # Ay-basi: 20250225 -> 20250201
+    ay_basi = (ilk_tarih[:6] + "01" if len(ilk_tarih) >= 6 else ilk_tarih)
+
+    def _build_sql_params(tarih: str) -> tuple:
+        """Verilen tarih degeri icin SQL ve parametre demeti olusturur."""
         if belge_tipleri_ve_turleri:
-            # Her kombinasyon için (belge_tipi, belge_turu) çiftleri
-            belge_tipi_listesi  = [bt for bt, _ in belge_tipleri_ve_turleri]
-            belge_turu_listesi  = [br for _, br in belge_tipleri_ve_turleri]
-            # Birden fazla (tip, tur) kombinasyonu için OR koşulu oluştur
-            where_parts = " OR ".join(["(belge_tipi = ? AND belge_turu = ?)" for _ in belge_tipleri_ve_turleri])
-            where_params = []
+            where_parts = " OR ".join(
+                ["(belge_tipi = ? AND belge_turu = ?)" for _ in belge_tipleri_ve_turleri]
+            )
+            where_params: list = []
             for bt, br in belge_tipleri_ve_turleri:
                 where_params.extend([bt, br])
-            sql = f"""SELECT 
+            q = f"""SELECT
                         kayit_no AS kayit_no,
                         belge_tipi AS belge_tipi,
                         belge_turu AS belge_turu,
@@ -658,18 +662,18 @@ def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = ""
                         belge_durumu AS belge_durumu,
                         beyan_tarih_1 AS beyan_tarih_1,
                         beyan_tarih_2 AS beyan_tarih_2,
-                        sube_adi AS sgm_kodu, 
+                        sube_adi AS sgm_kodu,
                         sube_alanlar AS sgm_adi,
                         musteri_unvani AS musteri_unvani
-                      FROM moy_beyannameler
-                      WHERE musteri_no = ?
-                        AND beyan_tarih_1 <= ?
-                        AND beyan_tarih_2 >= ?
-                        AND ({where_parts})
-                      ORDER BY kayit_no DESC"""
-            params = (musteri_no, ilk_tarih, ilk_tarih, *where_params)
+                    FROM moy_beyannameler
+                    WHERE musteri_no = ?
+                      AND beyan_tarih_1 <= ?
+                      AND beyan_tarih_2 >= ?
+                      AND ({where_parts})
+                    ORDER BY kayit_no DESC"""
+            p = (musteri_no, tarih, tarih, *where_params)
         else:
-            sql = """SELECT 
+            q = """SELECT
                         kayit_no AS kayit_no,
                         belge_tipi AS belge_tipi,
                         belge_turu AS belge_turu,
@@ -680,21 +684,32 @@ def get_local_beyannameler(musteri_no: int, ilk_tarih: str, hesap_kodu: str = ""
                         belge_durumu AS belge_durumu,
                         beyan_tarih_1 AS beyan_tarih_1,
                         beyan_tarih_2 AS beyan_tarih_2,
-                        sube_adi AS sgm_kodu, 
+                        sube_adi AS sgm_kodu,
                         sube_alanlar AS sgm_adi,
                         musteri_unvani AS musteri_unvani
-                     FROM moy_beyannameler
-                     WHERE musteri_no = ?
-                       AND beyan_tarih_1 <= ?
-                       AND beyan_tarih_2 >= ?
-                     ORDER BY kayit_no DESC"""
-            params = (musteri_no, ilk_tarih, ilk_tarih)
-            
+                   FROM moy_beyannameler
+                   WHERE musteri_no = ?
+                     AND beyan_tarih_1 <= ?
+                     AND beyan_tarih_2 >= ?
+                   ORDER BY kayit_no DESC"""
+            p = (musteri_no, tarih, tarih)
+        return q, p
+
+    conn = get_connection()
+    try:
+        # 1. Deneme: tam odeme tarihi
+        sql, params = _build_sql_params(ilk_tarih)
         rows = conn.execute(sql, params).fetchall()
         result = [dict(r) for r in rows]
 
-        # Tercih sırasına göre sırala: (belge_tipi, belge_turu) çiftine göre
-        if belge_tipleri_ve_turleri:
+        # 2. Deneme: eslesme yoksa ay-basi ile
+        if not result and ay_basi != ilk_tarih:
+            sql2, params2 = _build_sql_params(ay_basi)
+            rows2 = conn.execute(sql2, params2).fetchall()
+            result = [dict(r) for r in rows2]
+
+        # Tercih sirasina gore sirala: (belge_tipi, belge_turu) ciftine gore
+        if belge_tipleri_ve_turleri and result:
             order_map = {(bt, br): i for i, (bt, br) in enumerate(belge_tipleri_ve_turleri)}
             result.sort(key=lambda r: order_map.get(
                 (r.get("belge_tipi", ""), r.get("belge_turu", "")), 999
@@ -716,19 +731,33 @@ def get_beyanname_listesi(musteri_no: int,
     Moy beyanname_listeleri: Beyan_Tarih_1 <= ilkTarih <= Beyan_Tarih_2
 
     hesap_kodu:
-        '770.01' → KDV ve SGK tahakkuk belgeleri (KDV1, KDV2, MUHSGK (SGK Tahakkuk Fişi (5510)))
-        '730.08' → Muhtasar beyanname belgeleri (MUHTAR, MUHSGK (SGK Tahakkuk Fişi (5510)))
-        ''       → Tüm belge türleri (filtre yok)
+        '770.01' -> KDV ve SGK tahakkuk belgeleri
+                    (Thk/MUHSGK tahakkuk fisi, Byn/KDV1, Byn/KDV2)
+        '730.08' -> Muhtasar beyanname belgeleri
+                    (Byn/MUHSGK, Byn/MUHTAR)
+        ''       -> Tum belge turleri (filtre yok)
+
+    Tarih eslestirme iki adimli:
+        1. Tam odeme tarihiyle (ilk_tarih_yyyymmdd)
+        2. Eslesme yoksa o ayin ilk gunuyle (YYYYMM01)
 
     Returns: [{'kayit_no', 'belge_turu', 'donem_adi', 'onay_tarihi',
                'beyan_tarih_1', 'beyan_tarih_2', 'belge_no', 'belge_durumu',
                'sgm_kodu', 'sgm_adi', 'musteri_unvani'}, ...]
     """
-    HESAP_BELGE_MAP = {
-        "770.01": ("KDV1", "KDV2", "MUHSGK"),
-        "730.08": ("MUHTAR", "MUHSGK"),
+    # (Belge_Tipi, Belge_Turu) ciftleri - hem Byn hem Thk desteklenir
+    # 770.01: Tahakkuk Fisi (Thk/MUHSGK) once, sonra KDV Beyannameleri
+    # 730.08: Beyanname (Byn/MUHSGK veya Byn/MUHTAR)
+    HESAP_BELGE_MAP: dict[str, list[tuple[str, str]]] = {
+        "770.01": [("Thk", "MUHSGK"), ("Byn", "KDV1"), ("Byn", "KDV2")],
+        "730.08": [("Byn", "MUHSGK"), ("Byn", "MUHTAR")],
     }
-    izinli_turler = HESAP_BELGE_MAP.get(hesap_kodu, None)
+    belge_map = HESAP_BELGE_MAP.get(hesap_kodu)
+
+    # Ay-basi: 20250225 -> 20250201
+    ay_basi = (ilk_tarih_yyyymmdd[:6] + "01"
+               if len(ilk_tarih_yyyymmdd) >= 6
+               else ilk_tarih_yyyymmdd)
 
     bilgi = get_moy_bilgileri(musteri_no)
     if not bilgi.get("success"):
@@ -738,68 +767,65 @@ def get_beyanname_listesi(musteri_no: int,
     if not moy_musteri_no:
         return []
 
-    def _sql_ve_params(with_sube: bool = True, with_unvan: bool = True) -> tuple:
-        """SQL ve params tuple'ı oluşturur."""
+    def _build_sql_params(with_sube: bool, tarih: str) -> tuple:
+        """
+        SQL ve parametre listesi olusturur.
+        with_sube=True  -> LEFT JOIN ile sube/unvan bilgisi
+        with_sube=False -> Sade sorgu (JOIN hatasi fallback)
+        tarih           -> Eslestirilecek YYYYMMDD degeri
+        """
         if with_sube:
-            s_select = (",\n                          s.Adi AS Sube_Adi,"
-                        "\n                          s.Alanlar AS Sube_Alanlar")
-            s_join   = ("\n               LEFT JOIN tanim_musteri_subeleri s"
-                        " ON s.Kayit_No = bl.Sube_Kayit_No")
-            tbl = "beyanname_listeleri bl"
-            mk = "bl.Musteri_Kayit_No"; bt = "bl.Belge_Tipi"
-            btr = "bl.Belge_Turu";     t1 = "bl.Beyan_Tarih_1"
-            t2  = "bl.Beyan_Tarih_2";  ord = "bl.Kayit_No"
-            sel = ("bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu,"
-                   " bl.Donem_No, bl.Donem_adi,\n"
-                   "                          bl.Onay_Tarihi, bl.Belge_No,"
-                   " bl.Belge_Durumu,\n"
-                   "                          bl.Beyan_Tarih_1, bl.Beyan_Tarih_2")
+            sel  = ("bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu, bl.Donem_No, bl.Donem_adi,"
+                    " bl.Onay_Tarihi, bl.Belge_No, bl.Belge_Durumu,"
+                    " bl.Beyan_Tarih_1, bl.Beyan_Tarih_2,"
+                    " s.Adi AS Sube_Adi, s.Alanlar AS Sube_Alanlar,"
+                    " mk.Soyadi_Unvani AS Musteri_Unvani")
+            frm  = ("beyanname_listeleri bl"
+                    " LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No = bl.Sube_Kayit_No"
+                    " LEFT JOIN tanim_musteri_karti mk ON mk.Kayit_No = bl.Musteri_Kayit_No")
+            mk_col = "bl.Musteri_Kayit_No"
+            bt_col = "bl.Belge_Tipi"
+            btr_col = "bl.Belge_Turu"
+            t1_col = "bl.Beyan_Tarih_1"
+            t2_col = "bl.Beyan_Tarih_2"
+            ord_col = "bl.Kayit_No"
         else:
-            s_select = ""; s_join = ""
-            tbl = "beyanname_listeleri"
-            mk = "Musteri_Kayit_No"; bt = "Belge_Tipi"
-            btr = "Belge_Turu";     t1 = "Beyan_Tarih_1"
-            t2  = "Beyan_Tarih_2";  ord = "Kayit_No"
-            sel = ("Kayit_No, Belge_Tipi, Belge_Turu, Donem_No, Donem_adi,\n"
-                   "                          Onay_Tarihi, Belge_No, Belge_Durumu,\n"
-                   "                          Beyan_Tarih_1, Beyan_Tarih_2")
+            sel  = ("Kayit_No, Belge_Tipi, Belge_Turu, Donem_No, Donem_adi,"
+                    " Onay_Tarihi, Belge_No, Belge_Durumu, Beyan_Tarih_1, Beyan_Tarih_2")
+            frm  = "beyanname_listeleri"
+            mk_col = "Musteri_Kayit_No"
+            bt_col = "Belge_Tipi"
+            btr_col = "Belge_Turu"
+            t1_col = "Beyan_Tarih_1"
+            t2_col = "Beyan_Tarih_2"
+            ord_col = "Kayit_No"
 
-        u_select = ""
-        u_join   = ""
-        if with_unvan and with_sube:
-            u_select = (",\n                          mk.Soyadi_Unvani AS Musteri_Unvani")
-            u_join   = ("\n               LEFT JOIN tanim_musteri_karti mk"
-                        " ON mk.Kayit_No = bl.Musteri_Kayit_No")
+        params: list = [moy_musteri_no]
 
-        extra_select = s_select + u_select
-        extra_join   = s_join + u_join
-
-        if izinli_turler:
-            placeholders = ", ".join(["%s"] * len(izinli_turler))
-            sql = f"""SELECT {sel}{extra_select}
-               FROM {tbl}{extra_join}
-               WHERE {mk} = %s
-                 AND {bt} = 'Byn'
-                 AND {btr} IN ({placeholders})
-                 AND {t1} <= %s
-                 AND {t2} >= %s
-               ORDER BY {ord} DESC"""
-            params = (moy_musteri_no, *izinli_turler, ilk_tarih_yyyymmdd, ilk_tarih_yyyymmdd)
+        if belge_map:
+            # Dinamik (Belge_Tipi, Belge_Turu) OR kosulu - Byn sabit degil!
+            parts = []
+            for tip, tur in belge_map:
+                parts.append(f"({bt_col} = %s AND {btr_col} = %s)")
+                params.extend([tip, tur])
+            tip_tur_where = f"AND ({' OR '.join(parts)})"
         else:
-            sql = f"""SELECT {sel}{extra_select}
-               FROM {tbl}{extra_join}
-               WHERE {mk} = %s
-                 AND {bt} = 'Byn'
-                 AND {t1} <= %s
-                 AND {t2} >= %s
-               ORDER BY {ord} DESC"""
-            params = (moy_musteri_no, ilk_tarih_yyyymmdd, ilk_tarih_yyyymmdd)
+            # Hesap kodu bilinmiyor -> tum Byn ve Thk belgeler
+            tip_tur_where = f"AND {bt_col} IN ('Byn', 'Thk')"
+
+        params.extend([tarih, tarih])
+
+        sql = (f"SELECT {sel}"
+               f" FROM {frm}"
+               f" WHERE {mk_col} = %s {tip_tur_where}"
+               f" AND {t1_col} <= %s AND {t2_col} >= %s"
+               f" ORDER BY {ord_col} DESC")
         return sql, params
 
-    def _parse_sube_kod(alanlar: str) -> str:
+    def _parse_sube_kod(alanlar) -> str:
         if not alanlar:
             return ""
-        parca = alanlar.split("[|]")
+        parca = str(alanlar).split("[|]")
         return (parca[0] or "").strip() if parca else ""
 
     def _rows_to_dict(rows: list, has_sube: bool) -> list[dict]:
@@ -822,47 +848,61 @@ def get_beyanname_listesi(musteri_no: int,
                 "sgm_adi":        sube_adi,
                 "musteri_unvani": unvan,
             })
+        # Tercih sirasina gore sirala: HESAP_BELGE_MAP sirasi
+        if belge_map:
+            order_map = {(tip, tur): i for i, (tip, tur) in enumerate(belge_map)}
+            result.sort(key=lambda x: order_map.get(
+                (x.get("belge_turu", ""), x.get("belge_turu", "")), 999
+            ))
         return result
 
-
-
-
+    def _calistir(cursor, with_sube: bool, tarih: str):
+        """
+        Sorguyu calistir, JOIN hatasi olursa None donerr.
+        """
+        sql, params = _build_sql_params(with_sube=with_sube, tarih=tarih)
+        try:
+            cursor.execute(sql, params)
+            return cursor.fetchall(), with_sube
+        except Exception as err:
+            err_str = str(err)
+            if with_sube and any(k in err_str for k in
+                                 ("1054", "1146", "Unknown column",
+                                  "doesn't exist", "Table")):
+                logger.info("JOIN sorgusu basarisiz (%s), sade sorgu deneniyor.", err)
+                sql2, params2 = _build_sql_params(with_sube=False, tarih=tarih)
+                try:
+                    cursor.execute(sql2, params2)
+                    return cursor.fetchall(), False
+                except Exception as e2:
+                    logger.warning("Sade sorgu da basarisiz: %s", e2)
+                    return [], False
+            logger.warning("Beyanname sorgu hatasi (%s): %s", tarih, err)
+            return [], with_sube
 
     try:
         cnx = _moy_connect(bilgi["url"], bilgi["username"], bilgi["sifre"])
         cursor = cnx.cursor(dictionary=True)
 
-        # 1. Deneme: tanim_musteri_subeleri JOIN ile (şube/SGM adı için)
-        sql, params = _sql_ve_params(with_sube=True, with_unvan=True)
-        try:
-            cursor.execute(sql, params)
-            rows = cursor.fetchall()
-            cursor.close()
-            cnx.close()
-            return _rows_to_dict(rows, has_sube=True)
-        except Exception as join_err:
-            # JOIN/subquery hatası → sade sorguyla yeniden dene
-            err_str = str(join_err)
-            if any(k in err_str for k in ("1054", "1146", "Unknown column", "doesn't exist", "Table")):
-                logger.info("JOIN sorgusu başarısız (%s), sade sorgu deneniyor.", join_err)
-                try:
-                    sql2, params2 = _sql_ve_params(with_sube=False, with_unvan=False)
-                    cursor.execute(sql2, params2)
-                except Exception:
-                    cursor.close()
-                    cursor = cnx.cursor(dictionary=True)
-                    sql2, params2 = _sql_ve_params(with_sube=False, with_unvan=False)
-                    cursor.execute(sql2, params2)
-                rows = cursor.fetchall()
-                cursor.close()
-                cnx.close()
-                return _rows_to_dict(rows, has_sube=False)
-            raise  # Başka hata ise yukarı ilet
+        # 1. Deneme: tam odeme tarihiyle
+        rows, has_sube = _calistir(cursor, with_sube=True,
+                                   tarih=ilk_tarih_yyyymmdd)
+
+        # 2. Deneme: eslesme yoksa ay-basi ile
+        if not rows and ay_basi != ilk_tarih_yyyymmdd:
+            logger.info(
+                "Tam tarih (%s) ile eslesme yok, ay-basi (%s) deneniyor.",
+                ilk_tarih_yyyymmdd, ay_basi
+            )
+            rows, has_sube = _calistir(cursor, with_sube=True, tarih=ay_basi)
+
+        cursor.close()
+        cnx.close()
+        return _rows_to_dict(rows, has_sube=has_sube)
 
     except Exception as e:
-        logger.error("Beyanname listesi hatası: %s", e)
+        logger.error("Beyanname listesi hatasi: %s", e)
         return []
-
 
 
 
