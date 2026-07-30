@@ -308,18 +308,21 @@ def moy_test_connection(host: str, user: str, password: str,
 def _kayit_var_mi(conn, check: dict) -> bool:
     """
     nakitakis_parametre'de duplicate kontrolü.
-    PHP: kayitVarMi() fonksiyonu ile birebir.
+    PHP: kayitVarMi() ile birebir + vergiNo ek güvencesi.
+    Aynı (musteriNo, hesapKodu, ilkTarih, tutar, vergiNo) kombinasyonu
+    varsa True döner — birden fazla çalıştırmada kesin önler.
     """
     row = conn.execute(
         """SELECT COUNT(*) FROM nakitakis_parametre
            WHERE musteriNo=? AND hesapKodu=? AND ilkTarih=?
-           AND ABS(tutar - ?) < 1.5 AND aciklama=?""",
+           AND ABS(tutar - ?) < 0.02 AND aciklama=? AND vergiNo=?""",
         (
             check[musterino],
             check[hesapkodu],
             check[ilktarih],
             check["tutar"],
             check["aciklama"],
+            check.get(vergino, ""),
         )
     ).fetchone()[0]
     return row > 0
@@ -504,7 +507,8 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                 iliski += 1
 
             kontrol = {musterino: musteri_no, hesapkodu: "770.01",
-                       ilktarih: tarih_fmt, "tutar": tutar_val, "aciklama": "vergi"}
+                       ilktarih: tarih_fmt, "tutar": tutar_val,
+                       "aciklama": "vergi", vergino: vergino_val}
             if not _kayit_var_mi(local, kontrol):
                 local.execute(
                     """INSERT INTO nakitakis_parametre
@@ -543,7 +547,8 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                 iliski += 1
 
             kontrol = {musterino: musteri_no, hesapkodu: "730.08",
-                       ilktarih: tarih_fmt, "tutar": tutar_val, "aciklama": "vergi"}
+                       ilktarih: tarih_fmt, "tutar": tutar_val,
+                       "aciklama": "vergi", vergino: vergino_val}
             if not _kayit_var_mi(local, kontrol):
                 local.execute(
                     """INSERT INTO nakitakis_parametre
