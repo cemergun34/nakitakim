@@ -380,29 +380,27 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
     try:
         cursor = cnx.cursor(dictionary=True)
 
-        # ── 360 hesabı — Tahakkuk_No bazlı, beyanname_listeleri.Kayit_No JOIN ─
-        # Tahakkuk_No = beyanname_listeleri.Belge_No → kesin, 1-to-1 eşleşme.
-        # Boş / NULL Tahakkuk_No'lar JOIN'e katılmaz (doğru davranış).
-        _log("📊  360 hesap kodu (Tahakkuk_No bazlı) sorgulanıyor...")
+        # ─────────────────────────────────────────────────────────────────────
+        # JOIN'ler MySQL'de değil Python'da yapılıyor:
+        # Büyük tablolarda Belge_No/Tahakkuk_No üzerinde index olmadığı için
+        # MySQL LEFT JOIN tam tablo taraması (full scan) yapıyor ve kilitleniyor.
+        # Çözüm: 3 sade sorgu → Python dict'te eşleştirme (hızlı + güvenli).
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Adım 1: haraket_tablosu 360 — sadece haraket verisi (JOIN yok) ──
+        _log("📊  360 hesap kodu sorgulanıyor...")
         cursor.execute(
             """SELECT
                   ht.Tahakkuk_No,
                   ht.islem_Tarihi,
                   ht.Sube_Kayit_No,
-                  SUM(ht.Alacak)              AS toplam,
+                  SUM(ht.Alacak)               AS toplam,
                   COALESCE(mk.Soyadi_Unvani,'') AS musteri_unvani,
                   COALESCE(s.Adi,'')            AS sube_adi,
-                  COALESCE(s.Alanlar,'')        AS sube_alanlar,
-                  bl.Kayit_No                 AS byn_kayit_no,
-                  bl.Belge_Tipi,
-                  bl.Belge_Turu,
-                  bl.Donem_adi,
-                  bl.Beyan_Tarih_1,
-                  bl.Beyan_Tarih_2
+                  COALESCE(s.Alanlar,'')        AS sube_alanlar
                FROM haraket_tablosu ht
-               LEFT JOIN tanim_musteri_karti mk   ON mk.Kayit_No = ht.Musteri_Kayit_No
-               LEFT JOIN tanim_musteri_subeleri s  ON s.Kayit_No  = ht.Sube_Kayit_No
-               LEFT JOIN beyanname_listeleri bl    ON bl.Belge_No = ht.Tahakkuk_No
+               LEFT JOIN tanim_musteri_karti mk  ON mk.Kayit_No = ht.Musteri_Kayit_No
+               LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No  = ht.Sube_Kayit_No
                WHERE ht.Alacak > 0
                  AND ht.islem_Tarihi BETWEEN %s AND %s
                  AND ht.Musteri_Kayit_No = %s
@@ -410,78 +408,124 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                  AND ht.Tahakkuk_No IS NOT NULL
                  AND ht.Tahakkuk_No != ''
                GROUP BY ht.Tahakkuk_No, ht.islem_Tarihi, ht.Sube_Kayit_No,
-                        mk.Soyadi_Unvani, s.Adi, s.Alanlar,
-                        bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu,
-                        bl.Donem_adi, bl.Beyan_Tarih_1, bl.Beyan_Tarih_2
+                        mk.Soyadi_Unvani, s.Adi, s.Alanlar
                ORDER BY ht.islem_Tarihi ASC""",
             (t1, t2, kayit_nom)
         )
-        data_360 = cursor.fetchall()
+        raw_360 = cursor.fetchall()
+        _log(f"  → {len(raw_360)} satır alındı (360)")
 
-        # ── 361 hesabı — Tahakkuk_No genelde boş; Thk/MUHSGK + Sube bazlı ──
-        # 361 = SGK prim ödemeleri (işçilik). Tahakkuk_No çoğunlukla boş olduğu
-        # için GROUP BY islem_Tarihi + Sube kullanıyoruz; beyanname eşleştirmesi
-        # Thk/MUHSGK + Sube_Kayit_No + donem_No üzerinden yapılıyor.
+        # ── Adım 2: haraket_tablosu 361 — sadece haraket verisi (JOIN yok) ──
         _log("📊  361 hesap kodu sorgulanıyor...")
         cursor.execute(
             """SELECT
                   ht.islem_Tarihi,
                   ht.Sube_Kayit_No,
                   ht.donem_No,
-                  SUM(ht.Alacak)              AS toplam,
+                  SUM(ht.Alacak)               AS toplam,
                   COALESCE(mk.Soyadi_Unvani,'') AS musteri_unvani,
                   COALESCE(s.Adi,'')            AS sube_adi,
-                  COALESCE(s.Alanlar,'')        AS sube_alanlar,
-                  bl.Kayit_No                 AS byn_kayit_no,
-                  bl.Belge_Tipi,
-                  bl.Belge_Turu,
-                  bl.Donem_adi,
-                  bl.Beyan_Tarih_1,
-                  bl.Beyan_Tarih_2
+                  COALESCE(s.Alanlar,'')        AS sube_alanlar
                FROM haraket_tablosu ht
-               LEFT JOIN tanim_musteri_karti mk   ON mk.Kayit_No  = ht.Musteri_Kayit_No
-               LEFT JOIN tanim_musteri_subeleri s  ON s.Kayit_No   = ht.Sube_Kayit_No
-               LEFT JOIN beyanname_listeleri bl
-                      ON bl.Donem_No          = ht.donem_No
-                     AND bl.Musteri_Kayit_No   = ht.Musteri_Kayit_No
-                     AND bl.Sube_Kayit_No      = ht.Sube_Kayit_No
-                     AND bl.Belge_Tipi         = 'Thk'
-                     AND bl.Belge_Turu         = 'MUHSGK'
+               LEFT JOIN tanim_musteri_karti mk  ON mk.Kayit_No = ht.Musteri_Kayit_No
+               LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No  = ht.Sube_Kayit_No
                WHERE ht.Alacak > 0
                  AND ht.islem_Tarihi BETWEEN %s AND %s
                  AND ht.Musteri_Kayit_No = %s
                  AND ht.Hesap_Kodu_1 = '361'
                GROUP BY ht.islem_Tarihi, ht.Sube_Kayit_No, ht.donem_No,
-                        mk.Soyadi_Unvani, s.Adi, s.Alanlar,
-                        bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu,
-                        bl.Donem_adi, bl.Beyan_Tarih_1, bl.Beyan_Tarih_2
+                        mk.Soyadi_Unvani, s.Adi, s.Alanlar
                ORDER BY ht.islem_Tarihi ASC""",
             (t1, t2, kayit_nom)
         )
-        data_361 = cursor.fetchall()
+        raw_361 = cursor.fetchall()
+        _log(f"  → {len(raw_361)} satır alındı (361)")
 
-        # ── Beyanname önbelleği (moy_beyannameler) ───────────────────────────
-        _log("📄  Yıllık beyanname/tahakkuk verileri çekiliyor...")
+        # ── Adım 3: beyanname_listeleri — müşteriye ait tüm beyannameler ────
+        _log("📄  Beyanname listesi çekiliyor...")
         cursor.execute(
-            """SELECT bl.Kayit_No, bl.Belge_Tipi, bl.Belge_Turu, bl.Donem_No, bl.Donem_adi,
-                      bl.Onay_Tarihi, bl.Belge_No, bl.Belge_Durumu,
-                      bl.Beyan_Tarih_1, bl.Beyan_Tarih_2,
-                      COALESCE(s.Adi,'')            AS Sube_Adi,
-                      COALESCE(s.Alanlar,'')        AS Sube_Alanlar,
-                      COALESCE(mk.Soyadi_Unvani,'') AS Musteri_Unvani
+            """SELECT
+                  bl.Kayit_No, bl.Belge_No, bl.Belge_Tipi, bl.Belge_Turu,
+                  bl.Donem_No, bl.Donem_adi, bl.Onay_Tarihi, bl.Belge_Durumu,
+                  bl.Beyan_Tarih_1, bl.Beyan_Tarih_2,
+                  bl.Sube_Kayit_No,
+                  COALESCE(s.Adi,'')            AS Sube_Adi,
+                  COALESCE(s.Alanlar,'')        AS Sube_Alanlar,
+                  COALESCE(mk.Soyadi_Unvani,'') AS Musteri_Unvani
                FROM beyanname_listeleri bl
                LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No = bl.Sube_Kayit_No
                LEFT JOIN tanim_musteri_karti mk    ON mk.Kayit_No = bl.Musteri_Kayit_No
                WHERE bl.Musteri_Kayit_No = %s
                  AND bl.Belge_Tipi IN ('Byn','Thk')
-                 AND (bl.Beyan_Tarih_1 BETWEEN %s AND %s
-                      OR bl.Beyan_Tarih_2 BETWEEN %s AND %s)""",
-            (kayit_nom, t1, t2, t1, t2)
+               ORDER BY bl.Beyan_Tarih_1 DESC""",
+            (kayit_nom,)
         )
-        data_beyan = cursor.fetchall()
+        all_beyan = cursor.fetchall()
+        _log(f"  → {len(all_beyan)} beyanname alındı")
 
         cursor.close()
         cnx.close()
+
+        # ── Python'da eşleştirme ──────────────────────────────────────────────
+        # 360: Tahakkuk_No → Belge_No (dict lookup, O(1))
+        belge_no_idx: dict[str, dict] = {
+            str(b["Belge_No"]): b
+            for b in all_beyan
+            if b.get("Belge_No")
+        }
+        # 361: (donem_No, Sube_Kayit_No) → beyanname
+        # Öncelik sırası: Thk/MUHSGK > Hiz/SSK > Blg/SSK > herhangi biri
+        donem_sube_idx: dict[tuple, dict] = {}
+        for b in all_beyan:
+            btipi = str(b.get("Belge_Tipi", ""))
+            bturu = str(b.get("Belge_Turu", ""))
+            key = (str(b.get("Donem_No", "")), str(b.get("Sube_Kayit_No", "")))
+            mevcut = donem_sube_idx.get(key)
+            # Daha önce eklenmişse sadece daha öncelikli tür ile güncelle
+            def _oncelik(tipi, turu):
+                if tipi == "Thk" and turu == "MUHSGK": return 0
+                if tipi in ("Hiz", "Blg") and "SSK" in turu: return 1
+                if tipi == "Byn" and turu == "MUHSGK": return 2
+                return 9
+            if mevcut is None or _oncelik(btipi, bturu) < _oncelik(
+                str(mevcut.get("Belge_Tipi","")), str(mevcut.get("Belge_Turu",""))):
+                donem_sube_idx[key] = b
+
+        # 360 satırlarına beyanname bilgisi ekle
+        data_360 = []
+        for row in raw_360:
+            byn = belge_no_idx.get(str(row.get("Tahakkuk_No") or ""))
+            merged = dict(row)
+            if byn:
+                merged["byn_kayit_no"] = byn["Kayit_No"]
+                merged["Belge_Tipi"]   = byn["Belge_Tipi"]
+                merged["Belge_Turu"]   = byn["Belge_Turu"]
+                merged["Donem_adi"]    = byn["Donem_adi"]
+                merged["Beyan_Tarih_1"] = byn["Beyan_Tarih_1"]
+                merged["Beyan_Tarih_2"] = byn["Beyan_Tarih_2"]
+            else:
+                merged["byn_kayit_no"] = None
+            data_360.append(merged)
+
+        # 361 satırlarına beyanname bilgisi ekle
+        data_361 = []
+        for row in raw_361:
+            key = (str(row.get("donem_No") or ""), str(row.get("Sube_Kayit_No") or ""))
+            byn = donem_sube_idx.get(key)
+            merged = dict(row)
+            if byn:
+                merged["byn_kayit_no"] = byn["Kayit_No"]
+                merged["Belge_Tipi"]   = byn["Belge_Tipi"]
+                merged["Belge_Turu"]   = byn["Belge_Turu"]
+                merged["Donem_adi"]    = byn["Donem_adi"]
+                merged["Beyan_Tarih_1"] = byn["Beyan_Tarih_1"]
+                merged["Beyan_Tarih_2"] = byn["Beyan_Tarih_2"]
+            else:
+                merged["byn_kayit_no"] = None
+            data_361.append(merged)
+
+        # data_beyan = all_beyan (lokal yazma bloğu için)
+        data_beyan = all_beyan
 
     except Exception as e:
         try:
