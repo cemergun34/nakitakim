@@ -2550,6 +2550,7 @@ class KurumOdemeDialog(QDialog):
 
     def _load(self):
         from services.detay_service import get_kurum_odemeleri_detay_tarih
+        from db.database import get_connection
 
         ilk = self._ilk_de.date()
         son = self._son_de.date()
@@ -2561,24 +2562,46 @@ class KurumOdemeDialog(QDialog):
         )
         self._pdf_map = {}
 
+        # ── Beyanname bilgilerini önce byn_kayit_no ile çek ────────────────────
+        # Her nakitakis_parametre satırında byn_kayit_no varsa
+        # moy_beyannameler'den DIREKT çek (tarih eşleştirmesi gerekmez).
+        # byn_kayit_no NULL ise yerel önbellekte tarih+kod ile fallback yap.
         from services.moy_service import get_local_beyannameler
+
+        # moy_beyannameler tablosundan önce bu müşteriye ait tüm önbelleği çek
+        beyan_cache: dict[int, dict] = {}   # kayit_no → beyanname satırı
+        try:
+            conn = get_connection()
+            rows_b = conn.execute(
+                """SELECT kayit_no, belge_tipi, belge_turu, donem_no, donem_adi,
+                          onay_tarihi, belge_no, belge_durumu,
+                          beyan_tarih_1, beyan_tarih_2,
+                          sube_adi AS sgm_kodu, sube_alanlar, musteri_unvani
+                   FROM moy_beyannameler
+                   WHERE musteri_no = ?""",
+                (self._musterino,)
+            ).fetchall()
+            conn.close()
+            beyan_cache = {int(r["kayit_no"]): dict(r) for r in rows_b}
+        except Exception:
+            beyan_cache = {}
 
         self._enriched = []
         for row in self._rows:
             ilk_tarih = str(row.get("ilkTarih", row.get("ilktarih", "")))
             hkod = str(row.get("hesapKodu", row.get("hesapkodu", "")))
-            
-            # Yerel tablodan eşleşen beyannameleri ara
-            beyanlar = []
-            if ilk_tarih:
+            byn_kno = row.get("byn_kayit_no")   # nakitakis_parametre kolonu
+
+            byn = None
+            if byn_kno and int(byn_kno) in beyan_cache:
+                # ✅ Doğrudan ilişkilendirilmiş beyanname
+                byn = beyan_cache[int(byn_kno)]
+            elif ilk_tarih:
+                # Fallback: eski tarih-tabanlı arama (byn_kayit_no yoksa)
                 beyanlar = get_local_beyannameler(self._musterino, ilk_tarih, hkod)
-            
-            if beyanlar:
-                # Eşleşen beyannameler varsa ilkini bağla
-                # Not: PDF butonuna tıklanınca yine Moy'dan güncel PDF çekecek veya yerelden kayit_no kullanacak
-                self._enriched.append((row, beyanlar[0]))
-            else:
-                self._enriched.append((row, None))
+                byn = beyanlar[0] if beyanlar else None
+
+            self._enriched.append((row, byn))
 
         self._doldur()
 

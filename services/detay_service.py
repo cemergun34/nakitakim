@@ -456,12 +456,13 @@ def get_kurum_odemeleri_detay_tarih(musterino: int,
         """, (musterino, ilk_tarih, son_tarih)).fetchone()
         toplam = float(toplam_row["toplam"] or 0)
 
-        # Satırlar
+        # Satırlar — byn_kayit_no kolonu: beyanname/tahakkuk ile direkt ilişki
         rows = conn.execute(f"""
             SELECT
                 id, {_hkod} AS hesapKodu, hesapAck, unvan, vergiNo,
                 {_ilkt} AS ilkTarih, sonTarih, sozlesmeNo, sozlesmeTarih,
-                tutar, {_gider_col} AS gelirGider, aciklama
+                tutar, {_gider_col} AS gelirGider, aciklama,
+                byn_kayit_no
             FROM nakitakis_parametre
             WHERE {_mno} = ?
               AND {_gider_col} = 'gider'
