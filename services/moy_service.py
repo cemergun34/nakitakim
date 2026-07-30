@@ -456,9 +456,9 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
                LEFT JOIN tanim_musteri_subeleri s ON s.Kayit_No = bl.Sube_Kayit_No
                LEFT JOIN tanim_musteri_karti mk    ON mk.Kayit_No = bl.Musteri_Kayit_No
                WHERE bl.Musteri_Kayit_No = %s
-                 AND bl.Belge_Tipi IN ('Byn','Thk')
                ORDER BY bl.Beyan_Tarih_1 DESC""",
             (kayit_nom,)
+
         )
         all_beyan = cursor.fetchall()
         _log(f"  → {len(all_beyan)} beyanname alındı")
