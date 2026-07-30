@@ -564,7 +564,9 @@ def _get_womsis_creds(userid: int):
 
 
 def _fetch_womsis_transactions(api_url, app_key, app_secret, start_dt, end_dt):
-    """Womsis API'den 7 gunluk parcalar halinde tum islemleri cek."""
+    """PHP topluWomIsle.php: her hesap için ayrı ayrı /accounts/{id}/transactions çeker.
+    Bu yöntem tx.account nesnesini (branch_name, bank_id) doğru döndürür.
+    """
     import requests as req
     from urllib.parse import urlencode
 
@@ -576,22 +578,39 @@ def _fetch_womsis_transactions(api_url, app_key, app_secret, start_dt, end_dt):
         raise ValueError('Womsis token alinamadi: ' + str(resp.json()))
 
     headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
-    results = []
-    current = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    while current < end_dt:
-        chunk_end = min(current + timedelta(days=6), end_dt).replace(hour=23, minute=59, second=59)
-        params    = urlencode({
-            'beginDate': current.strftime('%d-%m-%Y %H:%M:%S'),
-            'endDate':   chunk_end.strftime('%d-%m-%Y %H:%M:%S')
-        })
-        tx_url = f"{api_url.rstrip('/')}/transactions?{params}"
-        try:
-            r = req.get(tx_url, headers=headers, timeout=30)
-            results.extend(r.json().get('transactions', []))
-        except Exception as ce:
-            logger.warning('Chunk [%s] hatasi: %s', current.date(), ce)
-        current = (current + timedelta(days=7)).replace(hour=0, minute=0, second=0)
+    # Hesap listesini al
+    acc_url  = api_url.rstrip('/') + '/accounts'
+    acc_resp = req.get(acc_url, headers=headers, timeout=20)
+    accounts = acc_resp.json().get('accounts', [])
+
+    if not accounts:
+        logger.info('Womsis: Hesap listesi bos.')
+        return []
+
+    results = []
+    # PHP: her hesap için 7 gunluk chunk
+    for acc in accounts:
+        acc_id = acc.get('id')
+        if not acc_id:
+            continue
+        current = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        while current < end_dt:
+            chunk_end = min(current + timedelta(days=6), end_dt).replace(hour=23, minute=59, second=59)
+            params    = urlencode({
+                'beginDate': current.strftime('%d-%m-%Y %H:%M:%S'),
+                'endDate':   chunk_end.strftime('%d-%m-%Y %H:%M:%S'),
+                'limit':     1000
+            })
+            tx_url = f"{api_url.rstrip('/')}/accounts/{acc_id}/transactions?{params}"
+            try:
+                r = req.get(tx_url, headers=headers, timeout=30)
+                txs = r.json().get('transactions', [])
+                results.extend(txs)
+                logger.debug('Hesap %s chunk %s: %d islem', acc_id, current.date(), len(txs))
+            except Exception as ce:
+                logger.warning('Hesap %s chunk [%s] hatasi: %s', acc_id, current.date(), ce)
+            current = (current + timedelta(days=7)).replace(hour=0, minute=0, second=0)
 
     return results
 
@@ -846,9 +865,87 @@ def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) 
                 else:
                     gelirgider = 'gelir' if float(tutar_raw) >= 0 else 'gider'
 
+                # PHP topluWomIsle.php banka ID → isim eşlemesi
+                BANK_ID_MAP = {
+                    19: 'Ziraat Bankası',
+                    20: 'İş Bankası',
+                    21: 'Yapı Kredi',
+                    22: 'Enpara',
+                    23: 'Vakıf Katılım',
+                }
+
+                # ── womsiskey: PHP $trx['key'] kullanır (id değil!) ──────────────
+                womsiskey = str(tx.get('key') or '')
+                if not womsiskey:
+                    account_id = str(tx.get('accountId') or tx.get('account_id') or '')
+                    tx_id      = str(tx.get('id') or tx.get('transactionId') or '')
+                    womsiskey  = f"{account_id}_{tx_id}" if account_id and tx_id else ''
+
+                # ── Tarih: PHP $trx['system_date'] ?? $trx['accounting_date'] ────
+                raw_tarih = str(
+                    tx.get('system_date') or tx.get('accounting_date') or
+                    tx.get('date') or tx.get('transactionDate') or tx.get('valueDate') or ''
+                )
+                tarih_iso = None
+                for fmt in ('%d-%m-%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d-%m-%Y', '%Y-%m-%dT%H:%M:%S'):
+                    try:
+                        tarih_iso = datetime.strptime(raw_tarih[:len(fmt)], fmt).strftime('%Y-%m-%d')
+                        break
+                    except Exception:
+                        continue
+                if not tarih_iso:
+                    tarih_iso = now.strftime('%Y-%m-%d')
+
+                tutar_raw  = tx.get('amount') or tx.get('tutar') or 0
+                tutar      = abs(float(tutar_raw))
+
+                # ── gelirgider: PHP $trx['type'] → 'borclu'/'alacakli' ───────────
+                tx_type = str(tx.get('type') or '').lower().strip()
+                if tx_type == 'borclu':
+                    gelirgider = 'gelir'
+                elif tx_type == 'alacakli':
+                    gelirgider = 'gider'
+                else:
+                    debit  = float(tx.get('debit')  or 0)
+                    credit = float(tx.get('credit') or 0)
+                    if credit > 0 and debit == 0:
+                        gelirgider = 'gelir'
+                    elif debit > 0 and credit == 0:
+                        gelirgider = 'gider'
+                    else:
+                        gelirgider = 'gelir' if float(tutar_raw) >= 0 else 'gider'
+
                 aciklama   = str(tx.get('description') or tx.get('aciklama') or '')[:255]
-                sube       = str(tx.get('accountName') or tx.get('bankName') or tx.get('sube') or '')
-                iban       = str(tx.get('iban') or '')
+
+                # ── Şube: PHP $account['bank_id'] → bankConfig lookup ─────────────
+                _account_obj = tx.get('account') or {}
+                if isinstance(_account_obj, dict):
+                    _bank_id    = _account_obj.get('bank_id') or tx.get('bank_id')
+                    _bank_obj   = _account_obj.get('bank') or {}
+                    _bank_title = ''
+                    if _bank_id:
+                        try:
+                            _bank_title = BANK_ID_MAP.get(int(_bank_id), '')
+                        except Exception:
+                            pass
+                    if not _bank_title and isinstance(_bank_obj, dict):
+                        _bank_title = _bank_obj.get('bank_title') or _bank_obj.get('bank_name') or ''
+                    _branch_name = _account_obj.get('branch_name') or ''
+                    _acc_iban    = _account_obj.get('iban') or ''
+                    if _branch_name and _bank_title:
+                        sube = f"{_bank_title} - {_branch_name}"
+                    elif _branch_name:
+                        sube = _branch_name
+                    elif _bank_title:
+                        sube = _bank_title
+                    else:
+                        sube = str(tx.get('accountName') or tx.get('bankName') or tx.get('sube') or '')
+                else:
+                    _acc_iban = ''
+                    sube = str(tx.get('accountName') or tx.get('bankName') or tx.get('sube') or '')
+
+                # ── IBAN: PHP $trx['opponent_iban'] ──────────────────────────────
+                iban       = str(tx.get('opponent_iban') or tx.get('iban') or _acc_iban or '')
                 bakiye     = float(tx.get('balance') or tx.get('bakiye') or 0)
                 hesap_turu = str(tx.get('currency') or tx.get('hesap_turu') or 'TL')
                 dekont_no  = str(tx.get('referenceNo') or tx.get('dekont_no') or '')
