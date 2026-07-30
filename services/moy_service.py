@@ -308,24 +308,37 @@ def moy_test_connection(host: str, user: str, password: str,
 def _kayit_var_mi(conn, check: dict) -> bool:
     """
     nakitakis_parametre'de duplicate kontrolü.
-    PHP: kayitVarMi() ile birebir + vergiNo ek güvencesi.
-    Aynı (musteriNo, hesapKodu, ilkTarih, tutar, vergiNo) kombinasyonu
-    varsa True döner — birden fazla çalıştırmada kesin önler.
+    PostgreSQL ve SQLite kolon adi farkliliklarini dogrudan cözer:
+      PG  → musterino, hesapkodu, ilktarih, vergino  (lowercase)
+      SQLite → musteriNo, hesapKodu, ilkTarih, vergiNo (camelCase)
     """
-    row = conn.execute(
-        """SELECT COUNT(*) FROM nakitakis_parametre
-           WHERE musteriNo=? AND hesapKodu=? AND ilkTarih=?
-           AND ABS(tutar - ?) < 0.02 AND aciklama=? AND vergiNo=?""",
-        (
-            check[musterino],
-            check[hesapkodu],
-            check[ilktarih],
-            check["tutar"],
-            check["aciklama"],
-            check.get(vergino, ""),
-        )
-    ).fetchone()[0]
+    from db.db_config import get_mode as _gm
+    _pg = (_gm() == "postgres")
+
+    c_mno  = "musterino"  if _pg else "musteriNo"
+    c_hkod = "hesapkodu"  if _pg else "hesapKodu"
+    c_ilkt = "ilktarih"   if _pg else "ilkTarih"
+    c_vno  = "vergino"    if _pg else "vergiNo"
+    _ph    = "%s"         if _pg else "?"
+    _tutar = "ABS(tutar::numeric - %s::numeric) < 0.02" if _pg \
+             else "ABS(CAST(tutar AS NUMERIC) - ?) < 0.02"
+
+    sql = f"""SELECT COUNT(*) FROM nakitakis_parametre
+           WHERE {c_mno}={_ph} AND {c_hkod}={_ph} AND {c_ilkt}={_ph}
+           AND {_tutar} AND aciklama={_ph} AND {c_vno}={_ph}"""
+
+    params = (
+        check[musterino],
+        check[hesapkodu],
+        check[ilktarih],
+        check["tutar"],   # _tutar expr parametresi
+        check["aciklama"],
+        check.get(vergino, ""),
+    )
+
+    row = conn.execute(sql, params).fetchone()[0]
     return row > 0
+
 
 def moy_kaydet_veriler(musteri_no: int, yil: int,
                         progress_cb=None) -> dict:
@@ -577,31 +590,26 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
             else:
                 byn_kno = None
 
-            kontrol = {musterino: musteri_no, hesapkodu: "770.01",
-                       ilktarih: tarih_fmt, "tutar": tutar_val,
-                       "aciklama": "vergi", vergino: vergino_val}
-            if not _kayit_var_mi(local, kontrol):
-                local.execute(
-                    """INSERT INTO nakitakis_parametre
-                       (musteriNo, hesapKodu, unvan, vergiNo,
-                        ilkTarih, sonTarih, tutar, gelirGider, aciklama, iQmod, byn_kayit_no)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (musteri_no, "770.01", unvan_val, vergino_val,
-                     tarih_fmt, "", tutar_val, "gider", "vergi", "hareket", byn_kno)
-                )
+            ret = local.execute(
+                """INSERT INTO nakitakis_parametre
+                   (musteriNo, hesapKodu, unvan, vergiNo,
+                    ilkTarih, sonTarih, tutar, gelirGider, aciklama, iQmod, byn_kayit_no)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (musterino, hesapkodu, ilktarih,
+                                ROUND(tutar::numeric,2), aciklama, vergino)
+                   WHERE iqmod = 'hareket'
+                   DO UPDATE SET unvan=EXCLUDED.unvan, byn_kayit_no=EXCLUDED.byn_kayit_no
+                   RETURNING (xmax = 0) AS inserted""",
+                (musteri_no, "770.01", unvan_val, vergino_val,
+                 tarih_fmt, "", tutar_val, "gider", "vergi", "hareket", byn_kno)
+            ).fetchone()
+            is_new = bool(ret and ret[0]) if ret else False
+            if is_new:
                 basari += 1
                 detaylar.append({"kod": "770.01", "tarih": tarih_fmt, "tutar": tutar_val})
                 belge_t = str(row.get("Belge_Turu") or "")
                 esl = f" → {belge_t} byn#{byn_kno}" if byn_kno else " → eşleşme yok"
                 _log(f"✔  {basari} kayıt (360→770.01) {tarih_fmt} / {tutar_val:.2f}{esl}")
-            else:
-                local.execute(
-                    """UPDATE nakitakis_parametre
-                       SET unvan=?, vergiNo=?, byn_kayit_no=?
-                       WHERE musteriNo=? AND hesapKodu='770.01'
-                         AND ilkTarih=? AND iQmod='hareket' AND vergiNo=?""",
-                    (unvan_val, vergino_val, byn_kno, musteri_no, tarih_fmt, vergino_val)
-                )
 
         # ── 361 → 730.08 (donem_No + Sube bazlı, Thk/MUHSGK eşleştirme) ────
         for row in data_361:
@@ -620,30 +628,25 @@ def moy_kaydet_veriler(musteri_no: int, yil: int,
             else:
                 byn_kno = None
 
-            kontrol = {musterino: musteri_no, hesapkodu: "730.08",
-                       ilktarih: tarih_fmt, "tutar": tutar_val,
-                       "aciklama": "vergi", vergino: vergino_val}
-            if not _kayit_var_mi(local, kontrol):
-                local.execute(
-                    """INSERT INTO nakitakis_parametre
-                       (musteriNo, hesapKodu, unvan, vergiNo,
-                        ilkTarih, sonTarih, tutar, gelirGider, aciklama, iQmod, byn_kayit_no)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (musteri_no, "730.08", unvan_val, vergino_val,
-                     tarih_fmt, "", tutar_val, "gider", "vergi", "hareket", byn_kno)
-                )
+            ret = local.execute(
+                """INSERT INTO nakitakis_parametre
+                   (musteriNo, hesapKodu, unvan, vergiNo,
+                    ilkTarih, sonTarih, tutar, gelirGider, aciklama, iQmod, byn_kayit_no)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (musterino, hesapkodu, ilktarih,
+                                ROUND(tutar::numeric,2), aciklama, vergino)
+                   WHERE iqmod = 'hareket'
+                   DO UPDATE SET unvan=EXCLUDED.unvan, byn_kayit_no=EXCLUDED.byn_kayit_no
+                   RETURNING (xmax = 0) AS inserted""",
+                (musteri_no, "730.08", unvan_val, vergino_val,
+                 tarih_fmt, "", tutar_val, "gider", "vergi", "hareket", byn_kno)
+            ).fetchone()
+            is_new = bool(ret and ret[0]) if ret else False
+            if is_new:
                 basari += 1
                 detaylar.append({"kod": "730.08", "tarih": tarih_fmt, "tutar": tutar_val})
                 esl = f" → Thk/MUHSGK byn#{byn_kno}" if byn_kno else " → eşleşme yok"
                 _log(f"✔  {basari} kayıt (361→730.08) {tarih_fmt} / {tutar_val:.2f}{esl}")
-            else:
-                local.execute(
-                    """UPDATE nakitakis_parametre
-                       SET unvan=?, vergiNo=?, byn_kayit_no=?
-                       WHERE musteriNo=? AND hesapKodu='730.08'
-                         AND ilkTarih=? AND iQmod='hareket' AND vergiNo=?""",
-                    (unvan_val, vergino_val, byn_kno, musteri_no, tarih_fmt, vergino_val)
-                )
 
         # ── Beyannameleri önbelleğe kaydet ────────────────────────────────────
         _log("💾  Beyannameler yerel veritabanına kaydediliyor...")
