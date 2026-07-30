@@ -2424,6 +2424,38 @@ class MoyKaydetWorker(QThread):
         self._yil        = yil
 
     def run(self):
+        import subprocess, sys, os, datetime
+
+        # ── Otomatik Git Yedek (veri çekmeden ÖNCE) ──────────────────────
+        try:
+            repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            simdi    = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            self.progress.emit("💾  Git yedeği alınıyor...")
+
+            # Sadece veritabanı ile ilgili dosyaları stage'e ekle
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=repo_dir, capture_output=True, timeout=15
+            )
+            commit_msg = (
+                f"backup: Moy veri çekimi öncesi otomatik yedek\n\n"
+                f"Müşteri No: {self._musteri_no} | Yıl: {self._yil} | {simdi}"
+            )
+            result = subprocess.run(
+                ["git", "commit", "-m", commit_msg,
+                 "--allow-empty"],   # Değişiklik yoksa bile commit oluştur
+                cwd=repo_dir, capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                sha = result.stdout.strip().split()[1][:7] if result.stdout else "?"
+                self.progress.emit(f"✅  Git yedeği alındı → {sha}")
+            else:
+                self.progress.emit("⚠️  Git yedeği alınamadı (devam ediliyor)")
+        except Exception as _ge:
+            # Yedek başarısız olsa da veri çekmeye devam et
+            self.progress.emit(f"⚠️  Git yedek hatası: {_ge} (devam ediliyor)")
+        # ─────────────────────────────────────────────────────────────────
+
         from services.moy_service import moy_kaydet_veriler
         r = moy_kaydet_veriler(
             self._musteri_no, self._yil,
