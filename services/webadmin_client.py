@@ -502,7 +502,6 @@ try:
                     tutar_raw  = tx.get("amount") or tx.get("tryAmount") or 0
                     try:
                         tutar = float(str(tutar_raw).replace(",", "."))
-                        tutar = -tutar
                     except (ValueError, TypeError):
                         tutar = 0.0
                     yon         = tx.get("direction") or tx.get("transactionDirection") or ""

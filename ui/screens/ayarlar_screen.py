@@ -329,7 +329,6 @@ class VomsisIsleWorker(QThread):
                 tutar_raw = tx.get("amount") or tx.get("tryAmount") or 0
                 try:
                     tutar = round(float(str(tutar_raw).replace(",", ".")), 2)
-                    tutar = -tutar
                 except (ValueError, TypeError):
                     tutar = 0.0
                 yon       = tx.get("direction") or tx.get("transactionDirection") or ""
@@ -452,7 +451,6 @@ class TopluBankalarIsleWorker(QThread):
                         tutar_raw  = tx.get("amount") or tx.get("tryAmount") or 0
                         try:
                             tutar = round(float(str(tutar_raw).replace(",", ".")), 2)
-                            tutar = -tutar
                         except (ValueError, TypeError):
                             tutar = 0.0
                         yon       = tx.get("direction") or tx.get("transactionDirection") or ""
@@ -654,15 +652,15 @@ class WomsisPosIsleWorker(QThread):
 
                             # PHP: $tx['gross_amount'], $tx['commission'], $tx['net_amount']
                             try:
-                                islemtutari = -round(float(
+                                islemtutari = round(float(
                                     tx.get("gross_amount") or tx.get("amount") or
                                     tx.get("islemTutari")  or 0
                                 ), 2)
-                                isyeriucretitutar = -round(float(
+                                isyeriucretitutar = round(float(
                                     tx.get("commission")        or tx.get("commissionAmount") or
                                     tx.get("isyeriUcretiTutar") or tx.get("fee") or 0
                                 ), 2)
-                                nettutar = -round(float(
+                                nettutar = round(float(
                                     tx.get("net_amount") or tx.get("netAmount") or
                                     tx.get("netTutar")   or tx.get("net") or 0
                                 ), 2)
