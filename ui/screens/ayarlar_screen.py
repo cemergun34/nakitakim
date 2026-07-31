@@ -329,6 +329,7 @@ class VomsisIsleWorker(QThread):
                 tutar_raw = tx.get("amount") or tx.get("tryAmount") or 0
                 try:
                     tutar = round(float(str(tutar_raw).replace(",", ".")), 2)
+                    tutar = -tutar
                 except (ValueError, TypeError):
                     tutar = 0.0
                 yon       = tx.get("direction") or tx.get("transactionDirection") or ""
@@ -354,7 +355,7 @@ class VomsisIsleWorker(QThread):
                        (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey,
                         userid, sube, faturaunvan, musterino)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (tarih_raw, aciklama, gelir_gider, abs(tutar), "vomsis",
+                    (tarih_raw, aciklama, gelir_gider, tutar, "vomsis",
                      str(vomsis_key), self._userid, banka_sube, karsi_unvan,
                      self._musterino)
                 )
@@ -451,6 +452,7 @@ class TopluBankalarIsleWorker(QThread):
                         tutar_raw  = tx.get("amount") or tx.get("tryAmount") or 0
                         try:
                             tutar = round(float(str(tutar_raw).replace(",", ".")), 2)
+                            tutar = -tutar
                         except (ValueError, TypeError):
                             tutar = 0.0
                         yon       = tx.get("direction") or tx.get("transactionDirection") or ""
@@ -473,7 +475,7 @@ class TopluBankalarIsleWorker(QThread):
                                (tarih, aciklama, gelirgider, tutar, kaynak, womsiskey,
                                 userid, sube, faturaunvan, musterino)
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (tarih_raw, aciklama, gelir_gider, abs(tutar), "vomsis",
+                            (tarih_raw, aciklama, gelir_gider, tutar, "vomsis",
                              str(vomsis_key), self._userid, banka_sube, karsi_unvan,
                              self._musterino)
                         )
