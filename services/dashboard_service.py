@@ -107,18 +107,26 @@ def get_genel_hesap_toplam(userid: int, musterino: int, yil: Optional[int] = Non
     return {"gelir": gelir, "gider": gider, "net": gelir - gider}
 
 
-def get_fatura_toplamlar(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
+def get_fatura_toplamlar(userid: int, musterino: int, yil: Optional[int] = None, ilk_tarih: Optional[str] = None, son_tarih: Optional[str] = None) -> dict:
     """Kesilen (gelir) ve Gelen (gider) fatura toplamları — tek sorgu."""
     yil = yil or _year()
     conn = get_connection()
     try:
+        params = [userid, musterino]
+        if ilk_tarih and son_tarih:
+            where_extra = "AND (tarih BETWEEN ? AND ?)"
+            params += [ilk_tarih, son_tarih]
+        else:
+            where_extra = f"AND {left4('tarih')} = ?"
+            params.append(str(yil))
+
         row = conn.execute(f"""
             SELECT
                 COALESCE(SUM(CASE WHEN gelirgidermod='gelir' THEN CAST(toplam AS REAL) ELSE 0 END), 0) AS kesilen,
                 COALESCE(SUM(CASE WHEN gelirgidermod='gider' THEN CAST(toplam AS REAL) ELSE 0 END), 0) AS gelen
             FROM faturalar
-            WHERE userid = ? AND musterino = ? AND {left4('tarih')} = ?
-        """, (userid, musterino, str(yil))).fetchone()
+            WHERE userid = ? AND musterino = ? {where_extra}
+        """, params).fetchone()
         return {
             "kesilen": float(row["kesilen"] or 0),
             "gelen":   float(row["gelen"]   or 0),
@@ -143,7 +151,7 @@ def get_maaş_kira_smm(userid: int, musterino: int, yil: Optional[int] = None, _
     return {"toplam": float(ghh.get("maas_kira_toplam") or 0)}
 
 
-def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
+def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None, ilk_tarih: Optional[str] = None, son_tarih: Optional[str] = None) -> dict:
     """Kurum Ödemeleri (Vergi ödemeleri + Moy nakitakis_parametre verileri).
     PHP: nakitAkimParametreAjaxGider.php ile aynı tablo — nakitakis_parametre
     hesapKodu 770.01 (SGK/vergi ödemeleri) ve 730.08 (işçilik/müşavirlik)
@@ -155,6 +163,14 @@ def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) 
     yil = yil or _year()
     conn = get_connection()
     try:
+        params1 = [userid, musterino]
+        if ilk_tarih and son_tarih:
+            where_date1 = "AND tarih_date >= ? AND tarih_date <= ?"
+            params1 += [ilk_tarih, son_tarih]
+        else:
+            where_date1 = f"AND {yr('tarih_date')} = ?"
+            params1.append(str(yil))
+
         # Kaynak 1 — genel_hesap_hareketleri
         row1 = conn.execute(f"""
             SELECT COALESCE(SUM(gider), 0) AS toplam
@@ -165,8 +181,8 @@ def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) 
               AND (teslim_sekli LIKE '%Vergi%'
                 OR teslim_sekli LIKE '%SGK%'
                 OR teslim_sekli LIKE '%Kurum%')
-              AND {yr("tarih_date")} = ?
-        """, (userid, musterino, str(yil))).fetchone()
+              {where_date1}
+        """, params1).fetchone()
         toplam1 = float(row1["toplam"] or 0)
 
         # Kaynak 2 — nakitakis_parametre (PG: kolon adları camelCase tırnaklı)
@@ -178,14 +194,23 @@ def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) 
         _gelir = pg_gelirgider()
         from db.db_config import get_mode as _gm
         _tutar_cast = "tutar::numeric" if _gm() == "postgres" else "CAST(tutar AS NUMERIC)"
+        
+        params2 = [musterino]
+        if ilk_tarih and son_tarih:
+            where_date2 = f"AND {_ilkt} >= ? AND {_ilkt} <= ?"
+            params2 += [ilk_tarih.replace("-", ""), son_tarih.replace("-", "")]
+        else:
+            where_date2 = f"AND {left4(_ilkt)} = ?"
+            params2.append(str(yil))
+            
         row2 = conn.execute(f"""
             SELECT COALESCE(SUM({_tutar_cast}), 0) AS toplam
             FROM nakitakis_parametre
             WHERE {_mno} = ?
               AND {_hkod} IN ('770.01', '730.08')
               AND {_gelir} = 'gider'
-              AND {left4(_ilkt)} = ?
-        """, (musterino, str(yil))).fetchone()
+              {where_date2}
+        """, params2).fetchone()
         toplam2 = float(row2["toplam"] or 0)
 
         return {
@@ -197,7 +222,7 @@ def get_kurum_odemeleri(userid: int, musterino: int, yil: Optional[int] = None) 
         conn.close()
 
 
-def get_sanal_pos_toplam(userid: int, musterino: int, yil: Optional[int] = None) -> dict:
+def get_sanal_pos_toplam(userid: int, musterino: int, yil: Optional[int] = None, ilk_tarih: Optional[str] = None, son_tarih: Optional[str] = None) -> dict:
     """
     PayTR Sanal POS toplamları — paytr tablosundan.
     PHP admin.php kartındaki değerlerin karşılığı.
@@ -212,17 +237,24 @@ def get_sanal_pos_toplam(userid: int, musterino: int, yil: Optional[int] = None)
         if not tablo_var:
             return {"islem": 0.0, "odeme": 0.0, "fark_val": 0.0, "son_guncelleme": ""}
 
+        from db.db_compat import tarih_iso_hareketler
+        params = [userid, str(musterino)]
+        if ilk_tarih and son_tarih:
+            where_extra = f"AND ({tarih_iso_hareketler('islemtarihi')} BETWEEN ? AND ?)"
+            params += [ilk_tarih, son_tarih]
+        else:
+            where_extra = "AND SUBSTR(islemtarihi, 7, 4) = ?"
+            params.append(str(yil))
+
         # paytr.musterino TEXT tipinde olduğu için str() ile geçiriyoruz.
-        # islemtarihi 'DD.MM.YYYY' formatında → yıl = SUBSTR(islemtarihi, 7, 4)
-        row = conn.execute(
-            "SELECT "
-            "  COALESCE(SUM(islemtutari), 0) AS islem, "
-            "  COALESCE(SUM(odemetutari), 0) AS odeme "
-            "FROM paytr "
-            "WHERE userid = ? AND musterino = ? "
-            "AND SUBSTR(islemtarihi, 7, 4) = ?",
-            (userid, str(musterino), str(yil))
-        ).fetchone()
+        row = conn.execute(f"""
+            SELECT 
+              COALESCE(SUM(islemtutari), 0) AS islem, 
+              COALESCE(SUM(odemetutari), 0) AS odeme 
+            FROM paytr 
+            WHERE userid = ? AND musterino = ? 
+            {where_extra}
+        """, params).fetchone()
 
         islem = float(row["islem"] or 0)
         odeme = float(row["odeme"] or 0)
@@ -488,20 +520,30 @@ def get_monthly_comparison(
         conn.close()
 
 
-def get_bankalar_toplam(userid: int, musterino: int = 1) -> dict:
+def get_bankalar_toplam(userid: int, musterino: int = 1, yil: Optional[int] = None, ilk_tarih: Optional[str] = None, son_tarih: Optional[str] = None) -> dict:
     """womsis_banka tablosundan gelir/gider/net toplamı döndürür.
     Not: userid filtresi yok — banka hareketleri tüm kullanıcılar için ortak,
     musterino bazlı filtreleme yeterli."""
     conn = get_connection()
     try:
-        row = conn.execute("""
+        params = [musterino]
+        if ilk_tarih and son_tarih:
+            where_extra = "AND (tarih BETWEEN ? AND ?)"
+            params += [ilk_tarih, son_tarih]
+        elif yil:
+            where_extra = f"AND {left4('tarih')} = ?"
+            params.append(str(yil))
+        else:
+            where_extra = ""
+
+        row = conn.execute(f"""
             SELECT
                 COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gelir' THEN tutar ELSE 0 END), 0) AS gelir,
                 COALESCE(SUM(CASE WHEN LOWER(gelirgider)='gider' THEN tutar ELSE 0 END), 0) AS gider,
                 COUNT(*) AS kayit
             FROM womsis_banka
-            WHERE musterino = ?
-        """, (musterino,)).fetchone()
+            WHERE musterino = ? {where_extra}
+        """, params).fetchone()
         gelir = float(row["gelir"] or 0) if row else 0.0
         gider = float(row["gider"] or 0) if row else 0.0
         return {"gelir": gelir, "gider": gider, "net": gelir - gider,
@@ -539,13 +581,13 @@ def get_all_dashboard_data(
         "nakit_kasa":     get_nakit_kasa_toplam(userid, musterino, yil, _ghh=ghh),
         "gider":          get_gider_toplam(userid, musterino, yil, _ghh=ghh),
         "genel_hesap":    get_genel_hesap_toplam(userid, musterino, yil, _ghh=ghh),
-        "faturalar":      get_fatura_toplamlar(userid, musterino, yil),
+        "faturalar":      get_fatura_toplamlar(userid, musterino, yil, ilk_tarih, son_tarih),
         "gider_pusulasi": get_gider_pusulasi(userid, musterino, yil, _ghh=ghh),
         "maas_kira_smm":  get_maaş_kira_smm(userid, musterino, yil, _ghh=ghh),
-        "kurum_odemeleri":get_kurum_odemeleri(userid, musterino, yil),
-        "sanal_pos":      get_sanal_pos_toplam(userid, musterino, yil),
+        "kurum_odemeleri":get_kurum_odemeleri(userid, musterino, yil, ilk_tarih, son_tarih),
+        "sanal_pos":      get_sanal_pos_toplam(userid, musterino, yil, ilk_tarih, son_tarih),
         "kredi_karti":    get_kredi_karti_toplam(userid, musterino, yil, ilk_tarih=ilk_tarih, son_tarih=son_tarih),
-        "bankalar":       get_bankalar_toplam(userid, musterino),
+        "bankalar":       get_bankalar_toplam(userid, musterino, yil, ilk_tarih, son_tarih),
         "monthly_chart":  get_monthly_comparison(userid, musterino, yil,
                                                   ilk_tarih=ilk_tarih, son_tarih=son_tarih),
     }

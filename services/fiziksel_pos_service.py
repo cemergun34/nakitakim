@@ -88,17 +88,40 @@ def _fmt_tl(val: float) -> str:
 
 def _norm_date(val: str) -> Optional[str]:
     """
-    DD.MM.YYYY veya DD.MM.YYYY HH:MM → YYYY-MM-DD karşılaştırma için.
-    PHP'deki STR_TO_DATE(islemTarihi, '%d.%m.%Y') karşılığı.
+    Tarih formatlarını YYYY-MM-DD formatına dönüştürür.
     """
     if not val:
         return None
     s = str(val).strip()
-    for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    
+    # Çoklu format desteği
+    formats = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d",
+    )
+    
+    for fmt in formats:
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
+            
+    # Eğer ISO formatındaysa veya farklı bir formattaysa doğrudan dönmeyi dene
+    if len(s) >= 10 and s[4] == '-' and s[7] == '-':
+        return s[:10]
+        
     return None
 
 
@@ -107,27 +130,43 @@ def _norm_date(val: str) -> Optional[str]:
 #    PHP: womsisSonGuncellemeGoster() → #womsisDashIslem, #womsisDashOdeme, #womsisToplamBadge
 # ---------------------------------------------------------------------------
 
-def get_dashboard_ozet(userid: int, musterino: int) -> dict:
+def get_dashboard_ozet(userid: int, musterino: int, ilk_tarih: str = None, son_tarih: str = None) -> dict:
     """
     womsi_pos tablosundan toplam İşlem ve Net Tutar değerlerini döndürür.
-    PHP: womsisSonGuncellemeGoster() → res.toplam_islem_fmt, res.toplam_net_fmt
+    Tarih filtrelemesi get_hareketler ile birebir aynı olması için Python tarafında yapılır.
     """
     ensure_tables()
     conn = get_connection()
     try:
-        row = conn.execute(
-            "SELECT "
-            "  COALESCE(SUM(islemtutari), 0)       AS toplam_islem, "
-            "  COALESCE(SUM(isyeriucretitutar), 0) AS toplam_isyeri, "
-            "  COALESCE(SUM(nettutar), 0)           AS toplam_net, "
-            "  COUNT(*) AS kayit_sayisi "
-            "FROM womsi_pos WHERE musterino = ? ",
+        # Tüm kayıtları çek (get_hareketler gibi)
+        rows_all = conn.execute(
+            "SELECT islemtutari, isyeriucretitutar, nettutar, islemtarihi "
+            "FROM womsi_pos WHERE musterino = ?",
             (musterino,)
-        ).fetchone()
-        islem  = float(row[0] or 0)
-        isyeri = float(row[1] or 0)
-        net    = float(row[2] or 0)
-        kayit  = int(row[3] or 0)
+        ).fetchall()
+
+        islem  = 0.0
+        isyeri = 0.0
+        net    = 0.0
+        kayit  = 0
+
+        for r in rows_all:
+            islemtarihi_v = r["islemtarihi"]
+            
+            # Eğer tarih filtresi varsa, kontrol et
+            if ilk_tarih and son_tarih:
+                norm = _norm_date(str(islemtarihi_v or ""))
+                if not norm:
+                    continue
+                if norm < ilk_tarih or norm > son_tarih:
+                    continue
+            
+            # Filtreyi geçti (veya filtre yok), toplamlara ekle
+            islem  += float(r["islemtutari"] or 0)
+            isyeri += float(r["isyeriucretitutar"] or 0)
+            net    += float(r["nettutar"] or 0)
+            kayit  += 1
+
         return {
             "success":          True,
             "toplam_islem":     islem,
@@ -141,8 +180,8 @@ def get_dashboard_ozet(userid: int, musterino: int) -> dict:
     except Exception as exc:
         return {
             "success": False, "message": str(exc),
-            "toplam_islem": 0.0, "toplam_net": 0.0,
-            "toplam_islem_fmt": "₺0,00", "toplam_net_fmt": "₺0,00",
+            "toplam_islem": 0.0, "toplam_isyeri": 0.0, "toplam_net": 0.0,
+            "toplam_islem_fmt": "₺0,00", "toplam_isyeri_fmt": "₺0,00", "toplam_net_fmt": "₺0,00",
             "kayit_sayisi": 0,
         }
     finally:

@@ -843,27 +843,7 @@ def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) 
                 tx_id      = str(tx.get('id') or tx.get('transactionId') or '')
                 womsiskey  = f"{account_id}_{tx_id}" if account_id and tx_id else ''
 
-                raw_tarih = str(tx.get('date') or tx.get('transactionDate') or tx.get('valueDate') or '')
-                tarih_iso = None
-                for fmt in ('%Y-%m-%d', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y', '%Y-%m-%dT%H:%M:%S'):
-                    try:
-                        tarih_iso = datetime.strptime(raw_tarih[:len(fmt)], fmt).strftime('%Y-%m-%d')
-                        break
-                    except Exception:
-                        continue
-                if not tarih_iso:
-                    tarih_iso = now.strftime('%Y-%m-%d')
 
-                tutar_raw  = tx.get('amount') or tx.get('tutar') or 0
-                tutar      = abs(float(tutar_raw))
-                debit      = float(tx.get('debit')  or 0)
-                credit     = float(tx.get('credit') or 0)
-                if credit > 0 and debit == 0:
-                    gelirgider = 'gelir'
-                elif debit > 0 and credit == 0:
-                    gelirgider = 'gider'
-                else:
-                    gelirgider = 'gelir' if float(tutar_raw) >= 0 else 'gider'
 
                 # PHP topluWomIsle.php banka ID → isim eşlemesi
                 BANK_ID_MAP = {
@@ -887,14 +867,31 @@ def _save_womsis_to_db(transactions: list, userid: int = 1, musterino: int = 1) 
                     tx.get('date') or tx.get('transactionDate') or tx.get('valueDate') or ''
                 )
                 tarih_iso = None
-                for fmt in ('%d-%m-%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d-%m-%Y', '%Y-%m-%dT%H:%M:%S'):
+                s = raw_tarih.strip()
+                
+                if "T" in s:
+                    if "+" in s:
+                        s = s.split("+")[0]
+                    elif "Z" in s:
+                        s = s.replace("Z", "")
+                    if "." in s:
+                        s = s.split(".")[0]
+                        
+                for fmt in (
+                    '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d',
+                    '%d.%m.%Y %H:%M:%S', '%d.%m.%Y %H:%M', '%d.%m.%Y',
+                    '%d/%m/%Y %H:%M:%S', '%d/%m/%Y %H:%M', '%d/%m/%Y',
+                    '%d-%m-%Y %H:%M:%S', '%d-%m-%Y %H:%M', '%d-%m-%Y',
+                    '%Y-%m-%dT%H:%M:%S'
+                ):
                     try:
-                        tarih_iso = datetime.strptime(raw_tarih[:len(fmt)], fmt).strftime('%Y-%m-%d')
+                        tarih_iso = datetime.strptime(s, fmt).strftime('%Y-%m-%d %H:%M:%S')
                         break
                     except Exception:
                         continue
+                        
                 if not tarih_iso:
-                    tarih_iso = now.strftime('%Y-%m-%d')
+                    tarih_iso = now.strftime('%Y-%m-%d %H:%M:%S')
 
                 tutar_raw  = tx.get('amount') or tx.get('tutar') or 0
                 tutar      = abs(float(tutar_raw))

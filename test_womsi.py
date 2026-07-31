@@ -1,6 +1,3 @@
-from db.database import get_connection
-conn = get_connection()
-try:
-    print(conn.execute("SELECT userid, musterino, COUNT(*) FROM womsi_pos GROUP BY userid, musterino").fetchall())
-except Exception as e:
-    print("ERROR:", e)
+from services.fiziksel_pos_service import get_dashboard_ozet
+res = get_dashboard_ozet(25, 1, "2026-07-01", "2026-07-31")
+print(res)

@@ -484,14 +484,7 @@ class IslemTablosu(QTableWidget):
         xml_path  = row_data.get("xml_dosya")
         fatura_no = row_data.get("faturano") or row_data.get("faturaNo") or "?"
 
-        if not xml_path or str(xml_path).strip().lower() in ("none", "null", ""):
-            QMessageBox.information(
-                self,
-                "Fatura Dosyası Yok",
-                f"Bu fatura ({fatura_no}) sisteme XML olarak yüklenmemiş.\n"
-                "Yalnızca XML ile aktarılan faturalar önizlenebilir."
-            )
-            return
+
 
         xml_bytes = None
 
@@ -507,6 +500,8 @@ class IslemTablosu(QTableWidget):
                 client   = WebAdminClient(base_url=cfg["base_url"], api_key=cfg["api_key"])
                 filename = os.path.basename(xml_path) if xml_path else f"fatura_{fatura_no}.xml"
                 sirket   = row_data.get("sirket") or row_data.get("firmaadi") or ""
+                if not sirket and hasattr(self, "_musterino"):
+                    sirket = f"{int(self._musterino):02d}"
                 temp_path = os.path.join(tempfile.gettempdir(), filename)
                 res = client.download_fatura_xml(filename, temp_path, sirket=sirket)
                 if res.get("success"):
@@ -1048,6 +1043,16 @@ class DetayDialog(QDialog):
         self._tablo = IslemTablosu(tablo_tipi)
         if self._userid is not None:
             self._tablo.set_userid(self._userid)
+            
+        mno = 1
+        p = self.parent()
+        while p:
+            if hasattr(p, "musterino"):
+                mno = getattr(p, "musterino")
+                break
+            p = p.parent()
+        self._tablo._musterino = mno
+        
         dp_layout.addWidget(self._tablo, 1)
 
         self._stack.addWidget(detay_page)

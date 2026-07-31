@@ -875,7 +875,7 @@ class DashboardScreen(QWidget):
 
         self.son_tarih = QDateEdit()
         self.son_tarih.setCalendarPopup(True)
-        self.son_tarih.setDate(QDate.currentDate())
+        self.son_tarih.setDate(QDate(self._yil, 12, 31))
         self.son_tarih.setDisplayFormat("dd.MM.yyyy")
         self.son_tarih.setFixedHeight(34)
         self.son_tarih.setFixedWidth(135)
@@ -1028,8 +1028,11 @@ class DashboardScreen(QWidget):
 
         # Maaş Kira SMM — PHP: #dashMaasKiraSmmmToplam
         # Formül: SUM(ABS(gaytutar - vergkestutar))  her satır için
+        ilk_str = self.ilk_tarih.date().toString("yyyy-MM-dd")
+        son_str = self.son_tarih.date().toString("yyyy-MM-dd")
+        
         from services.vergi_muhtasar_service import get_dashboard_toplam as _mks_toplam
-        mks_r = _mks_toplam(self._userid, musterino=str(self._musterino))
+        mks_r = _mks_toplam(self._userid, musterino=str(self._musterino), yil=self._yil, ilk_tarih=ilk_str, son_tarih=son_str)
         if mks_r.get("success") and mks_r["fark_toplam"] > 0:
             mks_val_str = mks_r["fark_toplam_fmt"]   # '10.853.717,00 ₺'
         else:
@@ -1090,7 +1093,7 @@ class DashboardScreen(QWidget):
         fp_card = self._cards.get("fiziksel_pos")
         if isinstance(fp_card, FizikselPosKPICard):
             from services.fiziksel_pos_service import get_dashboard_ozet
-            fp = get_dashboard_ozet(self._userid, self._musterino)
+            fp = get_dashboard_ozet(self._userid, self._musterino, ilk_tarih=ilk_str, son_tarih=son_str)
             fp_card.set_fiziksel_pos(
                 net_fmt=fp.get("toplam_net_fmt",   "₺0,00"),
                 islem_fmt=fp.get("toplam_islem_fmt", "₺0,00"),
@@ -1249,6 +1252,8 @@ class DashboardScreen(QWidget):
     def _on_yil_changed(self):
         self._yil = self.yil_combo.currentData()
         self.banner.setText(f"FİNANS DURUM BİLGİSİ ( {self._yil} )")
+        self.ilk_tarih.setDate(QDate(self._yil, 1, 1))
+        self.son_tarih.setDate(QDate(self._yil, 12, 31))
         # Kartları yükleniyor moduna al
         for card in self._cards.values():
             card.set_value("Yükleniyor...")
@@ -1905,9 +1910,9 @@ class DashboardScreen(QWidget):
                        islemTipi                       AS "Ödeme Türü",
                        brand                           AS "Kart Markası"
                 FROM womsi_pos
-                WHERE userid=?
+                WHERE musterino=?
                 ORDER BY islemTarihi DESC, id DESC
-            """, (uid,)).fetchall()
+            """, (mno,)).fetchall()
             _n, _g, _gd = _yeni_sheet(
                 title="Fiziksel POS",
                 baslik=f"Fiziksel POS Hareketleri — Tüm Dönem",
@@ -2384,7 +2389,7 @@ class KurumOdemeDialog(QDialog):
         self._ilk_de.setDate(QDate(self._yil, 1, 1))
         self._ilk_de.hide()
         self._son_de = QDateEdit()
-        self._son_de.setDate(QDate.currentDate())
+        self._son_de.setDate(QDate(self._yil, 12, 31))
         self._son_de.hide()
 
         bar.addStretch()
@@ -2532,7 +2537,7 @@ class KurumOdemeDialog(QDialog):
             self._son_de.setDate(QDate(yil, ay, son_gun))
         else:
             self._ilk_de.setDate(QDate(yil, 1, 1))
-            self._son_de.setDate(QDate.currentDate())
+            self._son_de.setDate(QDate(yil, 12, 31))
         self._ay_degisiyor = False
         # Dönem değişince hemen yükle (filtre butonu yok)
         self._load()
@@ -4434,7 +4439,7 @@ class KrediKartiDialog(QDialog):
         self._son_de.setDisplayFormat("dd.MM.yyyy")
         self._son_de.setFixedSize(130, 30)
         self._son_de.setStyleSheet(self._DES)
-        self._son_de.setDate(QDate.currentDate())
+        self._son_de.setDate(QDate(self._yil, 12, 31))
         filtre_lay.addWidget(self._son_de)
 
         filtre_lay.addStretch()
@@ -4543,7 +4548,7 @@ class KrediKartiDialog(QDialog):
             self._son_de.setDate(QDate(yil, ay, son_gun))
         else:
             self._ilk_de.setDate(QDate(yil, 1, 1))
-            self._son_de.setDate(QDate.currentDate())
+            self._son_de.setDate(QDate(yil, 12, 31))
         if self._secili_banka:
             self._load_ekstre()
 
@@ -5687,6 +5692,17 @@ class FizikselPosDialog(QDialog):
         )
         self._listele_btn.clicked.connect(self._load)
         fr.addWidget(self._listele_btn)
+
+        self._excel_btn = QPushButton("📥 Excel İndir")
+        self._excel_btn.setFixedHeight(30)
+        self._excel_btn.setStyleSheet(
+            "QPushButton{background:#198754;color:white;border:none;"
+            "border-radius:4px;font-size:12px;font-weight:700;padding:0 12px;}"
+            "QPushButton:hover{background:#157347;}"
+        )
+        self._excel_btn.clicked.connect(self._export_excel)
+        fr.addWidget(self._excel_btn)
+
         fr.addStretch()
         tl.addLayout(fr)
         root.addWidget(top)
@@ -5875,6 +5891,167 @@ class FizikselPosDialog(QDialog):
             empty.setForeground(QColor("#6c757d"))
             self._tbl.setItem(0, 0, empty)
             self._tbl.setSpan(0, 0, 1, len(self.SUTUNLAR))
+
+    def _export_excel(self):
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        if not getattr(self, "_rows", None):
+            QMessageBox.warning(self, "Hata", "Dışa aktarılacak veri bulunamadı.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Excel Olarak Kaydet", "fiziksel_pos_raporu.xlsx", "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Fiziksel Pos"
+
+            # Excel Stylings
+            font_title = Font(name="Segoe UI", size=14, bold=True, color="FF1A3A5C")
+            font_subtitle = Font(name="Segoe UI", size=9, italic=True, color="FF4B5563")
+            font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFFFF")
+            font_data = Font(name="Segoe UI", size=10, color="FF1F2937")
+            font_total = Font(name="Segoe UI", size=11, bold=True, color="FF1A3A5C")
+
+            fill_header = PatternFill(start_color="FF1A3A5C", end_color="FF1A3A5C", fill_type="solid")
+            fill_total = PatternFill(start_color="FFF1F5F9", end_color="FFF1F5F9", fill_type="solid")
+
+            border_thin = Border(
+                left=Side(style="thin", color="FFE5E7EB"),
+                right=Side(style="thin", color="FFE5E7EB"),
+                top=Side(style="thin", color="FFE5E7EB"),
+                bottom=Side(style="thin", color="FFE5E7EB")
+            )
+            border_total = Border(
+                top=Side(style="thin", color="FF94A3B8"),
+                bottom=Side(style="double", color="FF1A3A5C")
+            )
+
+            # Title
+            ws.merge_cells('A1:I1')
+            title_cell = ws['A1']
+            title_cell.value = "🏪 Fiziksel Pos Hareketleri"
+            title_cell.font = font_title
+            title_cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[1].height = 25
+
+            # Subtitle (Date range)
+            ws.merge_cells('A2:I2')
+            sub_cell = ws['A2']
+            ilk_qd = self._ilk_de.date()
+            son_qd = self._son_de.date()
+            sub_cell.value = f"Tarih Aralığı: {ilk_qd.toString('dd.MM.yyyy')} - {son_qd.toString('dd.MM.yyyy')}"
+            sub_cell.font = font_subtitle
+            sub_cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[2].height = 15
+
+            # Summary Totals in Header
+            ws.merge_cells('A3:I3')
+            sub2_cell = ws['A3']
+            tot_islem = sum(float(r.get("islemtutari") or 0) for r in self._rows)
+            tot_isyeri = sum(float(r.get("isyeritutar") or 0) for r in self._rows)
+            tot_net = sum(float(r.get("nettutar") or 0) for r in self._rows)
+            sub2_cell.value = f"Toplam İşlem: ₺{tot_islem:,.2f}  |  Toplam İşyeri Ücreti: ₺{tot_isyeri:,.2f}  |  Toplam Net: ₺{tot_net:,.2f}"
+            font_totals_header = Font(name="Segoe UI", size=10, bold=True, color="FF1A3A5C")
+            sub2_cell.font = font_totals_header
+            sub2_cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[3].height = 20
+
+            # Headers
+            headers = [s[0] for s in self.SUTUNLAR]
+            for col_num, h_text in enumerate(headers, 1):
+                cell = ws.cell(row=5, column=col_num)
+                cell.value = h_text
+                cell.font = font_header
+                cell.fill = fill_header
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border_thin
+
+            ws.row_dimensions[5].height = 20
+
+            # Data
+            row_idx = 6
+            for row_dict in self._rows:
+                for col_idx, (_, field, _, align) in enumerate(self.SUTUNLAR, 1):
+                    val = row_dict.get(field, "")
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    
+                    if field in ("islemtutari", "isyeritutar", "nettutar"):
+                        try:
+                            val_f = float(val or 0)
+                        except:
+                            val_f = 0.0
+                        cell.value = val_f
+                        cell.number_format = '#,##0.00'
+                        align_h = "right"
+                    else:
+                        cell.value = str(val) if val is not None else ""
+                        align_h = "center" if "Center" in str(align) else "left"
+
+                    cell.font = font_data
+                    cell.alignment = Alignment(horizontal=align_h, vertical="center")
+                    cell.border = border_thin
+                row_idx += 1
+
+            # Totals
+            ws.merge_cells(f'A{row_idx}:C{row_idx}')
+            tot_label = ws.cell(row=row_idx, column=1)
+            tot_label.value = "TOPLAM"
+            tot_label.font = font_total
+            tot_label.fill = fill_total
+            tot_label.alignment = Alignment(horizontal="right", vertical="center")
+            tot_label.border = border_total
+
+            for col in range(1, 4):
+                ws.cell(row=row_idx, column=col).border = border_total
+                ws.cell(row=row_idx, column=col).fill = fill_total
+
+            for col_idx, (_, field, _, _) in enumerate(self.SUTUNLAR, 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                if field == "islemtutari":
+                    cell.value = sum(float(r.get(field) or 0) for r in self._rows)
+                    cell.number_format = '#,##0.00'
+                    cell.font = font_total
+                    cell.fill = fill_total
+                    cell.border = border_total
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                elif field == "isyeritutar":
+                    cell.value = sum(float(r.get(field) or 0) for r in self._rows)
+                    cell.number_format = '#,##0.00'
+                    cell.font = font_total
+                    cell.fill = fill_total
+                    cell.border = border_total
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                elif field == "nettutar":
+                    cell.value = sum(float(r.get(field) or 0) for r in self._rows)
+                    cell.number_format = '#,##0.00'
+                    cell.font = font_total
+                    cell.fill = fill_total
+                    cell.border = border_total
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                elif col_idx > 3:
+                    cell.value = ""
+                    cell.fill = fill_total
+                    cell.border = border_total
+
+            ws.row_dimensions[row_idx].height = 25
+
+            # Auto-fit columns
+            for i, (_, _, width, _) in enumerate(self.SUTUNLAR, 1):
+                letter = get_column_letter(i)
+                ws.column_dimensions[letter].width = max(12, width / 7)
+
+            wb.save(path)
+            QMessageBox.information(self, "Başarılı", "Excel dosyası başarıyla kaydedildi.")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Excel kaydedilirken hata oluştu:\n{e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Maaş Kira Smm Dialog

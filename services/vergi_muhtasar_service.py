@@ -68,13 +68,14 @@ def _parse_decimal(val: str) -> Optional[float]:
 # Okuma  (PHP vergiMuhtasarGetir.php karşılığı)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "", yil: int = None) -> dict:
+def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "", yil: int = None, ilk_tarih: str = None, son_tarih: str = None) -> dict:
     """
     Kullanıcıya ait Vergi Muhtasar kayıtlarını döndürür.
 
     PHP'deki davranışla birebir:
     - donem parametresi varsa filtrelenir
     - yil parametresi varsa o yıla ait kayıtlar filtrelenir
+    - ilk_tarih/son_tarih varsa döneme göre (Python'da) filtrelenir
     - Distinct dönem listesi de döndürülür
     - Her satır için fark = gaytutar - vergkestutar hesaplanır
     - Döndürülen sözlük: { 'success': bool, 'data': [...], 'donemler': [...] }
@@ -101,6 +102,11 @@ def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "", yil:
             yil_suffix = str(yil)[-2:]
             where += " AND donem LIKE ?"
             params.append(f"%.{yil_suffix}")
+        elif ilk_tarih and not donem and not yil:
+            # fetch for the year from ilk_tarih to be safe
+            yil_suffix = ilk_tarih[2:4]
+            where += " AND donem LIKE ?"
+            params.append(f"%.{yil_suffix}")
 
         sql  = (f"SELECT id, hesapkodu, ack, donem, gaytutar, vergkestutar "
                 f"FROM {TABLE} {where} ORDER BY donem, hesapkodu")
@@ -110,7 +116,25 @@ def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "", yil:
         verg_toplam = 0.0
         fark_toplam = 0.0
         data = []
+        
+        ay_map = {"Oca": 1, "Şub": 2, "Mar": 3, "Nis": 4, "May": 5, "Haz": 6, 
+                  "Tem": 7, "Ağu": 8, "Eyl": 9, "Eki": 10, "Kas": 11, "Ara": 12}
+                  
         for r in rows:
+            if ilk_tarih and son_tarih and not donem:
+                d_str = r["donem"]
+                try:
+                    a_str, y_str = d_str.split('.')
+                    d_ay = ay_map.get(a_str, 1)
+                    d_yil = 2000 + int(y_str)
+                    d_cmp = f"{d_yil}-{d_ay:02d}"
+                    i_cmp = ilk_tarih[:7]
+                    s_cmp = son_tarih[:7]
+                    if not (i_cmp <= d_cmp <= s_cmp):
+                        continue
+                except Exception:
+                    pass
+                    
             gay  = float(r["gaytutar"]     or 0)
             verg = float(r["vergkestutar"] or 0)
             fark = gay - verg
@@ -151,12 +175,12 @@ def get_vergi_muhtasar(userid: int, musterino: str = None, donem: str = "", yil:
         conn.close()
 
 
-def get_dashboard_toplam(userid: int, musterino: str = None, yil: int = None) -> dict:
+def get_dashboard_toplam(userid: int, musterino: str = None, yil: int = None, ilk_tarih: str = None, son_tarih: str = None) -> dict:
     """
     PHP: initMaasKiraSmmmCard() → #dashMaasKiraSmmmToplam
     Formül: farkToplam += Math.abs(gay - verg)  (her satır için, NULL→0)
     """
-    r = get_vergi_muhtasar(userid, musterino=musterino, yil=yil)
+    r = get_vergi_muhtasar(userid, musterino=musterino, yil=yil, ilk_tarih=ilk_tarih, son_tarih=son_tarih)
     if not r.get("success"):
         return {"success": False, "fark_toplam": 0.0, "fark_toplam_fmt": "₺0,00"}
 
