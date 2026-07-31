@@ -654,18 +654,18 @@ class WomsisPosIsleWorker(QThread):
 
                             # PHP: $tx['gross_amount'], $tx['commission'], $tx['net_amount']
                             try:
-                                islemtutari = round(abs(float(
+                                islemtutari = -round(float(
                                     tx.get("gross_amount") or tx.get("amount") or
                                     tx.get("islemTutari")  or 0
-                                )), 2)
-                                isyeriucretitutar = round(abs(float(
+                                ), 2)
+                                isyeriucretitutar = -round(float(
                                     tx.get("commission")        or tx.get("commissionAmount") or
                                     tx.get("isyeriUcretiTutar") or tx.get("fee") or 0
-                                )), 2)
-                                nettutar = round(abs(float(
+                                ), 2)
+                                nettutar = -round(float(
                                     tx.get("net_amount") or tx.get("netAmount") or
                                     tx.get("netTutar")   or tx.get("net") or 0
-                                )), 2)
+                                ), 2)
                             except (ValueError, TypeError):
                                 islemtutari = isyeriucretitutar = nettutar = 0.0
 
